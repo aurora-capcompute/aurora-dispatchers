@@ -15,11 +15,17 @@ type InternetReader interface {
 	Read(context.Context, internet.ReadRequest) (internet.ReadResponse, error)
 }
 
+type Handler interface {
+	Handles(name string) bool
+	DispatchCall(ctx context.Context, call dispatcher.Call) (dispatcher.Outcome, error)
+}
+
 type Config struct {
 	LLM                     llm.Client
 	Internet                InternetReader
 	InternetRequireApproval bool
 	MCP                     []*mcp.Handler
+	Handlers                []Handler
 	Capabilities            []dispatcher.Capability
 }
 
@@ -75,6 +81,11 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call)
 
 	default:
 		for _, handler := range d.MCP {
+			if handler.Handles(call.Name) {
+				return handler.DispatchCall(ctx, call)
+			}
+		}
+		for _, handler := range d.Handlers {
 			if handler.Handles(call.Name) {
 				return handler.DispatchCall(ctx, call)
 			}
