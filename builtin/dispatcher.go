@@ -2,7 +2,6 @@ package builtin
 
 import (
 	"aurora-dispatchers/internet"
-	"aurora-dispatchers/llm"
 	"aurora-dispatchers/mcp"
 	"aurora-dispatchers/resolution"
 	"capcompute/dispatcher"
@@ -21,7 +20,6 @@ type Handler interface {
 }
 
 type Config struct {
-	LLM                     llm.Client
 	Internet                InternetReader
 	InternetRequireApproval bool
 	MCP                     []*mcp.Handler
@@ -40,23 +38,6 @@ func New[K any](config Config) dispatcher.Dispatcher[K] {
 
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call) (dispatcher.Outcome, error) {
 	switch call.Name {
-	case "llm.chat":
-		if d.LLM == nil {
-			return dispatcher.Failed("llm client is not configured"), nil
-		}
-		var request llm.ChatRequest
-		if err := json.Unmarshal(call.Args, &request); err != nil {
-			return dispatcher.Failed(fmt.Sprintf("decode llm.chat request: %v", err)), nil
-		}
-		response, err := d.LLM.Chat(ctx, request)
-		if err != nil {
-			if ctx.Err() != nil {
-				return dispatcher.Outcome{}, ctx.Err()
-			}
-			return dispatcher.Failed(err.Error()), nil
-		}
-		return marshalResult(response)
-
 	case "internet.read":
 		if d.Internet == nil {
 			return dispatcher.Failed("internet reader is not configured"), nil

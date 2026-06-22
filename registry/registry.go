@@ -3,7 +3,6 @@ package registry
 import (
 	"aurora-dispatchers/builtin"
 	"aurora-dispatchers/internet"
-	"aurora-dispatchers/llm"
 	"aurora-dispatchers/mcp"
 	"bytes"
 	"capcompute/dispatcher"
@@ -16,7 +15,6 @@ import (
 )
 
 type Services struct {
-	LLM        llm.Client
 	MCPServers map[string]mcp.ServerConfig
 }
 
@@ -67,7 +65,7 @@ func (r *Registry) IsSubset(name string, parent, child json.RawMessage) error {
 }
 
 func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (builtin.Config, error) {
-	config := builtin.Config{LLM: services.LLM}
+	var config builtin.Config
 	for _, entry := range entries {
 		var selected Registration
 		for _, registration := range r.registrations {
