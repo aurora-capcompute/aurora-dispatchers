@@ -5,6 +5,7 @@ import (
 	"aurora-dispatchers/internet"
 	"aurora-dispatchers/llm"
 	"aurora-dispatchers/mcp"
+	"bytes"
 	"capcompute/dispatcher"
 	"context"
 	"encoding/json"
@@ -23,6 +24,10 @@ type Registration interface {
 	Matches(string) bool
 	Normalize(string, json.RawMessage) (json.RawMessage, error)
 	Configure(context.Context, string, json.RawMessage, Services, *builtin.Config) error
+}
+
+type SubsetValidator interface {
+	IsSubset(name string, parent, child json.RawMessage) error
 }
 
 type Registry struct {
@@ -44,6 +49,21 @@ func (r *Registry) Normalize(name string, settings json.RawMessage) (json.RawMes
 		}
 	}
 	return nil, fmt.Errorf("unsupported dispatcher %q", name)
+}
+
+func (r *Registry) IsSubset(name string, parent, child json.RawMessage) error {
+	for _, registration := range r.registrations {
+		if registration.Matches(name) {
+			if validator, ok := registration.(SubsetValidator); ok {
+				return validator.IsSubset(name, parent, child)
+			}
+			if !bytes.Equal(parent, child) {
+				return fmt.Errorf("capability %q does not support subset validation; settings must be identical", name)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported dispatcher %q", name)
 }
 
 func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (builtin.Config, error) {
@@ -111,6 +131,37 @@ func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMe
 	return json.Marshal(settings)
 }
 
+func (InternetRegistration) IsSubset(_ string, parent, child json.RawMessage) error {
+	var parentSettings, childSettings InternetSettings
+	if err := json.Unmarshal(parent, &parentSettings); err != nil {
+		return fmt.Errorf("decode parent settings: %w", err)
+	}
+	if err := json.Unmarshal(child, &childSettings); err != nil {
+		return fmt.Errorf("decode child settings: %w", err)
+	}
+	if len(parentSettings.Allow) > 0 {
+		allowed := make(map[string]struct{}, len(parentSettings.Allow))
+		for _, origin := range parentSettings.Allow {
+			allowed[origin] = struct{}{}
+		}
+		hasWildcard := false
+		for _, origin := range parentSettings.Allow {
+			if origin == "*" {
+				hasWildcard = true
+				break
+			}
+		}
+		if !hasWildcard {
+			for _, origin := range childSettings.Allow {
+				if _, ok := allowed[origin]; !ok {
+					return fmt.Errorf("child origin %q is not in parent's allowed origins", origin)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (InternetRegistration) Configure(
 	_ context.Context,
 	_ string,
@@ -172,6 +223,31 @@ func (MCPRegistration) Normalize(name string, raw json.RawMessage) (json.RawMess
 		return nil, errors.New("server_id is required")
 	}
 	return json.Marshal(settings)
+}
+
+func (MCPRegistration) IsSubset(_ string, parent, child json.RawMessage) error {
+	var parentSettings, childSettings MCPSettings
+	if err := json.Unmarshal(parent, &parentSettings); err != nil {
+		return fmt.Errorf("decode parent settings: %w", err)
+	}
+	if err := json.Unmarshal(child, &childSettings); err != nil {
+		return fmt.Errorf("decode child settings: %w", err)
+	}
+	if parentSettings.ServerID != childSettings.ServerID {
+		return fmt.Errorf("child server_id %q differs from parent %q", childSettings.ServerID, parentSettings.ServerID)
+	}
+	if len(parentSettings.Tools) > 0 && len(childSettings.Tools) > 0 {
+		allowed := make(map[string]struct{}, len(parentSettings.Tools))
+		for _, tool := range parentSettings.Tools {
+			allowed[tool] = struct{}{}
+		}
+		for _, tool := range childSettings.Tools {
+			if _, ok := allowed[tool]; !ok {
+				return fmt.Errorf("child tool %q is not in parent's allowed tools", tool)
+			}
+		}
+	}
+	return nil
 }
 
 func (MCPRegistration) Configure(
