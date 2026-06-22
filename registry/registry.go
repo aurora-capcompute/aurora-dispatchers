@@ -275,3 +275,24 @@ func (MCPRegistration) Configure(
 	config.Capabilities = append(config.Capabilities, handler.Capabilities()...)
 	return nil
 }
+
+type AuroraLogRegistration struct{}
+
+func (AuroraLogRegistration) Matches(name string) bool { return name == "aurora.log" }
+
+func (AuroraLogRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return raw, nil
+}
+
+func (AuroraLogRegistration) Configure(
+	_ context.Context,
+	_ string,
+	_ json.RawMessage,
+	_ Services,
+	_ *builtin.Config,
+) error {
+	return nil
+}
