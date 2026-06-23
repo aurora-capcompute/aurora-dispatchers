@@ -4,6 +4,7 @@ import (
 	"aurora-dispatchers/builtin"
 	"aurora-dispatchers/internet"
 	"aurora-dispatchers/mcp"
+	"aurora-dispatchers/timer"
 	"bytes"
 	"capcompute/dispatcher"
 	"context"
@@ -37,7 +38,7 @@ func New(registrations ...Registration) *Registry {
 }
 
 func Default() *Registry {
-	return New(InternetRegistration{}, MCPRegistration{})
+	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{})
 }
 
 func (r *Registry) Normalize(name string, settings json.RawMessage) (json.RawMessage, error) {
@@ -294,5 +295,56 @@ func (AuroraLogRegistration) Configure(
 	_ Services,
 	_ *builtin.Config,
 ) error {
+	return nil
+}
+
+type TimerSettings struct {
+	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
+}
+
+type TimerRegistration struct{}
+
+func (TimerRegistration) Matches(name string) bool { return name == timer.Capability }
+
+func (TimerRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
+	settings := TimerSettings{
+		MaxDurationMS: int64(timer.DefaultMaxDuration / time.Millisecond),
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			return nil, err
+		}
+	}
+	if settings.MaxDurationMS <= 0 {
+		return nil, fmt.Errorf("max_duration_ms must be positive")
+	}
+	return json.Marshal(settings)
+}
+
+func (TimerRegistration) Configure(
+	_ context.Context,
+	_ string,
+	raw json.RawMessage,
+	_ Services,
+	config *builtin.Config,
+) error {
+	normalized, err := (TimerRegistration{}).Normalize("timer.set", raw)
+	if err != nil {
+		return err
+	}
+	var settings TimerSettings
+	if err := json.Unmarshal(normalized, &settings); err != nil {
+		return err
+	}
+	maxDuration := time.Duration(settings.MaxDurationMS) * time.Millisecond
+	config.Handlers = append(config.Handlers, timer.Handler{MaxDuration: maxDuration})
+	config.Capabilities = append(config.Capabilities, dispatcher.Capability{
+		Name: timer.Capability,
+		Description: fmt.Sprintf(
+			"Set a relative timer and be replayed when it fires. The run pauses until the duration elapses, then continues. Maximum %s.",
+			maxDuration,
+		),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`),
+	})
 	return nil
 }
