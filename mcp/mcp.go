@@ -89,19 +89,19 @@ func NewHandler(ctx context.Context, config ServerConfig, allowedTools []string)
 	return out, nil
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call) (dispatcher.Outcome, error) {
-	return d.DispatchCall(ctx, call)
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
+	return d.DispatchCall(ctx, call, auth)
 }
 
-func (d *Handler) DispatchCall(ctx context.Context, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (d *Handler) DispatchCall(ctx context.Context, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	tool, ok := d.tools[call.Name]
 	if !ok {
-		return dispatcher.Failed("unknown MCP tool: " + call.Name), nil
+		return dispatcher.Fail("unknown MCP tool: " + call.Name), nil
 	}
 	var arguments any = map[string]any{}
 	if len(call.Args) > 0 {
 		if err := json.Unmarshal(call.Args, &arguments); err != nil {
-			return dispatcher.Failed("decode MCP arguments: " + err.Error()), nil
+			return dispatcher.Fail("decode MCP arguments: " + err.Error()), nil
 		}
 	}
 	session, err := start(ctx, d.config)
@@ -109,7 +109,7 @@ func (d *Handler) DispatchCall(ctx context.Context, call dispatcher.Call) (dispa
 		if ctx.Err() != nil {
 			return dispatcher.Outcome{}, ctx.Err()
 		}
-		return dispatcher.Failed(err.Error()), nil
+		return dispatcher.Fail(err.Error()), nil
 	}
 	defer session.Close()
 	result, err := session.callTool(ctx, tool.Name, arguments)
@@ -117,7 +117,7 @@ func (d *Handler) DispatchCall(ctx context.Context, call dispatcher.Call) (dispa
 		if ctx.Err() != nil {
 			return dispatcher.Outcome{}, ctx.Err()
 		}
-		return dispatcher.Failed(err.Error()), nil
+		return dispatcher.Fail(err.Error()), nil
 	}
 	return dispatcher.Result(result), nil
 }

@@ -28,7 +28,7 @@ func TestStdioDiscoveryAndCall(t *testing.T) {
 	}
 	outcome, err := value.Dispatch(context.Background(), "run", dispatcher.Call{
 		Name: "mcp.demo.echo", Args: json.RawMessage(`{"text":"hello"}`),
-	})
+	}, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

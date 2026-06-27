@@ -3,7 +3,6 @@ package builtin
 import (
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
-	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
@@ -16,7 +15,7 @@ type InternetReader interface {
 
 type Handler interface {
 	Handles(name string) bool
-	DispatchCall(ctx context.Context, call dispatcher.Call) (dispatcher.Outcome, error)
+	DispatchCall(ctx context.Context, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error)
 }
 
 type Config struct {
@@ -39,18 +38,18 @@ func (d *Dispatcher[K]) Capabilities() []dispatcher.Capability {
 	return d.Config.Capabilities
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	switch call.Name {
 	case "internet.read":
 		if d.Internet == nil {
-			return dispatcher.Failed("internet reader is not configured"), nil
+			return dispatcher.Fail("internet reader is not configured"), nil
 		}
 		var request internet.ReadRequest
 		if err := json.Unmarshal(call.Args, &request); err != nil {
-			return dispatcher.Failed(fmt.Sprintf("decode internet.read request: %v", err)), nil
+			return dispatcher.Fail(fmt.Sprintf("decode internet.read request: %v", err)), nil
 		}
 		if d.InternetRequireApproval {
-			if resolved, ok := resolution.FromContext(ctx); !ok || resolved.Decision != resolution.Approved {
+			if auth.Decision != dispatcher.Approved {
 				return dispatcher.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
 			}
 		}
@@ -59,22 +58,22 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call)
 			if ctx.Err() != nil {
 				return dispatcher.Outcome{}, ctx.Err()
 			}
-			return dispatcher.Failed(err.Error()), nil
+			return dispatcher.Fail(err.Error()), nil
 		}
 		return marshalResult(response)
 
 	default:
 		for _, handler := range d.MCP {
 			if handler.Handles(call.Name) {
-				return handler.DispatchCall(ctx, call)
+				return handler.DispatchCall(ctx, call, auth)
 			}
 		}
 		for _, handler := range d.Handlers {
 			if handler.Handles(call.Name) {
-				return handler.DispatchCall(ctx, call)
+				return handler.DispatchCall(ctx, call, auth)
 			}
 		}
-		return dispatcher.Failed("unknown call: " + call.Name), nil
+		return dispatcher.Fail("unknown call: " + call.Name), nil
 	}
 }
 

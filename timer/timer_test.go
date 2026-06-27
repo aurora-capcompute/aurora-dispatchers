@@ -15,7 +15,7 @@ func dispatch(t *testing.T, h timer.Handler, args string) dispatcher.Outcome {
 	outcome, err := h.DispatchCall(context.Background(), dispatcher.Call{
 		Name: "timer.set",
 		Args: json.RawMessage(args),
-	})
+	}, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

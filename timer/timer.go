@@ -41,20 +41,20 @@ func (Handler) Handles(name string) bool { return name == Capability }
 
 // DispatchCall validates the request and yields a durable task. A valid call
 // always yields; invalid input fails immediately so the agent gets feedback.
-func (h Handler) DispatchCall(_ context.Context, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (h Handler) DispatchCall(_ context.Context, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	var request SetRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
-		return dispatcher.Failed(fmt.Sprintf("decode timer.set request: %v", err)), nil
+		return dispatcher.Fail(fmt.Sprintf("decode timer.set request: %v", err)), nil
 	}
 	if request.DurationSeconds <= 0 {
-		return dispatcher.Failed("duration_seconds must be positive"), nil
+		return dispatcher.Fail("duration_seconds must be positive"), nil
 	}
 	max := h.MaxDuration
 	if max <= 0 {
 		max = DefaultMaxDuration
 	}
 	if time.Duration(request.DurationSeconds)*time.Second > max {
-		return dispatcher.Failed(fmt.Sprintf("duration_seconds must be at most %d", int64(max/time.Second))), nil
+		return dispatcher.Fail(fmt.Sprintf("duration_seconds must be at most %d", int64(max/time.Second))), nil
 	}
 	duration := time.Duration(request.DurationSeconds) * time.Second
 	if request.Label != "" {
