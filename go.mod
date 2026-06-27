@@ -3,7 +3,7 @@ module github.com/aurora-capcompute/aurora-dispatchers
 go 1.26
 
 
-require github.com/aurora-capcompute/capcompute v0.0.0-20260627160303-6c82e54b88e6
+require github.com/aurora-capcompute/capcompute v0.0.0-20260627160800-56f5cccd9f34
 
 require (
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
