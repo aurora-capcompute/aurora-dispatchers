@@ -9,9 +9,13 @@ remain owned by Aurora.
 
 Packages:
 
-- `builtin`: capability dispatcher for LLM, internet, and registered MCP tools.
+- `builtin`: capability dispatcher for internet reads, registered MCP tools, and
+  injected capability handlers.
 - `internet`: bounded allowlisted HTTP GET client.
-- `llm`: fake and OpenAI-compatible chat clients.
 - `mcp`: stdio MCP discovery and tool calls.
+- `registry`: assembles the built-in dispatchers and their capability schemas.
+- `timer`: the `timer.set` durable-wait capability.
 - `resolution`: context passed to a dispatcher after Aurora resolves a
   webhook task.
+
+LLM chat clients live in the separate `aurora-dispatchers-llm` module.
