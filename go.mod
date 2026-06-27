@@ -1,10 +1,9 @@
-module aurora-dispatchers
+module github.com/aurora-capcompute/aurora-dispatchers
 
 go 1.26
 
-replace capcompute => ../capcompute
 
-require capcompute v0.0.0-00010101000000-000000000000
+require github.com/aurora-capcompute/capcompute v0.0.0-00010101000000-000000000000
 
 require (
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect

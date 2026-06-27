@@ -1,9 +1,9 @@
 package mcp_test
 
 import (
-	"aurora-dispatchers/mcp"
+	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
 	"bufio"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"

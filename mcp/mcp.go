@@ -2,7 +2,7 @@ package mcp
 
 import (
 	"bufio"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"
@@ -123,7 +123,7 @@ func (d *Handler) DispatchCall(ctx context.Context, call dispatcher.Call) (dispa
 }
 
 func (d *Handler) Capabilities() []dispatcher.Capability {
-	return append([]dispatcher.Capability(nil), d.capabilities...)
+	return d.capabilities
 }
 
 func (d *Handler) Handles(name string) bool {

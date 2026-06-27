@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"aurora-dispatchers/internet"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 )
 
 func TestAllowedGETSucceeds(t *testing.T) {

@@ -1,10 +1,10 @@
 package builtin
 
 import (
-	"aurora-dispatchers/internet"
-	"aurora-dispatchers/mcp"
-	"aurora-dispatchers/resolution"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
+	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
+	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,8 +32,11 @@ type Dispatcher[K any] struct {
 }
 
 func New[K any](config Config) dispatcher.Dispatcher[K] {
-	next := &Dispatcher[K]{Config: config}
-	return dispatcher.WithCapabilities[K](next, config.Capabilities)
+	return &Dispatcher[K]{Config: config}
+}
+
+func (d *Dispatcher[K]) Capabilities() []dispatcher.Capability {
+	return d.Config.Capabilities
 }
 
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call) (dispatcher.Outcome, error) {

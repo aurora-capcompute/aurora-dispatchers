@@ -1,13 +1,13 @@
 package timer_test
 
 import (
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"testing"
 	"time"
 
-	"aurora-dispatchers/timer"
+	"github.com/aurora-capcompute/aurora-dispatchers/timer"
 )
 
 func dispatch(t *testing.T, h timer.Handler, args string) dispatcher.Outcome {

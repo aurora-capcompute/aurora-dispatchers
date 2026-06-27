@@ -1,12 +1,12 @@
 package registry
 
 import (
-	"aurora-dispatchers/builtin"
-	"aurora-dispatchers/internet"
-	"aurora-dispatchers/mcp"
-	"aurora-dispatchers/timer"
+	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
+	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
+	"github.com/aurora-capcompute/aurora-dispatchers/timer"
 	"bytes"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"
