@@ -1,16 +1,16 @@
 package registry
 
 import (
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
-	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
-	"github.com/aurora-capcompute/aurora-dispatchers/timer"
 	"bytes"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
+	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
+	"github.com/aurora-capcompute/aurora-dispatchers/timer"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"strings"
 	"time"
 )
@@ -27,6 +27,25 @@ type Registration interface {
 
 type SubsetValidator interface {
 	IsSubset(name string, parent, child json.RawMessage) error
+}
+
+// CognitionRegistration is an optional interface for registrations that drive
+// the agent's reasoning rather than exposing an operational tool. Capabilities
+// matched by a CognitionRegistration are kept dispatchable by the runtime but
+// hidden from the brain's operational tool list via the manifest Hidden flag.
+type CognitionRegistration interface {
+	IsCognition() bool
+}
+
+func (r *Registry) IsCognition(name string) bool {
+	for _, registration := range r.registrations {
+		if registration.Matches(name) {
+			if cr, ok := registration.(CognitionRegistration); ok {
+				return cr.IsCognition()
+			}
+		}
+	}
+	return false
 }
 
 type Registry struct {
