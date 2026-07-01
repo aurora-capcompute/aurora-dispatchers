@@ -57,11 +57,11 @@ func TestInvalidJSONFails(t *testing.T) {
 }
 
 func TestHandles(t *testing.T) {
-	h := timer.Handler{}
-	if !h.Handles("timer.set") {
-		t.Fatal("should handle timer.set")
+	h := timer.Handler{Name: "myTimer"}
+	if !h.Handles("myTimer") {
+		t.Fatal("should handle its local name myTimer")
 	}
-	if h.Handles("internet.read") {
-		t.Fatal("should not handle internet.read")
+	if h.Handles("timer.set") || h.Handles("core.timer") {
+		t.Fatal("should route by local name, not the type or old fixed capability name")
 	}
 }

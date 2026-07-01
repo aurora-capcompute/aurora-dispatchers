@@ -1,7 +1,6 @@
 package registry
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,33 +18,13 @@ type Services struct {
 	MCPServers map[string]mcp.ServerConfig
 }
 
+// Registration builds a leaf I/O dispatcher for one tool `type`. A registration
+// is selected by `type`; the capability it publishes and the handler it binds
+// are keyed by the tool's local `name`, which is what the brain dispatches to.
 type Registration interface {
-	Matches(string) bool
-	Normalize(string, json.RawMessage) (json.RawMessage, error)
-	Configure(context.Context, string, json.RawMessage, Services, *builtin.Config) error
-}
-
-type SubsetValidator interface {
-	IsSubset(name string, parent, child json.RawMessage) error
-}
-
-// CognitionRegistration is an optional interface for registrations that drive
-// the agent's reasoning rather than exposing an operational tool. Capabilities
-// matched by a CognitionRegistration are kept dispatchable by the runtime but
-// hidden from the brain's operational tool list via the manifest Hidden flag.
-type CognitionRegistration interface {
-	IsCognition() bool
-}
-
-func (r *Registry) IsCognition(name string) bool {
-	for _, registration := range r.registrations {
-		if registration.Matches(name) {
-			if cr, ok := registration.(CognitionRegistration); ok {
-				return cr.IsCognition()
-			}
-		}
-	}
-	return false
+	Matches(toolType string) bool
+	Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error)
+	Configure(ctx context.Context, name string, settings json.RawMessage, services Services, config *builtin.Config) error
 }
 
 type Registry struct {
@@ -60,28 +39,23 @@ func Default() *Registry {
 	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{})
 }
 
-func (r *Registry) Normalize(name string, settings json.RawMessage) (json.RawMessage, error) {
+func (r *Registry) Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error) {
 	for _, registration := range r.registrations {
-		if registration.Matches(name) {
-			return registration.Normalize(name, settings)
+		if registration.Matches(toolType) {
+			return registration.Normalize(toolType, settings)
 		}
 	}
-	return nil, fmt.Errorf("unsupported dispatcher %q", name)
+	return nil, fmt.Errorf("unsupported tool type %q", toolType)
 }
 
-func (r *Registry) IsSubset(name string, parent, child json.RawMessage) error {
-	for _, registration := range r.registrations {
-		if registration.Matches(name) {
-			if validator, ok := registration.(SubsetValidator); ok {
-				return validator.IsSubset(name, parent, child)
-			}
-			if !bytes.Equal(parent, child) {
-				return fmt.Errorf("capability %q does not support subset validation; settings must be identical", name)
-			}
-			return nil
-		}
-	}
-	return fmt.Errorf("unsupported dispatcher %q", name)
+// Entry is one leaf tool to build: `Type` selects the registration, `Name` is
+// the local routing handle the brain dispatches to. `Hidden` keeps the tool
+// dispatchable but off the brain's discoverable menu.
+type Entry struct {
+	Name     string
+	Type     string
+	Settings json.RawMessage
+	Hidden   bool
 }
 
 func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (builtin.Config, error) {
@@ -89,36 +63,46 @@ func (r *Registry) Build(ctx context.Context, entries []Entry, services Services
 	for _, entry := range entries {
 		var selected Registration
 		for _, registration := range r.registrations {
-			if registration.Matches(entry.Name) {
+			if registration.Matches(entry.Type) {
 				selected = registration
 				break
 			}
 		}
 		if selected == nil {
-			return builtin.Config{}, fmt.Errorf("unsupported dispatcher %q", entry.Name)
+			return builtin.Config{}, fmt.Errorf("unsupported tool type %q", entry.Type)
 		}
+		before := len(config.Capabilities)
 		if err := selected.Configure(ctx, entry.Name, entry.Settings, services, &config); err != nil {
 			return builtin.Config{}, err
+		}
+		// A hidden tool hides every capability it publishes (e.g. the LLM tool
+		// publishes openai.* operations under a hidden entry), regardless of the
+		// published names, which may differ from the tool's local name.
+		if entry.Hidden {
+			for i := before; i < len(config.Capabilities); i++ {
+				config.Capabilities[i].Hidden = true
+			}
 		}
 	}
 	return config, nil
 }
 
-type Entry struct {
-	Name     string
-	Settings json.RawMessage
+// InternetPermission is one allowlisted request the tool may make.
+type InternetPermission struct {
+	RequestType string `json:"requestType"`
+	Domain      string `json:"domain"`
 }
 
 type InternetSettings struct {
-	Allow            []string `json:"allow"`
-	TimeoutMS        int64    `json:"timeout_ms,omitempty"`
-	MaxResponseBytes int64    `json:"max_response_bytes,omitempty"`
-	RequireApproval  bool     `json:"require_approval,omitempty"`
+	Permissions      []InternetPermission `json:"permissions"`
+	TimeoutMS        int64                `json:"timeout_ms,omitempty"`
+	MaxResponseBytes int64                `json:"max_response_bytes,omitempty"`
+	RequireApproval  bool                 `json:"require_approval,omitempty"`
 }
 
 type InternetRegistration struct{}
 
-func (InternetRegistration) Matches(name string) bool { return name == "internet.read" }
+func (InternetRegistration) Matches(toolType string) bool { return toolType == "core.internet" }
 
 func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	settings := InternetSettings{
@@ -130,15 +114,22 @@ func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMe
 			return nil, err
 		}
 	}
-	if len(settings.Allow) == 0 {
-		return nil, fmt.Errorf("allow must contain at least one origin or *")
+	if len(settings.Permissions) == 0 {
+		return nil, fmt.Errorf("permissions must contain at least one {requestType, domain}")
 	}
-	for i, origin := range settings.Allow {
-		origin = strings.TrimSpace(origin)
-		if origin == "" {
-			return nil, fmt.Errorf("allow entry %d is empty", i)
+	for i, p := range settings.Permissions {
+		method := strings.ToUpper(strings.TrimSpace(p.RequestType))
+		if method == "" {
+			method = "GET"
 		}
-		settings.Allow[i] = origin
+		if method != "GET" {
+			return nil, fmt.Errorf("permission %d: only GET is supported, got %q", i, p.RequestType)
+		}
+		domain := strings.TrimSpace(p.Domain)
+		if domain == "" {
+			return nil, fmt.Errorf("permission %d: domain is empty", i)
+		}
+		settings.Permissions[i] = InternetPermission{RequestType: method, Domain: domain}
 	}
 	if settings.TimeoutMS <= 0 {
 		return nil, fmt.Errorf("timeout_ms must be positive")
@@ -149,45 +140,14 @@ func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMe
 	return json.Marshal(settings)
 }
 
-func (InternetRegistration) IsSubset(_ string, parent, child json.RawMessage) error {
-	var parentSettings, childSettings InternetSettings
-	if err := json.Unmarshal(parent, &parentSettings); err != nil {
-		return fmt.Errorf("decode parent settings: %w", err)
-	}
-	if err := json.Unmarshal(child, &childSettings); err != nil {
-		return fmt.Errorf("decode child settings: %w", err)
-	}
-	if len(parentSettings.Allow) > 0 {
-		allowed := make(map[string]struct{}, len(parentSettings.Allow))
-		for _, origin := range parentSettings.Allow {
-			allowed[origin] = struct{}{}
-		}
-		hasWildcard := false
-		for _, origin := range parentSettings.Allow {
-			if origin == "*" {
-				hasWildcard = true
-				break
-			}
-		}
-		if !hasWildcard {
-			for _, origin := range childSettings.Allow {
-				if _, ok := allowed[origin]; !ok {
-					return fmt.Errorf("child origin %q is not in parent's allowed origins", origin)
-				}
-			}
-		}
-	}
-	return nil
-}
-
 func (InternetRegistration) Configure(
 	_ context.Context,
-	_ string,
+	name string,
 	raw json.RawMessage,
 	_ Services,
 	config *builtin.Config,
 ) error {
-	normalized, err := (InternetRegistration{}).Normalize("internet.read", raw)
+	normalized, err := (InternetRegistration{}).Normalize("core.internet", raw)
 	if err != nil {
 		return err
 	}
@@ -195,23 +155,34 @@ func (InternetRegistration) Configure(
 	if err := json.Unmarshal(normalized, &settings); err != nil {
 		return err
 	}
-	entries := make([]string, 0, len(settings.Allow))
-	for _, origin := range settings.Allow {
-		entries = append(entries, "GET:"+origin)
+	entries := make([]string, 0, len(settings.Permissions))
+	domains := make([]string, 0, len(settings.Permissions))
+	for _, p := range settings.Permissions {
+		// A bare domain allows https for that host; an explicit scheme is honored.
+		origin := p.Domain
+		if !strings.Contains(origin, "://") {
+			origin = "https://" + origin
+		}
+		entries = append(entries, p.RequestType+":"+origin)
+		domains = append(domains, p.Domain)
 	}
 	policy, err := internet.ParseAllowlist(strings.Join(entries, ","))
 	if err != nil {
 		return err
 	}
-	config.Internet = internet.NewConfiguredClient(
+	client := internet.NewConfiguredClient(
 		policy,
 		time.Duration(settings.TimeoutMS)*time.Millisecond,
 		settings.MaxResponseBytes,
 	)
-	config.InternetRequireApproval = settings.RequireApproval
+	config.Handlers = append(config.Handlers, builtin.InternetHandler{
+		Name:            name,
+		Reader:          client,
+		RequireApproval: settings.RequireApproval,
+	})
 	config.Capabilities = append(config.Capabilities, dispatcher.Capability{
-		Name:        "internet.read",
-		Description: "Read textual content with HTTP GET. Allowed origins: " + strings.Join(settings.Allow, ", "),
+		Name:        name,
+		Description: "Read textual content with HTTP GET. Allowed domains: " + strings.Join(domains, ", "),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"method":{"type":"string","const":"GET"},"url":{"type":"string","format":"uri"}},"required":["method","url"],"additionalProperties":false}`),
 	})
 	return nil
@@ -224,17 +195,14 @@ type MCPSettings struct {
 
 type MCPRegistration struct{}
 
-func (MCPRegistration) Matches(name string) bool { return strings.HasPrefix(name, "mcp.") }
+func (MCPRegistration) Matches(toolType string) bool { return toolType == "core.mcp" }
 
-func (MCPRegistration) Normalize(name string, raw json.RawMessage) (json.RawMessage, error) {
+func (MCPRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	var settings MCPSettings
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &settings); err != nil {
 			return nil, err
 		}
-	}
-	if strings.TrimSpace(settings.ServerID) == "" {
-		settings.ServerID = strings.TrimPrefix(name, "mcp.")
 	}
 	settings.ServerID = strings.TrimSpace(settings.ServerID)
 	if settings.ServerID == "" {
@@ -243,39 +211,14 @@ func (MCPRegistration) Normalize(name string, raw json.RawMessage) (json.RawMess
 	return json.Marshal(settings)
 }
 
-func (MCPRegistration) IsSubset(_ string, parent, child json.RawMessage) error {
-	var parentSettings, childSettings MCPSettings
-	if err := json.Unmarshal(parent, &parentSettings); err != nil {
-		return fmt.Errorf("decode parent settings: %w", err)
-	}
-	if err := json.Unmarshal(child, &childSettings); err != nil {
-		return fmt.Errorf("decode child settings: %w", err)
-	}
-	if parentSettings.ServerID != childSettings.ServerID {
-		return fmt.Errorf("child server_id %q differs from parent %q", childSettings.ServerID, parentSettings.ServerID)
-	}
-	if len(parentSettings.Tools) > 0 && len(childSettings.Tools) > 0 {
-		allowed := make(map[string]struct{}, len(parentSettings.Tools))
-		for _, tool := range parentSettings.Tools {
-			allowed[tool] = struct{}{}
-		}
-		for _, tool := range childSettings.Tools {
-			if _, ok := allowed[tool]; !ok {
-				return fmt.Errorf("child tool %q is not in parent's allowed tools", tool)
-			}
-		}
-	}
-	return nil
-}
-
 func (MCPRegistration) Configure(
 	ctx context.Context,
-	name string,
+	_ string,
 	raw json.RawMessage,
 	services Services,
 	config *builtin.Config,
 ) error {
-	normalized, err := (MCPRegistration{}).Normalize(name, raw)
+	normalized, err := (MCPRegistration{}).Normalize("core.mcp", raw)
 	if err != nil {
 		return err
 	}
@@ -298,7 +241,7 @@ func (MCPRegistration) Configure(
 
 type AuroraLogRegistration struct{}
 
-func (AuroraLogRegistration) Matches(name string) bool { return name == "aurora.log" }
+func (AuroraLogRegistration) Matches(toolType string) bool { return toolType == "core.log" }
 
 func (AuroraLogRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
@@ -323,7 +266,7 @@ type TimerSettings struct {
 
 type TimerRegistration struct{}
 
-func (TimerRegistration) Matches(name string) bool { return name == timer.Capability }
+func (TimerRegistration) Matches(toolType string) bool { return toolType == "core.timer" }
 
 func (TimerRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	settings := TimerSettings{
@@ -342,12 +285,12 @@ func (TimerRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessa
 
 func (TimerRegistration) Configure(
 	_ context.Context,
-	_ string,
+	name string,
 	raw json.RawMessage,
 	_ Services,
 	config *builtin.Config,
 ) error {
-	normalized, err := (TimerRegistration{}).Normalize("timer.set", raw)
+	normalized, err := (TimerRegistration{}).Normalize("core.timer", raw)
 	if err != nil {
 		return err
 	}
@@ -356,9 +299,9 @@ func (TimerRegistration) Configure(
 		return err
 	}
 	maxDuration := time.Duration(settings.MaxDurationMS) * time.Millisecond
-	config.Handlers = append(config.Handlers, timer.Handler{MaxDuration: maxDuration})
+	config.Handlers = append(config.Handlers, timer.Handler{Name: name, MaxDuration: maxDuration})
 	config.Capabilities = append(config.Capabilities, dispatcher.Capability{
-		Name: timer.Capability,
+		Name: name,
 		Description: fmt.Sprintf(
 			"Set a relative timer and be replayed when it fires. The run pauses until the duration elapses, then continues. Maximum %s.",
 			maxDuration,

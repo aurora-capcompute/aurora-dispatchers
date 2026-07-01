@@ -30,14 +30,17 @@ type SetRequest struct {
 	Label           string `json:"label,omitempty"`
 }
 
-// Handler dispatches timer.set calls. It satisfies builtin.Handler.
+// Handler dispatches a timer tool's calls. It satisfies builtin.Handler and is
+// bound to the tool's local manifest name.
 type Handler struct {
+	// Name is the tool's local manifest name the brain dispatches to.
+	Name string
 	// MaxDuration bounds the requested duration. Zero uses DefaultMaxDuration.
 	MaxDuration time.Duration
 }
 
-// Handles reports whether the handler owns the given capability name.
-func (Handler) Handles(name string) bool { return name == Capability }
+// Handles reports whether the handler owns the given local tool name.
+func (h Handler) Handles(name string) bool { return name == h.Name }
 
 // DispatchCall validates the request and yields a durable task. A valid call
 // always yields; invalid input fails immediately so the agent gets feedback.
