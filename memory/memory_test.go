@@ -133,25 +133,6 @@ func TestMemoryPutApprovalGate(t *testing.T) {
 	}
 }
 
-type memJournal struct {
-	header    journaled.Header
-	hasHeader bool
-	records   []journaled.Record
-}
-
-func (j *memJournal) Header() (journaled.Header, bool, error) { return j.header, j.hasHeader, nil }
-func (j *memJournal) SetHeader(header journaled.Header) error {
-	j.header = header
-	j.hasHeader = true
-	return nil
-}
-func (j *memJournal) Load(idx int) (journaled.Record, error) { return j.records[idx], nil }
-func (j *memJournal) Append(record journaled.Record) error {
-	j.records = append(j.records, record)
-	return nil
-}
-func (j *memJournal) Length() int { return len(j.records) }
-
 type handlerDispatcher struct{ handler memory.Handler }
 
 func (d handlerDispatcher) Dispatch(ctx context.Context, _ string, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -164,7 +145,7 @@ func (d handlerDispatcher) Capabilities() []sys.Capability { return nil }
 func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme"}
-	journal := &memJournal{}
+	journal := journaled.NewMemJournal()
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Run: "run-1"}
 
 	chain := func(t *testing.T) sys.Dispatcher[string] {
@@ -237,7 +218,7 @@ func TestMemoryPoisoningSurfacesAcrossThreads(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme"}
 	run := func() *capcompute.FlowMonitor[string, memPID] {
-		return capcompute.NewFlowMonitor[string](capcompute.NewLabeler[memPID](chainAdapter{tenantChain{handler}}))
+		return capcompute.NewFlowMonitor(capcompute.NewTaints[string](), capcompute.NewLabeler[memPID](chainAdapter{tenantChain{handler}}))
 	}
 	dispatchRun := func(t *testing.T, monitor *capcompute.FlowMonitor[string, memPID], pid, name, args string) sys.SyscallResult {
 		t.Helper()
