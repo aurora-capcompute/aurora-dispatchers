@@ -118,7 +118,7 @@ func TestMemoryPutApprovalGate(t *testing.T) {
 	if result.Status() != sys.StatusYield {
 		t.Fatalf("unapproved put = %#v, want yield", result)
 	}
-	if _, _, found, _ := store.Get(context.Background(), "acme", "prefs/tone"); found {
+	if _, _, _, found, _ := store.Get(context.Background(), "acme", "prefs/tone"); found {
 		t.Fatal("unapproved put reached the store")
 	}
 
@@ -176,7 +176,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 		return replay.NewDispatcher[string](tape, handlerDispatcher{handler})
 	}
 
-	if err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"casual"`), nil); err != nil {
+	if _, err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"casual"`), nil, memory.PutAny); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 	read := sys.Syscall{Abi: sys.ABIVersion, Name: "mem.get", Args: json.RawMessage(`{"key":"prefs/tone"}`)}
@@ -187,7 +187,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	}
 
 	// Another thread mutates the shared value…
-	if err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"formal"`), nil); err != nil {
+	if _, err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"formal"`), nil, memory.PutAny); err != nil {
 		t.Fatalf("mutate store: %v", err)
 	}
 
@@ -291,3 +291,62 @@ func (a chainAdapter) Dispatch(ctx context.Context, cred memPID, call sys.Syscal
 }
 
 func (a chainAdapter) Capabilities() []sys.Capability { return a.next.Capabilities() }
+
+func TestMemoryCompareAndSet(t *testing.T) {
+	store := memory.NewMapStore()
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme"}
+
+	// Create-only (if_version 0) succeeds on an absent key…
+	result := dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{})
+	var put memory.PutResponse
+	if err := json.Unmarshal(result.Result(), &put); err != nil {
+		t.Fatalf("decode put: %v", err)
+	}
+	if put.Version != 1 {
+		t.Fatalf("first write version = %d, want 1", put.Version)
+	}
+
+	// …and conflicts once the key exists.
+	result = dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"formal","if_version":0}`, sys.Authorization{})
+	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoConflict {
+		t.Fatalf("create-only on existing key = %#v, want failed/conflict", result)
+	}
+
+	// A stale version conflicts; the current one replaces and bumps.
+	result = dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"formal","if_version":7}`, sys.Authorization{})
+	if result.Errno() != sys.ErrnoConflict {
+		t.Fatalf("stale CAS = %#v, want conflict", result)
+	}
+	result = dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"formal","if_version":1}`, sys.Authorization{})
+	if err := json.Unmarshal(result.Result(), &put); err != nil {
+		t.Fatalf("decode put: %v", err)
+	}
+	if put.Version != 2 {
+		t.Fatalf("CAS write version = %d, want 2", put.Version)
+	}
+
+	// Reads surface the version the next CAS needs.
+	result = dispatch(t, handler, "mem.get", `{"key":"prefs/tone"}`, sys.Authorization{})
+	var get memory.GetResponse
+	if err := json.Unmarshal(result.Result(), &get); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if get.Version != 2 || string(get.Value) != `"formal"` {
+		t.Fatalf("get = %+v, want version 2 of formal", get)
+	}
+
+	// Unconditional writes still win (last-writer-wins is the default)…
+	result = dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"terse"}`, sys.Authorization{})
+	if err := json.Unmarshal(result.Result(), &put); err != nil {
+		t.Fatalf("decode put: %v", err)
+	}
+	if put.Version != 3 {
+		t.Fatalf("unconditional write version = %d, want 3", put.Version)
+	}
+
+	// …and negative expectations are rejected before the store sees them.
+	result = dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"x","if_version":-2}`, sys.Authorization{})
+	if result.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("negative if_version = %#v, want invalid_args", result)
+	}
+}

@@ -13,6 +13,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -26,11 +27,30 @@ import (
 // handler. Every value is stored with its provenance labels — the taint of
 // the run that wrote it — and Get returns them so a later thread reads the
 // value *as tainted*, not as laundered truth (the memory-poisoning defense).
+// Values are versioned (1 on first write, incremented per write) so writers
+// can compare-and-set instead of blindly overwriting each other.
 type Store interface {
-	Get(ctx context.Context, tenant, key string) (value json.RawMessage, labels []string, ok bool, err error)
-	Put(ctx context.Context, tenant, key string, value json.RawMessage, labels []string) error
+	Get(ctx context.Context, tenant, key string) (value json.RawMessage, labels []string, version int64, ok bool, err error)
+	// Put writes key if the expectation holds: PutAny overwrites
+	// unconditionally, PutAbsent requires the key not to exist, a positive
+	// value requires that exact current version. It returns the new version,
+	// or ErrConflict when the expectation fails.
+	Put(ctx context.Context, tenant, key string, value json.RawMessage, labels []string, expect int64) (int64, error)
 	List(ctx context.Context, tenant, prefix string) (keys []string, err error)
 }
+
+// Put expectations.
+const (
+	// PutAny overwrites unconditionally — last writer wins.
+	PutAny int64 = -1
+	// PutAbsent creates the key and fails with ErrConflict if it exists.
+	PutAbsent int64 = 0
+)
+
+// ErrConflict is returned by Store.Put when the version expectation fails.
+// The handler surfaces it to the guest as errno conflict; the guest re-reads
+// and retries — optimistic concurrency across a tenant's threads.
+var ErrConflict = errors.New("memory: version conflict")
 
 // GetRequest asks for one key, relative to the grant's subtree.
 type GetRequest struct {
@@ -38,20 +58,25 @@ type GetRequest struct {
 }
 
 type GetResponse struct {
-	Key   string          `json:"key"`
-	Found bool            `json:"found"`
-	Value json.RawMessage `json:"value,omitempty"`
+	Key     string          `json:"key"`
+	Found   bool            `json:"found"`
+	Value   json.RawMessage `json:"value,omitempty"`
+	Version int64           `json:"version,omitempty"`
 }
 
-// PutRequest writes one key. Last-writer-wins (compare-and-set is a later
-// upgrade; see PLAN.md M6.3).
+// PutRequest writes one key. Without if_version it is last-writer-wins;
+// with it, the write is a compare-and-set: 0 means "create, must not exist",
+// a positive value means "replace exactly this version". A failed expectation
+// returns errno conflict — re-read and retry.
 type PutRequest struct {
-	Key   string          `json:"key"`
-	Value json.RawMessage `json:"value"`
+	Key       string          `json:"key"`
+	Value     json.RawMessage `json:"value"`
+	IfVersion *int64          `json:"if_version,omitempty"`
 }
 
 type PutResponse struct {
-	Key string `json:"key"`
+	Key     string `json:"key"`
+	Version int64  `json:"version"`
 }
 
 type ListRequest struct {
@@ -113,11 +138,11 @@ func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	value, labels, found, err := h.Store.Get(ctx, h.Tenant, qualified)
+	value, labels, version, found, err := h.Store.Get(ctx, h.Tenant, qualified)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	result, err := marshalResult(GetResponse{Key: request.Key, Found: found, Value: value})
+	result, err := marshalResult(GetResponse{Key: request.Key, Found: found, Value: value, Version: version})
 	if err != nil {
 		return result, err
 	}
@@ -142,13 +167,24 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	if h.RequireApprovalOnPut && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve writing memory key %q", request.Key)), nil
 	}
+	expect := PutAny
+	if request.IfVersion != nil {
+		if *request.IfVersion < 0 {
+			return sys.FailCode(sys.ErrnoInvalidArgs, "if_version must be zero or positive"), nil
+		}
+		expect = *request.IfVersion
+	}
 	// The written value derives from anything the run has observed (the guest
 	// is opaque), so it is stored with the run's taint, handed down by the
 	// flow monitor.
-	if err := h.Store.Put(ctx, h.Tenant, qualified, request.Value, sys.Taint(ctx)); err != nil {
+	version, err := h.Store.Put(ctx, h.Tenant, qualified, request.Value, sys.Taint(ctx), expect)
+	if errors.Is(err, ErrConflict) {
+		return sys.FailCode(sys.ErrnoConflict, fmt.Sprintf("key %q is not at version %d; re-read and retry", request.Key, expect)), nil
+	}
+	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	return marshalResult(PutResponse{Key: request.Key})
+	return marshalResult(PutResponse{Key: request.Key, Version: version})
 }
 
 func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
@@ -227,22 +263,23 @@ type MapStore struct {
 }
 
 type labelled struct {
-	value  json.RawMessage
-	labels []string
+	value   json.RawMessage
+	labels  []string
+	version int64
 }
 
 func NewMapStore() *MapStore {
 	return &MapStore{tenants: make(map[string]map[string]labelled)}
 }
 
-func (s *MapStore) Get(_ context.Context, tenant, key string) (json.RawMessage, []string, bool, error) {
+func (s *MapStore) Get(_ context.Context, tenant, key string) (json.RawMessage, []string, int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stored, ok := s.tenants[tenant][key]
-	return append(json.RawMessage(nil), stored.value...), append([]string(nil), stored.labels...), ok, nil
+	return append(json.RawMessage(nil), stored.value...), append([]string(nil), stored.labels...), stored.version, ok, nil
 }
 
-func (s *MapStore) Put(_ context.Context, tenant, key string, value json.RawMessage, labels []string) error {
+func (s *MapStore) Put(_ context.Context, tenant, key string, value json.RawMessage, labels []string, expect int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	space := s.tenants[tenant]
@@ -250,11 +287,17 @@ func (s *MapStore) Put(_ context.Context, tenant, key string, value json.RawMess
 		space = make(map[string]labelled)
 		s.tenants[tenant] = space
 	}
-	space[key] = labelled{
-		value:  append(json.RawMessage(nil), value...),
-		labels: append([]string(nil), labels...),
+	current := space[key].version // zero when absent
+	if expect != PutAny && expect != current {
+		return 0, ErrConflict
 	}
-	return nil
+	next := current + 1
+	space[key] = labelled{
+		value:   append(json.RawMessage(nil), value...),
+		labels:  append([]string(nil), labels...),
+		version: next,
+	}
+	return next, nil
 }
 
 func (s *MapStore) List(_ context.Context, tenant, prefix string) ([]string, error) {

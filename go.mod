@@ -2,7 +2,7 @@ module github.com/aurora-capcompute/aurora-dispatchers
 
 go 1.26
 
-require github.com/aurora-capcompute/capcompute v0.0.0-20260702184145-3762e695058d
+require github.com/aurora-capcompute/capcompute v0.0.0-20260702185225-7a4cb37b8132
 
 require (
 	github.com/dylibso/observe-sdk/go v0.0.0-20240828172851-9145d8ad07e1 // indirect
