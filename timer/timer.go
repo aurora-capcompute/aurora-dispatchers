@@ -47,17 +47,17 @@ func (h Handler) Handles(name string) bool { return name == h.Name }
 func (h Handler) DispatchCall(_ context.Context, call sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	var request SetRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
-		return sys.Fail(fmt.Sprintf("decode timer.set request: %v", err)), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode timer.set request: %v", err)), nil
 	}
 	if request.DurationSeconds <= 0 {
-		return sys.Fail("duration_seconds must be positive"), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, "duration_seconds must be positive"), nil
 	}
 	max := h.MaxDuration
 	if max <= 0 {
 		max = DefaultMaxDuration
 	}
 	if time.Duration(request.DurationSeconds)*time.Second > max {
-		return sys.Fail(fmt.Sprintf("duration_seconds must be at most %d", int64(max/time.Second))), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("duration_seconds must be at most %d", int64(max/time.Second))), nil
 	}
 	duration := time.Duration(request.DurationSeconds) * time.Second
 	if request.Label != "" {

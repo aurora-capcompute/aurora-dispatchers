@@ -49,7 +49,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 			return handler.DispatchCall(ctx, call, auth)
 		}
 	}
-	return sys.Fail("unknown call: " + call.Name), nil
+	return sys.FailCode(sys.ErrnoNotFound, "unknown call: "+call.Name), nil
 }
 
 // InternetHandler adapts an InternetReader to the Handler interface, bound to a
@@ -64,11 +64,11 @@ func (h InternetHandler) Handles(name string) bool { return name == h.Name }
 
 func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if h.Reader == nil {
-		return sys.Fail("internet reader is not configured"), nil
+		return sys.FailCode(sys.ErrnoNotFound, "internet reader is not configured"), nil
 	}
 	var request internet.ReadRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
-		return sys.Fail(fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
 	if h.RequireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
@@ -78,7 +78,7 @@ func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.Fail(err.Error()), nil
+		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
 	}
 	return marshalResult(response)
 }

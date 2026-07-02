@@ -96,12 +96,12 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 func (d *Handler) DispatchCall(ctx context.Context, call sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	tool, ok := d.tools[call.Name]
 	if !ok {
-		return sys.Fail("unknown MCP tool: " + call.Name), nil
+		return sys.FailCode(sys.ErrnoNotFound, "unknown MCP tool: "+call.Name), nil
 	}
 	var arguments any = map[string]any{}
 	if len(call.Args) > 0 {
 		if err := json.Unmarshal(call.Args, &arguments); err != nil {
-			return sys.Fail("decode MCP arguments: " + err.Error()), nil
+			return sys.FailCode(sys.ErrnoInvalidArgs, "decode MCP arguments: "+err.Error()), nil
 		}
 	}
 	conn, err := start(ctx, d.config)
@@ -109,7 +109,7 @@ func (d *Handler) DispatchCall(ctx context.Context, call sys.Syscall, _ sys.Auth
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.Fail(err.Error()), nil
+		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
 	}
 	defer conn.Close()
 	result, err := conn.callTool(ctx, tool.Name, arguments)
@@ -117,7 +117,7 @@ func (d *Handler) DispatchCall(ctx context.Context, call sys.Syscall, _ sys.Auth
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.Fail(err.Error()), nil
+		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
 	}
 	return sys.Result(result), nil
 }
