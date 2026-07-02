@@ -8,6 +8,7 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
+	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 	"github.com/aurora-capcompute/aurora-dispatchers/timer"
 	"github.com/aurora-capcompute/capcompute/sys"
 	"strings"
@@ -16,6 +17,11 @@ import (
 
 type Services struct {
 	MCPServers map[string]mcp.ServerConfig
+	// Tenant identifies whose memory space core.memory grants open. It is a
+	// host-side fact about the agent instance, never guest-supplied.
+	Tenant string
+	// MemoryStore is the durable KV store behind core.memory grants.
+	MemoryStore memory.Store
 }
 
 // Registration builds a leaf I/O dispatcher for one tool `type`. A registration
@@ -36,7 +42,7 @@ func New(registrations ...Registration) *Registry {
 }
 
 func Default() *Registry {
-	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{})
+	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{}, MemoryRegistration{})
 }
 
 func (r *Registry) Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error) {
@@ -308,5 +314,93 @@ func (TimerRegistration) Configure(
 		),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`),
 	})
+	return nil
+}
+
+// MemorySettings configures one core.memory grant. Subtree chroots the grant
+// inside the tenant's space (the grant tree does directory permissions);
+// require_approval_on_put gates standing-memory writes behind a human.
+type MemorySettings struct {
+	Subtree              string `json:"subtree,omitempty"`
+	RequireApprovalOnPut bool   `json:"require_approval_on_put,omitempty"`
+}
+
+// MemoryRegistration provides tenant-scoped shared memory — the filesystem
+// role: cross-thread durable state reached as a journaled capability, never
+// ambiently (see capcompute docs/ARCHITECTURE.md, "Shared state").
+type MemoryRegistration struct{}
+
+func (MemoryRegistration) Matches(toolType string) bool { return toolType == "core.memory" }
+
+func (MemoryRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
+	var settings MemorySettings
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			return nil, err
+		}
+	}
+	if strings.HasPrefix(settings.Subtree, "/") || strings.HasSuffix(settings.Subtree, "/") {
+		return nil, fmt.Errorf("subtree must be a relative path without leading or trailing slashes")
+	}
+	for _, segment := range strings.Split(settings.Subtree, "/") {
+		if settings.Subtree != "" && (segment == "" || segment == "." || segment == "..") {
+			return nil, fmt.Errorf("subtree %q contains an invalid path segment", settings.Subtree)
+		}
+	}
+	return json.Marshal(settings)
+}
+
+func (MemoryRegistration) Configure(
+	_ context.Context,
+	name string,
+	raw json.RawMessage,
+	services Services,
+	config *builtin.Config,
+) error {
+	normalized, err := (MemoryRegistration{}).Normalize("core.memory", raw)
+	if err != nil {
+		return err
+	}
+	var settings MemorySettings
+	if err := json.Unmarshal(normalized, &settings); err != nil {
+		return err
+	}
+	if services.MemoryStore == nil {
+		return errors.New("core.memory requires Services.MemoryStore")
+	}
+	if services.Tenant == "" {
+		return errors.New("core.memory requires Services.Tenant")
+	}
+	config.Handlers = append(config.Handlers, memory.Handler{
+		Name:                 name,
+		Store:                services.MemoryStore,
+		Tenant:               services.Tenant,
+		Subtree:              settings.Subtree,
+		RequireApprovalOnPut: settings.RequireApprovalOnPut,
+	})
+	scope := "the tenant's shared memory"
+	if settings.Subtree != "" {
+		scope = fmt.Sprintf("the %q subtree of the tenant's shared memory", settings.Subtree)
+	}
+	config.Capabilities = append(config.Capabilities,
+		sys.Capability{
+			Name:         name + ".get",
+			Description:  fmt.Sprintf("Read one key from %s. Keys are relative slash-paths.", scope),
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1}},"required":["key"],"additionalProperties":false}`),
+			Compensation: sys.Compensation{Kind: sys.CompensateNone},
+		},
+		sys.Capability{
+			Name:         name + ".put",
+			Description:  fmt.Sprintf("Write one key to %s (last-writer-wins). Persists across threads of this tenant.", scope),
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"value":{}},"required":["key","value"],"additionalProperties":false}`),
+			Compensation: sys.Compensation{Kind: sys.CompensateEscalate},
+		},
+		sys.Capability{
+			Name:         name + ".list",
+			Description:  fmt.Sprintf("List keys under a prefix in %s.", scope),
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{"prefix":{"type":"string"}},"additionalProperties":false}`),
+			Compensation: sys.Compensation{Kind: sys.CompensateNone},
+		},
+	)
 	return nil
 }
