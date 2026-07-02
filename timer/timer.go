@@ -9,10 +9,10 @@
 package timer
 
 import (
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/aurora-capcompute/capcompute/sys"
 	"time"
 )
 
@@ -44,24 +44,24 @@ func (h Handler) Handles(name string) bool { return name == h.Name }
 
 // DispatchCall validates the request and yields a durable task. A valid call
 // always yields; invalid input fails immediately so the agent gets feedback.
-func (h Handler) DispatchCall(_ context.Context, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
+func (h Handler) DispatchCall(_ context.Context, call sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	var request SetRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
-		return dispatcher.Fail(fmt.Sprintf("decode timer.set request: %v", err)), nil
+		return sys.Fail(fmt.Sprintf("decode timer.set request: %v", err)), nil
 	}
 	if request.DurationSeconds <= 0 {
-		return dispatcher.Fail("duration_seconds must be positive"), nil
+		return sys.Fail("duration_seconds must be positive"), nil
 	}
 	max := h.MaxDuration
 	if max <= 0 {
 		max = DefaultMaxDuration
 	}
 	if time.Duration(request.DurationSeconds)*time.Second > max {
-		return dispatcher.Fail(fmt.Sprintf("duration_seconds must be at most %d", int64(max/time.Second))), nil
+		return sys.Fail(fmt.Sprintf("duration_seconds must be at most %d", int64(max/time.Second))), nil
 	}
 	duration := time.Duration(request.DurationSeconds) * time.Second
 	if request.Label != "" {
-		return dispatcher.Yield(fmt.Sprintf("Timer for %s: %s", duration, request.Label)), nil
+		return sys.Yield(fmt.Sprintf("Timer for %s: %s", duration, request.Label)), nil
 	}
-	return dispatcher.Yield(fmt.Sprintf("Timer for %s", duration)), nil
+	return sys.Yield(fmt.Sprintf("Timer for %s", duration)), nil
 }

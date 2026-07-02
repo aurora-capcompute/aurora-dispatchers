@@ -2,11 +2,11 @@ package mcp
 
 import (
 	"bufio"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/aurora-capcompute/capcompute/sys"
 	"io"
 	"os"
 	"os/exec"
@@ -39,7 +39,7 @@ type Dispatcher[K any] struct {
 type Handler struct {
 	config       ServerConfig
 	tools        map[string]Tool
-	capabilities []dispatcher.Capability
+	capabilities []sys.Capability
 }
 
 func NewDispatcher[K any](ctx context.Context, config ServerConfig, allowedTools []string) (*Dispatcher[K], error) {
@@ -54,12 +54,12 @@ func NewHandler(ctx context.Context, config ServerConfig, allowedTools []string)
 	if strings.TrimSpace(config.ID) == "" || strings.TrimSpace(config.Command) == "" {
 		return nil, errors.New("mcp server id and command are required")
 	}
-	session, err := start(ctx, config)
+	conn, err := start(ctx, config)
 	if err != nil {
 		return nil, err
 	}
-	defer session.Close()
-	tools, err := session.listTools(ctx)
+	defer conn.Close()
+	tools, err := conn.listTools(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func NewHandler(ctx context.Context, config ServerConfig, allowedTools []string)
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object"}`)
 		}
-		out.capabilities = append(out.capabilities, dispatcher.Capability{
+		out.capabilities = append(out.capabilities, sys.Capability{
 			Name:        action,
 			Description: tool.Description,
 			InputSchema: schema,
@@ -89,40 +89,40 @@ func NewHandler(ctx context.Context, config ServerConfig, allowedTools []string)
 	return out, nil
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	return d.DispatchCall(ctx, call, auth)
 }
 
-func (d *Handler) DispatchCall(ctx context.Context, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
+func (d *Handler) DispatchCall(ctx context.Context, call sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	tool, ok := d.tools[call.Name]
 	if !ok {
-		return dispatcher.Fail("unknown MCP tool: " + call.Name), nil
+		return sys.Fail("unknown MCP tool: " + call.Name), nil
 	}
 	var arguments any = map[string]any{}
 	if len(call.Args) > 0 {
 		if err := json.Unmarshal(call.Args, &arguments); err != nil {
-			return dispatcher.Fail("decode MCP arguments: " + err.Error()), nil
+			return sys.Fail("decode MCP arguments: " + err.Error()), nil
 		}
 	}
-	session, err := start(ctx, d.config)
+	conn, err := start(ctx, d.config)
 	if err != nil {
 		if ctx.Err() != nil {
-			return dispatcher.Outcome{}, ctx.Err()
+			return sys.SyscallResult{}, ctx.Err()
 		}
-		return dispatcher.Fail(err.Error()), nil
+		return sys.Fail(err.Error()), nil
 	}
-	defer session.Close()
-	result, err := session.callTool(ctx, tool.Name, arguments)
+	defer conn.Close()
+	result, err := conn.callTool(ctx, tool.Name, arguments)
 	if err != nil {
 		if ctx.Err() != nil {
-			return dispatcher.Outcome{}, ctx.Err()
+			return sys.SyscallResult{}, ctx.Err()
 		}
-		return dispatcher.Fail(err.Error()), nil
+		return sys.Fail(err.Error()), nil
 	}
-	return dispatcher.Result(result), nil
+	return sys.Result(result), nil
 }
 
-func (d *Handler) Capabilities() []dispatcher.Capability {
+func (d *Handler) Capabilities() []sys.Capability {
 	return d.capabilities
 }
 
@@ -136,7 +136,7 @@ func actionName(serverID, toolName string) string {
 	return "mcp." + replacer.Replace(serverID) + "." + replacer.Replace(toolName)
 }
 
-type session struct {
+type transport struct {
 	config ServerConfig
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -145,7 +145,7 @@ type session struct {
 	nextID int64
 }
 
-func start(ctx context.Context, config ServerConfig) (*session, error) {
+func start(ctx context.Context, config ServerConfig) (*transport, error) {
 	cmd := exec.CommandContext(ctx, config.Command, config.Args...)
 	cmd.Dir = config.Dir
 	cmd.Env = append([]string(nil), os.Environ()...)
@@ -166,7 +166,7 @@ func start(ctx context.Context, config ServerConfig) (*session, error) {
 	}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	s := &session{config: config, cmd: cmd, stdin: stdin, stdout: scanner}
+	s := &transport{config: config, cmd: cmd, stdin: stdin, stdout: scanner}
 	if _, err := s.request(ctx, "initialize", map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{},
@@ -182,7 +182,7 @@ func start(ctx context.Context, config ServerConfig) (*session, error) {
 	return s, nil
 }
 
-func (s *session) listTools(ctx context.Context) ([]Tool, error) {
+func (s *transport) listTools(ctx context.Context) ([]Tool, error) {
 	raw, err := s.request(ctx, "tools/list", map[string]any{})
 	if err != nil {
 		return nil, err
@@ -196,11 +196,11 @@ func (s *session) listTools(ctx context.Context) ([]Tool, error) {
 	return result.Tools, nil
 }
 
-func (s *session) callTool(ctx context.Context, name string, arguments any) (json.RawMessage, error) {
+func (s *transport) callTool(ctx context.Context, name string, arguments any) (json.RawMessage, error) {
 	return s.request(ctx, "tools/call", map[string]any{"name": name, "arguments": arguments})
 }
 
-func (s *session) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (s *transport) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
@@ -242,13 +242,13 @@ func (s *session) request(ctx context.Context, method string, params any) (json.
 	}
 }
 
-func (s *session) notify(method string, params any) error {
+func (s *transport) notify(method string, params any) error {
 	return writeJSONLine(s.stdin, map[string]any{
 		"jsonrpc": "2.0", "method": method, "params": params,
 	})
 }
 
-func (s *session) Close() error {
+func (s *transport) Close() error {
 	if s == nil {
 		return nil
 	}

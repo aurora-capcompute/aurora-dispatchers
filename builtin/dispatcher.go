@@ -1,12 +1,12 @@
 package builtin
 
 import (
-	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
+	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 type InternetReader interface {
@@ -15,30 +15,30 @@ type InternetReader interface {
 
 type Handler interface {
 	Handles(name string) bool
-	DispatchCall(ctx context.Context, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error)
+	DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error)
 }
 
 type Config struct {
 	MCP          []*mcp.Handler
 	Handlers     []Handler
-	Capabilities []dispatcher.Capability
+	Capabilities []sys.Capability
 }
 
 type Dispatcher[K any] struct {
 	Config
 }
 
-func New[K any](config Config) dispatcher.Dispatcher[K] {
+func New[K any](config Config) sys.Dispatcher[K] {
 	return &Dispatcher[K]{Config: config}
 }
 
-func (d *Dispatcher[K]) Capabilities() []dispatcher.Capability {
+func (d *Dispatcher[K]) Capabilities() []sys.Capability {
 	return d.Config.Capabilities
 }
 
 // Dispatch routes a brain call to the handler that owns its name. Every tool is
 // addressed by its local manifest name; there are no fixed capability names.
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	for _, handler := range d.MCP {
 		if handler.Handles(call.Name) {
 			return handler.DispatchCall(ctx, call, auth)
@@ -49,7 +49,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call dispatcher.Call,
 			return handler.DispatchCall(ctx, call, auth)
 		}
 	}
-	return dispatcher.Fail("unknown call: " + call.Name), nil
+	return sys.Fail("unknown call: " + call.Name), nil
 }
 
 // InternetHandler adapts an InternetReader to the Handler interface, bound to a
@@ -62,31 +62,31 @@ type InternetHandler struct {
 
 func (h InternetHandler) Handles(name string) bool { return name == h.Name }
 
-func (h InternetHandler) DispatchCall(ctx context.Context, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
+func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if h.Reader == nil {
-		return dispatcher.Fail("internet reader is not configured"), nil
+		return sys.Fail("internet reader is not configured"), nil
 	}
 	var request internet.ReadRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
-		return dispatcher.Fail(fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
+		return sys.Fail(fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
-	if h.RequireApproval && auth.Decision != dispatcher.Approved {
-		return dispatcher.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
+	if h.RequireApproval && auth.Decision != sys.Approved {
+		return sys.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
 	}
 	response, err := h.Reader.Read(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
-			return dispatcher.Outcome{}, ctx.Err()
+			return sys.SyscallResult{}, ctx.Err()
 		}
-		return dispatcher.Fail(err.Error()), nil
+		return sys.Fail(err.Error()), nil
 	}
 	return marshalResult(response)
 }
 
-func marshalResult(value any) (dispatcher.Outcome, error) {
+func marshalResult(value any) (sys.SyscallResult, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
-		return dispatcher.Outcome{}, err
+		return sys.SyscallResult{}, err
 	}
-	return dispatcher.Result(raw), nil
+	return sys.Result(raw), nil
 }
