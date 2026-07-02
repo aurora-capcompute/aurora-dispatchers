@@ -22,10 +22,13 @@ import (
 )
 
 // Store is the app-supplied durable KV store behind tenant memory. Keys are
-// slash-separated paths, already tenant- and subtree-qualified by the handler.
+// slash-separated paths, already tenant- and subtree-qualified by the
+// handler. Every value is stored with its provenance labels — the taint of
+// the run that wrote it — and Get returns them so a later thread reads the
+// value *as tainted*, not as laundered truth (the memory-poisoning defense).
 type Store interface {
-	Get(ctx context.Context, tenant, key string) (value json.RawMessage, ok bool, err error)
-	Put(ctx context.Context, tenant, key string, value json.RawMessage) error
+	Get(ctx context.Context, tenant, key string) (value json.RawMessage, labels []string, ok bool, err error)
+	Put(ctx context.Context, tenant, key string, value json.RawMessage, labels []string) error
 	List(ctx context.Context, tenant, prefix string) (keys []string, err error)
 }
 
@@ -110,11 +113,18 @@ func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	value, found, err := h.Store.Get(ctx, h.Tenant, qualified)
+	value, labels, found, err := h.Store.Get(ctx, h.Tenant, qualified)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	return marshalResult(GetResponse{Key: request.Key, Found: found, Value: value})
+	result, err := marshalResult(GetResponse{Key: request.Key, Found: found, Value: value})
+	if err != nil {
+		return result, err
+	}
+	// Restamp the stored provenance: the flow monitor accumulates it into the
+	// reading run's taint, so a value written from a tainted run resurfaces
+	// as tainted in every later thread.
+	return result.WithLabels(labels...), nil
 }
 
 func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -132,7 +142,10 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	if h.RequireApprovalOnPut && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve writing memory key %q", request.Key)), nil
 	}
-	if err := h.Store.Put(ctx, h.Tenant, qualified, request.Value); err != nil {
+	// The written value derives from anything the run has observed (the guest
+	// is opaque), so it is stored with the run's taint, handed down by the
+	// flow monitor.
+	if err := h.Store.Put(ctx, h.Tenant, qualified, request.Value, sys.Taint(ctx)); err != nil {
 		return storeFailure(ctx, err)
 	}
 	return marshalResult(PutResponse{Key: request.Key})
@@ -210,29 +223,37 @@ func marshalResult(value any) (sys.SyscallResult, error) {
 // Production supplies a durable implementation.
 type MapStore struct {
 	mu      sync.Mutex
-	tenants map[string]map[string]json.RawMessage
+	tenants map[string]map[string]labelled
+}
+
+type labelled struct {
+	value  json.RawMessage
+	labels []string
 }
 
 func NewMapStore() *MapStore {
-	return &MapStore{tenants: make(map[string]map[string]json.RawMessage)}
+	return &MapStore{tenants: make(map[string]map[string]labelled)}
 }
 
-func (s *MapStore) Get(_ context.Context, tenant, key string) (json.RawMessage, bool, error) {
+func (s *MapStore) Get(_ context.Context, tenant, key string) (json.RawMessage, []string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	value, ok := s.tenants[tenant][key]
-	return append(json.RawMessage(nil), value...), ok, nil
+	stored, ok := s.tenants[tenant][key]
+	return append(json.RawMessage(nil), stored.value...), append([]string(nil), stored.labels...), ok, nil
 }
 
-func (s *MapStore) Put(_ context.Context, tenant, key string, value json.RawMessage) error {
+func (s *MapStore) Put(_ context.Context, tenant, key string, value json.RawMessage, labels []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	space := s.tenants[tenant]
 	if space == nil {
-		space = make(map[string]json.RawMessage)
+		space = make(map[string]labelled)
 		s.tenants[tenant] = space
 	}
-	space[key] = append(json.RawMessage(nil), value...)
+	space[key] = labelled{
+		value:  append(json.RawMessage(nil), value...),
+		labels: append([]string(nil), labels...),
+	}
 	return nil
 }
 
