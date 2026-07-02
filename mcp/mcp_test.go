@@ -1,12 +1,12 @@
 package mcp_test
 
 import (
-	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
 	"bufio"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
+	"github.com/aurora-capcompute/capcompute/sys"
 	"os"
 	"testing"
 )
@@ -26,13 +26,13 @@ func TestStdioDiscoveryAndCall(t *testing.T) {
 	if len(capabilities) != 1 || capabilities[0].Name != "mcp.demo.echo" {
 		t.Fatalf("capabilities = %+v", capabilities)
 	}
-	outcome, err := value.Dispatch(context.Background(), "run", dispatcher.Call{
+	outcome, err := value.Dispatch(context.Background(), "run", sys.Syscall{
 		Name: "mcp.demo.echo", Args: json.RawMessage(`{"text":"hello"}`),
-	}, dispatcher.Authorization{})
+	}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if outcome.Kind() != dispatcher.OutcomeResult ||
+	if outcome.Status() != sys.StatusResult ||
 		!json.Valid(outcome.Result()) {
 		t.Fatalf("outcome = %#v", outcome)
 	}

@@ -10,7 +10,7 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
 	"github.com/aurora-capcompute/aurora-dispatchers/timer"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/sys"
 	"strings"
 	"time"
 )
@@ -209,7 +209,7 @@ func (InternetRegistration) Configure(
 		settings.MaxResponseBytes,
 	)
 	config.InternetRequireApproval = settings.RequireApproval
-	config.Capabilities = append(config.Capabilities, dispatcher.Capability{
+	config.Capabilities = append(config.Capabilities, sys.Capability{
 		Name:        "internet.read",
 		Description: "Read textual content with HTTP GET. Allowed origins: " + strings.Join(settings.Allow, ", "),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"method":{"type":"string","const":"GET"},"url":{"type":"string","format":"uri"}},"required":["method","url"],"additionalProperties":false}`),
@@ -357,7 +357,7 @@ func (TimerRegistration) Configure(
 	}
 	maxDuration := time.Duration(settings.MaxDurationMS) * time.Millisecond
 	config.Handlers = append(config.Handlers, timer.Handler{MaxDuration: maxDuration})
-	config.Capabilities = append(config.Capabilities, dispatcher.Capability{
+	config.Capabilities = append(config.Capabilities, sys.Capability{
 		Name: timer.Capability,
 		Description: fmt.Sprintf(
 			"Set a relative timer and be replayed when it fires. The run pauses until the duration elapses, then continues. Maximum %s.",
