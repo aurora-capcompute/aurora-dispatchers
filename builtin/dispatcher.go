@@ -36,7 +36,7 @@ func (d *Dispatcher[K]) Capabilities() []sys.Capability {
 	return d.Config.Capabilities
 }
 
-// Dispatch routes a brain call to the handler that owns its name. Every tool is
+// Dispatch routes a program call to the handler that owns its name. Every tool is
 // addressed by its local manifest name; there are no fixed capability names.
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	for _, handler := range d.MCP {

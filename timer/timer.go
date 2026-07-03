@@ -33,7 +33,7 @@ type SetRequest struct {
 // Handler dispatches a timer tool's calls. It satisfies builtin.Handler and is
 // bound to the tool's local manifest name.
 type Handler struct {
-	// Name is the tool's local manifest name the brain dispatches to.
+	// Name is the tool's local manifest name the program dispatches to.
 	Name string
 	// MaxDuration bounds the requested duration. Zero uses DefaultMaxDuration.
 	MaxDuration time.Duration

@@ -1,6 +1,6 @@
 // Package memory provides tenant-scoped shared memory — the filesystem role
 // of the OS model (docs/ARCHITECTURE.md, "Shared state"). Sessions are
-// execution scope, not data scope: data that outlives and crosses threads
+// execution scope, not data scope: data that outlives and crosses sessions
 // lives at the tenant level and is reached only through these journaled
 // capabilities, never ambiently. The two kernel laws fix the driver's form:
 // determinism — reads travel the journaled syscall path, so replay re-reads
@@ -25,7 +25,7 @@ import (
 // Store is the app-supplied durable KV store behind tenant memory. Keys are
 // slash-separated paths, already tenant- and subtree-qualified by the
 // handler. Every value is stored with its provenance labels — the taint of
-// the run that wrote it — and Get returns them so a later thread reads the
+// the run that wrote it — and Get returns them so a later session reads the
 // value *as tainted*, not as laundered truth (the memory-poisoning defense).
 // Values are versioned (1 on first write, incremented per write) so writers
 // can compare-and-set instead of blindly overwriting each other.
@@ -49,7 +49,7 @@ const (
 
 // ErrConflict is returned by Store.Put when the version expectation fails.
 // The handler surfaces it to the guest as errno conflict; the guest re-reads
-// and retries — optimistic concurrency across a tenant's threads.
+// and retries — optimistic concurrency across a tenant's sessions.
 var ErrConflict = errors.New("memory: version conflict")
 
 // GetRequest asks for one key, relative to the grant's subtree.
@@ -148,7 +148,7 @@ func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	}
 	// Restamp the stored provenance: the flow monitor accumulates it into the
 	// reading run's taint, so a value written from a tainted run resurfaces
-	// as tainted in every later thread.
+	// as tainted in every later session.
 	return result.WithLabels(labels...), nil
 }
 

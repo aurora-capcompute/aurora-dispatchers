@@ -26,7 +26,7 @@ type Services struct {
 
 // Registration builds a leaf I/O dispatcher for one tool `type`. A registration
 // is selected by `type`; the capability it publishes and the handler it binds
-// are keyed by the tool's local `name`, which is what the brain dispatches to.
+// are keyed by the tool's local `name`, which is what the program dispatches to.
 type Registration interface {
 	Matches(toolType string) bool
 	Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error)
@@ -55,8 +55,8 @@ func (r *Registry) Normalize(toolType string, settings json.RawMessage) (json.Ra
 }
 
 // Entry is one leaf tool to build: `Type` selects the registration, `Name` is
-// the local routing handle the brain dispatches to. `Hidden` keeps the tool
-// dispatchable but off the brain's discoverable menu.
+// the local routing handle the program dispatches to. `Hidden` keeps the tool
+// dispatchable but off the program's discoverable menu.
 type Entry struct {
 	Name     string
 	Type     string
@@ -326,7 +326,7 @@ type MemorySettings struct {
 }
 
 // MemoryRegistration provides tenant-scoped shared memory — the filesystem
-// role: cross-thread durable state reached as a journaled capability, never
+// role: cross-session durable state reached as a journaled capability, never
 // ambiently (see capcompute docs/ARCHITECTURE.md, "Shared state").
 type MemoryRegistration struct{}
 
@@ -391,7 +391,7 @@ func (MemoryRegistration) Configure(
 		},
 		sys.Capability{
 			Name:         name + ".put",
-			Description:  fmt.Sprintf("Write one key to %s. Persists across threads of this tenant. Optional if_version makes the write a compare-and-set: 0 = create only, N = replace exactly version N; a conflict errno means re-read and retry.", scope),
+			Description:  fmt.Sprintf("Write one key to %s. Persists across sessions of this tenant. Optional if_version makes the write a compare-and-set: 0 = create only, N = replace exactly version N; a conflict errno means re-read and retry.", scope),
 			InputSchema:  json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"value":{},"if_version":{"type":"integer","minimum":0}},"required":["key","value"],"additionalProperties":false}`),
 			Compensation: sys.Compensation{Kind: sys.CompensateEscalate},
 		},

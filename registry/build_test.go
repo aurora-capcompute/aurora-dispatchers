@@ -8,7 +8,7 @@ import (
 )
 
 // Build selects a registration by the tool's `type`, then publishes the
-// capability and binds the handler under the tool's local `name`. The brain
+// capability and binds the handler under the tool's local `name`. The program
 // routes by `name`, never by `type`.
 func TestBuildRoutesByLocalName(t *testing.T) {
 	reg := registry.Default()
