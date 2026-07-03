@@ -25,7 +25,7 @@ import (
 // Store is the app-supplied durable KV store behind tenant memory. Keys are
 // slash-separated paths, already tenant- and subtree-qualified by the
 // handler. Every value is stored with its provenance labels — the taint of
-// the run that wrote it — and Get returns them so a later session reads the
+// the process that wrote it — and Get returns them so a later session reads the
 // value *as tainted*, not as laundered truth (the memory-poisoning defense).
 // Values are versioned (1 on first write, incremented per write) so writers
 // can compare-and-set instead of blindly overwriting each other.
@@ -147,7 +147,7 @@ func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 		return result, err
 	}
 	// Restamp the stored provenance: the flow monitor accumulates it into the
-	// reading run's taint, so a value written from a tainted run resurfaces
+	// reading process's taint, so a value written from a tainted process resurfaces
 	// as tainted in every later session.
 	return result.WithLabels(labels...), nil
 }
@@ -174,8 +174,8 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 		}
 		expect = *request.IfVersion
 	}
-	// The written value derives from anything the run has observed (the guest
-	// is opaque), so it is stored with the run's taint, handed down by the
+	// The written value derives from anything the process has observed (the guest
+	// is opaque), so it is stored with the process's taint, handed down by the
 	// flow monitor.
 	version, err := h.Store.Put(ctx, h.Tenant, qualified, request.Value, sys.Taint(ctx), expect)
 	if errors.Is(err, ErrConflict) {

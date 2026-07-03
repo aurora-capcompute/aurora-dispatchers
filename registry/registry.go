@@ -309,7 +309,7 @@ func (TimerRegistration) Configure(
 	config.Capabilities = append(config.Capabilities, sys.Capability{
 		Name: name,
 		Description: fmt.Sprintf(
-			"Set a relative timer and be replayed when it fires. The run pauses until the duration elapses, then continues. Maximum %s.",
+			"Set a relative timer and be replayed when it fires. The process pauses until the duration elapses, then continues. Maximum %s.",
 			maxDuration,
 		),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`),

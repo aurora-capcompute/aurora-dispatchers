@@ -179,7 +179,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme"}
 	journal := newMemJournal()
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Run: "run-1"}
+	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "proc-1"}
 
 	chain := func(t *testing.T) sys.Dispatcher[string] {
 		t.Helper()

@@ -3,7 +3,7 @@
 //
 // timer.set always yields a durable task. The host application owns a scheduler
 // that resolves the task (with Completed) once the requested duration elapses,
-// which resumes the run from the same point. The handler is therefore only ever
+// which resumes the process from the same point. The handler is therefore only ever
 // invoked for the initial yield; on resume the resolved task data is returned
 // directly by the task dispatcher without re-dispatching here.
 package timer
