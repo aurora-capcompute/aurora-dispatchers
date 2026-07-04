@@ -363,22 +363,19 @@ func (MemoryRegistration) Configure(
 	}
 	config.Capabilities = append(config.Capabilities,
 		sys.Capability{
-			Name:         name + ".get",
-			Description:  fmt.Sprintf("Read one key from %s. Keys are relative slash-paths; the response carries the value's current version for compare-and-set writes.", scope),
-			InputSchema:  json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1}},"required":["key"],"additionalProperties":false}`),
-			Compensation: sys.Compensation{Kind: sys.CompensateNone},
+			Name:        name + ".get",
+			Description: fmt.Sprintf("Read one key from %s. Keys are relative slash-paths; the response carries the value's current version for compare-and-set writes.", scope),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1}},"required":["key"],"additionalProperties":false}`),
 		},
 		sys.Capability{
-			Name:         name + ".put",
-			Description:  fmt.Sprintf("Write one key to %s. Persists across sessions of this tenant. Optional if_version makes the write a compare-and-set: 0 = create only, N = replace exactly version N; a conflict errno means re-read and retry.", scope),
-			InputSchema:  json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"value":{},"if_version":{"type":"integer","minimum":0}},"required":["key","value"],"additionalProperties":false}`),
-			Compensation: sys.Compensation{Kind: sys.CompensateEscalate},
+			Name:        name + ".put",
+			Description: fmt.Sprintf("Write one key to %s. Persists across sessions of this tenant. Optional if_version makes the write a compare-and-set: 0 = create only, N = replace exactly version N; a conflict errno means re-read and retry.", scope),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"value":{},"if_version":{"type":"integer","minimum":0}},"required":["key","value"],"additionalProperties":false}`),
 		},
 		sys.Capability{
-			Name:         name + ".list",
-			Description:  fmt.Sprintf("List keys under a prefix in %s.", scope),
-			InputSchema:  json.RawMessage(`{"type":"object","properties":{"prefix":{"type":"string"}},"additionalProperties":false}`),
-			Compensation: sys.Compensation{Kind: sys.CompensateNone},
+			Name:        name + ".list",
+			Description: fmt.Sprintf("List keys under a prefix in %s.", scope),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"prefix":{"type":"string"}},"additionalProperties":false}`),
 		},
 	)
 	return nil

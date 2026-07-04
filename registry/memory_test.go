@@ -32,12 +32,6 @@ func TestMemoryRegistrationPublishesOperations(t *testing.T) {
 			t.Fatalf("capability %q has no input schema", want)
 		}
 	}
-	if names["mem.get"].Compensation.Kind != sys.CompensateNone {
-		t.Fatalf("mem.get compensation = %+v, want none (read)", names["mem.get"].Compensation)
-	}
-	if names["mem.put"].Compensation.Kind != sys.CompensateEscalate {
-		t.Fatalf("mem.put compensation = %+v, want escalate (LWW overwrite)", names["mem.put"].Compensation)
-	}
 	if len(config.Handlers) != 1 || !config.Handlers[0].Handles("mem.put") {
 		t.Fatalf("handlers = %+v", config.Handlers)
 	}
