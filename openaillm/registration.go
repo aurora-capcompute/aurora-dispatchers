@@ -22,10 +22,10 @@ var validOperations = map[string]struct{}{
 	"openai.models.list": {},
 }
 
-// operationNames returns the fixed `openai.*` operation names this tool exposes,
+// Operations returns the fixed `openai.*` operation names this tool exposes,
 // sorted for deterministic capability ordering. These are the names the compiled
 // program invokes directly; the tool's local manifest name is cosmetic.
-func operationNames() []string {
+func Operations() []string {
 	names := make([]string, 0, len(validOperations))
 	for name := range validOperations {
 		names = append(names, name)
@@ -79,7 +79,7 @@ func (Registration) Configure(
 	if err != nil {
 		return err
 	}
-	for _, op := range operationNames() {
+	for _, op := range Operations() {
 		handler.AddCapability(op, normalized)
 		config.Capabilities = append(config.Capabilities, capabilityFor(op, normalized))
 	}

@@ -245,27 +245,6 @@ func (MCPRegistration) Configure(
 	return nil
 }
 
-type AuroraLogRegistration struct{}
-
-func (AuroraLogRegistration) Matches(toolType string) bool { return toolType == "core.log" }
-
-func (AuroraLogRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	if len(raw) == 0 {
-		return json.RawMessage(`{}`), nil
-	}
-	return raw, nil
-}
-
-func (AuroraLogRegistration) Configure(
-	_ context.Context,
-	_ string,
-	_ json.RawMessage,
-	_ Services,
-	_ *builtin.Config,
-) error {
-	return nil
-}
-
 type TimerSettings struct {
 	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
 }
