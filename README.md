@@ -15,6 +15,11 @@ Packages:
 
 - `builtin`: the leaf dispatcher — routes each syscall to the handler that
   owns its name (internet reads, registered MCP tools, injected handlers).
+- `hold`: the `core.hold` reference Try-Confirm/Cancel reservation capability —
+  saga isolation as explicitly pending holds (`reserve` → `confirm`, or
+  `release`/expiry) over a process-local hold table; `reserve` is exactly-once
+  under the kernel's idempotency keys, `release` is the natural
+  `sys.compensate` target.
 - `internet`: bounded allowlisted HTTP GET client.
 - `mcp`: stdio MCP discovery and tool calls.
 - `memory`: the `core.memory` tenant-scoped shared store capability —
