@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
-	"github.com/aurora-capcompute/aurora-dispatchers/hold"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
@@ -43,7 +42,7 @@ func New(registrations ...Registration) *Registry {
 }
 
 func Default() *Registry {
-	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{}, MemoryRegistration{}, HoldRegistration{})
+	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{}, MemoryRegistration{})
 }
 
 func (r *Registry) Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error) {
@@ -382,83 +381,11 @@ func (MemoryRegistration) Configure(
 	return nil
 }
 
-// HoldSettings configures one core.hold grant. DefaultTTLSeconds is the
-// pending window a reserve gets when the call names none — how long a hold
-// stays PENDING before it lapses back to free. Bounded by hold.MaxTTL, the
-// same ceiling applied to per-call ttl_seconds overrides.
-type HoldSettings struct {
-	DefaultTTLSeconds int64 `json:"default_ttl_seconds,omitempty"`
-}
-
-// HoldRegistration provides the reference Try-Confirm/Cancel reservation
-// driver — saga isolation via explicitly PENDING holds instead of dirty
-// writes (capcompute docs/ROADMAP.md #19). The runtime supplies the Cancel
-// leg (sys.compensate registers undos, sys.abort runs them); this tool
-// supplies the Try (reserve) and Confirm (confirm) legs, with release as the
-// compensation target. See package hold for the protocol and the
-// reference-shape caveat (process-local hold table).
-type HoldRegistration struct{}
-
-func (HoldRegistration) Matches(toolType string) bool { return toolType == "core.hold" }
-
-func (HoldRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	settings := HoldSettings{DefaultTTLSeconds: int64(hold.DefaultTTL / time.Second)}
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return nil, err
-		}
-	}
-	if settings.DefaultTTLSeconds <= 0 {
-		return nil, fmt.Errorf("default_ttl_seconds must be positive")
-	}
-	if max := int64(hold.MaxTTL / time.Second); settings.DefaultTTLSeconds > max {
-		return nil, fmt.Errorf("default_ttl_seconds must be at most %d", max)
-	}
-	return json.Marshal(settings)
-}
-
-func (HoldRegistration) Configure(
-	_ context.Context,
-	name string,
-	raw json.RawMessage,
-	_ Services,
-	config *builtin.Config,
-) error {
-	normalized, err := (HoldRegistration{}).Normalize("core.hold", raw)
-	if err != nil {
-		return err
-	}
-	var settings HoldSettings
-	if err := json.Unmarshal(normalized, &settings); err != nil {
-		return err
-	}
-	config.Handlers = append(config.Handlers, &hold.Handler{
-		Name:       name,
-		DefaultTTL: time.Duration(settings.DefaultTTLSeconds) * time.Second,
-	})
-	maxTTLSeconds := int64(hold.MaxTTL / time.Second)
-	config.Capabilities = append(config.Capabilities,
-		sys.Capability{
-			Name: name + ".reserve",
-			Description: fmt.Sprintf(
-				"Place a temporary hold on a resource — the Try leg of Try-Confirm/Cancel, the saga-isolation pattern. Inside a critical section (after sys.begin), reserve instead of writing dirty state, then immediately register the undo with sys.compensate {name: %q, args: {\"hold_id\": ...}} so sys.abort cancels the hold. While pending, the resource cannot be reserved again (errno conflict) and the hold lapses at expires_at_ms unless confirmed. Confirm with %s before sys.commit. Default pending window %ds.",
-				name+".release", name+".confirm", settings.DefaultTTLSeconds,
-			),
-			InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","properties":{"resource":{"type":"string","minLength":1},"ttl_seconds":{"type":"integer","minimum":1,"maximum":%d}},"required":["resource"],"additionalProperties":false}`, maxTTLSeconds)),
-		},
-		sys.Capability{
-			Name: name + ".confirm",
-			Description: fmt.Sprintf(
-				"Confirm a pending hold, making the reservation permanent — the Confirm leg of Try-Confirm/Cancel. Call it before sys.commit closes the critical section. Idempotent: confirming an already-confirmed hold succeeds. Past the hold's deadline it fails with errno expired and the resource is free again — re-reserve with %s and retry; errno not_found means the hold was never reserved or is already gone.",
-				name+".reserve",
-			),
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"hold_id":{"type":"string","minLength":1}},"required":["hold_id"],"additionalProperties":false}`),
-		},
-		sys.Capability{
-			Name:        name + ".release",
-			Description: "Release a hold, freeing its resource — the Cancel leg of Try-Confirm/Cancel and the natural sys.compensate target. Idempotent the way an undo must be: releasing an unknown, expired, or already-released hold succeeds. A confirmed hold refuses release with errno conflict — confirmed means kept.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"hold_id":{"type":"string","minLength":1}},"required":["hold_id"],"additionalProperties":false}`),
-		},
-	)
-	return nil
-}
+// Try-Confirm/Cancel is deliberately not a driver. A reservation is a real
+// write to the participant that owns the resource — the third-party system
+// every reader treats as the source of truth — so it is an ordinary dispatch:
+// reserve, register the release with sys.compensate (the runtime guarantees it
+// runs if the section aborts or fails), confirm as the last call before
+// sys.commit. Pending state, and any expiry policy, belong to the resource
+// owner (Pardon & Pautasso's RESTful TCC puts them on the participant); an
+// orchestrator-side hold table would be a reservation no other booker can see.
