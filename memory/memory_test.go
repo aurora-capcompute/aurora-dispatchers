@@ -3,6 +3,7 @@ package memory_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -47,11 +48,16 @@ func (j *memJournal) Length() int { return len(j.records) }
 
 func dispatch(t *testing.T, h memory.Handler, name, args string, auth sys.Authorization) sys.SyscallResult {
 	t.Helper()
+	return dispatchCtx(t, context.Background(), h, name, args, auth)
+}
+
+func dispatchCtx(t *testing.T, ctx context.Context, h memory.Handler, name, args string, auth sys.Authorization) sys.SyscallResult {
+	t.Helper()
 	call := sys.Syscall{Abi: sys.ABIVersion, Name: name}
 	if args != "" {
 		call.Args = json.RawMessage(args)
 	}
-	result, err := h.DispatchCall(context.Background(), call, auth)
+	result, err := h.DispatchCall(ctx, call, auth)
 	if err != nil {
 		t.Fatalf("dispatch %s: %v", name, err)
 	}
@@ -190,7 +196,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 		return replay.NewDispatcher[string](tape, handlerDispatcher{handler})
 	}
 
-	if _, err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"casual"`), nil, memory.PutAny); err != nil {
+	if _, err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"casual"`), nil, memory.PutAny, ""); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 	read := sys.Syscall{Abi: sys.ABIVersion, Name: "mem.get", Args: json.RawMessage(`{"key":"prefs/tone"}`)}
@@ -201,7 +207,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	}
 
 	// Another session mutates the shared value…
-	if _, err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"formal"`), nil, memory.PutAny); err != nil {
+	if _, err := store.Put(context.Background(), "acme", "prefs/tone", json.RawMessage(`"formal"`), nil, memory.PutAny, ""); err != nil {
 		t.Fatalf("mutate store: %v", err)
 	}
 
@@ -362,5 +368,164 @@ func TestMemoryCompareAndSet(t *testing.T) {
 	result = dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"x","if_version":-2}`, sys.Authorization{})
 	if result.Errno() != sys.ErrnoInvalidArgs {
 		t.Fatalf("negative if_version = %#v, want invalid_args", result)
+	}
+}
+
+// The at-least-once law made exactly-once: the kernel journals an intent
+// before the effect and re-drives it after a crash under the same idempotency
+// key, so the same put dispatched twice under one key must write once and
+// answer identically — including the version in the result payload.
+func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
+	store := memory.NewMapStore()
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme"}
+	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/3/sha256:put")
+
+	// Create-only makes re-execution detectable: run twice, it would conflict.
+	first := dispatchCtx(t, intent, handler, "mem.put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{})
+	if first.Status() != sys.StatusResult {
+		t.Fatalf("first put = %#v", first)
+	}
+	second := dispatchCtx(t, intent, handler, "mem.put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{})
+	if second.Status() != sys.StatusResult {
+		t.Fatalf("re-driven put = %#v, want the recorded result, not a conflict", second)
+	}
+	if string(first.Result()) != string(second.Result()) {
+		t.Fatalf("re-driven result diverged: %s vs %s", second.Result(), first.Result())
+	}
+	var put memory.PutResponse
+	if err := json.Unmarshal(second.Result(), &put); err != nil {
+		t.Fatalf("decode put: %v", err)
+	}
+	if put.Version != 1 {
+		t.Fatalf("re-driven version = %d, want the recorded 1", put.Version)
+	}
+	// One write reached the store: the version was not bumped twice.
+	if _, _, version, _, _ := store.Get(context.Background(), "acme", "prefs/tone"); version != 1 {
+		t.Fatalf("store version = %d, want 1 (a deduped put must not re-write)", version)
+	}
+
+	// The memory is keyed by intent, not by call shape: a distinct intent with
+	// the same arguments executes for real — and now genuinely conflicts.
+	other := sys.WithIdempotencyKey(context.Background(), "proc-1/9/sha256:put")
+	if result := dispatchCtx(t, other, handler, "mem.put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{}); result.Errno() != sys.ErrnoConflict {
+		t.Fatalf("fresh intent = %#v, want a real conflict", result)
+	}
+	// A keyless dispatch stays at-least-once and writes again.
+	if result := dispatch(t, handler, "mem.put", `{"key":"prefs/tone","value":"casual"}`, sys.Authorization{}); result.Status() != sys.StatusResult {
+		t.Fatalf("keyless put = %#v", result)
+	}
+	if _, _, version, _, _ := store.Get(context.Background(), "acme", "prefs/tone"); version != 2 {
+		t.Fatalf("store version = %d, want 2 after the keyless write", version)
+	}
+	// Activity records never surface as guest-visible keys.
+	list := dispatch(t, handler, "mem.list", "", sys.Authorization{})
+	var listed memory.ListResponse
+	if err := json.Unmarshal(list.Result(), &listed); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listed.Keys) != 1 || listed.Keys[0] != "prefs/tone" {
+		t.Fatalf("list = %+v, want only prefs/tone", listed)
+	}
+}
+
+// A recorded key means the approval was already granted and the effect already
+// performed: the re-driven dispatch returns the recorded result instead of
+// re-yielding a human task for a write that happened.
+func TestMemoryPutDedupeSkipsApprovalGate(t *testing.T) {
+	store := memory.NewMapStore()
+	gated := memory.Handler{Name: "mem", Store: store, Tenant: "acme", RequireApprovalOnPut: true}
+	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/5/sha256:put")
+
+	approved := dispatchCtx(t, intent, gated, "mem.put", `{"key":"prefs/tone","value":1}`, sys.Authorization{Decision: sys.Approved, Actor: "alice"})
+	if approved.Status() != sys.StatusResult {
+		t.Fatalf("approved put = %#v", approved)
+	}
+	redriven := dispatchCtx(t, intent, gated, "mem.put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
+	if redriven.Status() != sys.StatusResult {
+		t.Fatalf("re-driven put = %#v, want the recorded result, not a fresh yield", redriven)
+	}
+	if string(redriven.Result()) != string(approved.Result()) {
+		t.Fatalf("re-driven result diverged: %s vs %s", redriven.Result(), approved.Result())
+	}
+	if _, _, version, _, _ := store.Get(context.Background(), "acme", "prefs/tone"); version != 1 {
+		t.Fatalf("store version = %d, want 1", version)
+	}
+	// An unexecuted intent still yields: the gate is skipped only by a record.
+	fresh := sys.WithIdempotencyKey(context.Background(), "proc-1/8/sha256:put")
+	if result := dispatchCtx(t, fresh, gated, "mem.put", `{"key":"prefs/other","value":1}`, sys.Authorization{}); result.Status() != sys.StatusYield {
+		t.Fatalf("unapproved fresh intent = %#v, want yield", result)
+	}
+}
+
+// MapStore's activity memory: replay of a recorded key, invisibility to
+// Get/List, CAS interplay (a deduped put must not bump the version twice),
+// conflicts record nothing, and tenant scoping.
+func TestMapStoreActivityMemory(t *testing.T) {
+	ctx := context.Background()
+	store := memory.NewMapStore()
+
+	v1, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"one"`), []string{"untrusted_web"}, memory.PutAbsent, "act-1")
+	if err != nil || v1 != 1 {
+		t.Fatalf("create = %d, %v", v1, err)
+	}
+	// The re-driven put replays the recorded version — no conflict (re-executing
+	// create-only would), no second bump, no re-write of the value.
+	again, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"ignored"`), nil, memory.PutAbsent, "act-1")
+	if err != nil || again != 1 {
+		t.Fatalf("re-driven create = %d, %v; want the recorded 1", again, err)
+	}
+	value, _, version, ok, err := store.Get(ctx, "acme", "notes/a")
+	if err != nil || !ok || string(value) != `"one"` || version != 1 {
+		t.Fatalf("get = %s v=%d ok=%v err=%v; deduped put must not re-write", value, version, ok, err)
+	}
+	if version, done, err := store.Activity(ctx, "acme", "act-1"); err != nil || !done || version != 1 {
+		t.Fatalf("activity = %d, %v, %v", version, done, err)
+	}
+	// Activity memory is tenant-scoped bookkeeping…
+	if _, done, _ := store.Activity(ctx, "rival", "act-1"); done {
+		t.Fatal("activity leaked across tenants")
+	}
+	// …and never guest-visible data.
+	if _, _, _, ok, _ := store.Get(ctx, "acme", "act-1"); ok {
+		t.Fatal("activity record surfaced through Get")
+	}
+	if keys, _ := store.List(ctx, "acme", ""); len(keys) != 1 || keys[0] != "notes/a" {
+		t.Fatalf("list = %v, want only notes/a", keys)
+	}
+
+	// CAS interplay: the recorded CAS replays instead of conflicting on its own
+	// prior success.
+	v2, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"two"`), nil, 1, "act-2")
+	if err != nil || v2 != 2 {
+		t.Fatalf("cas = %d, %v", v2, err)
+	}
+	if again, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"two"`), nil, 1, "act-2"); err != nil || again != 2 {
+		t.Fatalf("re-driven cas = %d, %v; want the recorded 2", again, err)
+	}
+	if _, _, version, _, _ := store.Get(ctx, "acme", "notes/a"); version != 2 {
+		t.Fatalf("version = %d, want 2 (not double-bumped)", version)
+	}
+
+	// A conflict is a non-effect and records nothing: the same key may later
+	// succeed once the expectation genuinely holds.
+	if _, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"x"`), nil, memory.PutAbsent, "act-3"); !errors.Is(err, memory.ErrConflict) {
+		t.Fatalf("conflicting put = %v, want ErrConflict", err)
+	}
+	if _, done, _ := store.Activity(ctx, "acme", "act-3"); done {
+		t.Fatal("a failed put must not record activity")
+	}
+	if v3, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"three"`), nil, 2, "act-3"); err != nil || v3 != 3 {
+		t.Fatalf("retry under act-3 = %d, %v", v3, err)
+	}
+
+	// "" bypasses the activity memory: keyless writes stay at-least-once.
+	if v, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"lww"`), nil, memory.PutAny, ""); err != nil || v != 4 {
+		t.Fatalf("keyless put = %d, %v", v, err)
+	}
+	if v, err := store.Put(ctx, "acme", "notes/a", json.RawMessage(`"lww"`), nil, memory.PutAny, ""); err != nil || v != 5 {
+		t.Fatalf("second keyless put = %d, %v; \"\" must never dedupe", v, err)
+	}
+	if _, done, _ := store.Activity(ctx, "acme", ""); done {
+		t.Fatal("empty activity key was recorded")
 	}
 }
