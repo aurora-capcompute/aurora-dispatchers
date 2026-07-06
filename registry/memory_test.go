@@ -13,7 +13,7 @@ import (
 
 func TestMemoryRegistrationPublishesOperations(t *testing.T) {
 	config, err := registry.Default().Build(context.Background(),
-		[]registry.Entry{{Name: "mem", Type: "core.memory", Settings: json.RawMessage(`{"subtree":"notes","require_approval_on_put":true}`)}},
+		[]registry.Entry{{Syscall: "core.memory", Settings: json.RawMessage(`{"subtree":"notes","require_approval_on_put":true}`)}},
 		registry.Services{Tenant: "acme", MemoryStore: memory.NewMapStore()},
 	)
 	if err != nil {
@@ -23,7 +23,7 @@ func TestMemoryRegistrationPublishesOperations(t *testing.T) {
 	for _, capability := range config.Capabilities {
 		names[capability.Name] = capability
 	}
-	for _, want := range []string{"mem.get", "mem.put", "mem.list"} {
+	for _, want := range []string{"memory.get", "memory.put", "memory.list"} {
 		capability, ok := names[want]
 		if !ok {
 			t.Fatalf("capability %q not published: %v", want, names)
@@ -32,13 +32,13 @@ func TestMemoryRegistrationPublishesOperations(t *testing.T) {
 			t.Fatalf("capability %q has no input schema", want)
 		}
 	}
-	if len(config.Handlers) != 1 || !config.Handlers[0].Handles("mem.put") {
+	if len(config.Handlers) != 1 || !config.Handlers[0].Handles("memory.put") {
 		t.Fatalf("handlers = %+v", config.Handlers)
 	}
 }
 
 func TestMemoryRegistrationRequiresServices(t *testing.T) {
-	entries := []registry.Entry{{Name: "mem", Type: "core.memory"}}
+	entries := []registry.Entry{{Syscall: "core.memory"}}
 
 	if _, err := registry.Default().Build(context.Background(), entries,
 		registry.Services{MemoryStore: memory.NewMapStore()}); err == nil || !strings.Contains(err.Error(), "Tenant") {

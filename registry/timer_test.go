@@ -7,6 +7,7 @@ import (
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/aurora-dispatchers/timer"
 )
 
 func TestTimerRegistrationConfigures(t *testing.T) {
@@ -15,19 +16,19 @@ func TestTimerRegistrationConfigures(t *testing.T) {
 		t.Fatal("should match core.timer")
 	}
 	if reg.Matches("timer.set") {
-		t.Fatal("must match by type, not the old capability name")
+		t.Fatal("must match by the granted syscall, not the capability name")
 	}
 	var config builtin.Config
-	if err := reg.Configure(context.Background(), "myTimer", nil, registry.Services{}, &config); err != nil {
+	if err := reg.Configure(context.Background(), nil, registry.Services{}, &config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
 	if len(config.Handlers) != 1 {
 		t.Fatalf("handlers = %d, want 1", len(config.Handlers))
 	}
-	if !config.Handlers[0].Handles("myTimer") {
-		t.Fatal("handler does not handle the local name myTimer")
+	if !config.Handlers[0].Handles(timer.Capability) {
+		t.Fatalf("handler does not handle the canonical name %s", timer.Capability)
 	}
-	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != "myTimer" {
+	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != timer.Capability {
 		t.Fatalf("capabilities = %+v", config.Capabilities)
 	}
 }

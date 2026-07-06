@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -32,16 +33,16 @@ func TestInternetNormalizeRejectsNonGET(t *testing.T) {
 	}
 }
 
-func TestInternetConfigurePublishesUnderLocalName(t *testing.T) {
+func TestInternetConfigurePublishesCanonicalName(t *testing.T) {
 	raw := json.RawMessage(`{"permissions":[{"requestType":"GET","domain":"example.com"}]}`)
 	var config builtin.Config
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), "internetAccess", raw, registry.Services{}, &config); err != nil {
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, &config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != "internetAccess" {
-		t.Fatalf("capabilities = %+v, want one named internetAccess", config.Capabilities)
+	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != internet.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities, internet.Capability)
 	}
-	if len(config.Handlers) != 1 || !config.Handlers[0].Handles("internetAccess") {
-		t.Fatal("handler must route by the local name internetAccess")
+	if len(config.Handlers) != 1 || !config.Handlers[0].Handles(internet.Capability) {
+		t.Fatalf("handler must route by the canonical name %s", internet.Capability)
 	}
 }

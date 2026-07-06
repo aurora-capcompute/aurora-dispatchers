@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// Capability is the canonical syscall name a core.internet grant publishes.
+const Capability = "internet.read"
+
 const (
 	DefaultTimeout          = 10 * time.Second
 	DefaultMaxResponseBytes = 64 * 1024

@@ -67,6 +67,10 @@ type Store interface {
 }
 
 // Put expectations.
+// Capability is the canonical name prefix a core.memory grant publishes:
+// memory.get, memory.put, memory.list.
+const Capability = "memory"
+
 const (
 	// PutAny overwrites unconditionally — last writer wins.
 	PutAny int64 = -1

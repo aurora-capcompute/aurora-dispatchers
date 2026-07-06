@@ -5,58 +5,33 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/aurora-dispatchers/timer"
 )
 
-// Build selects a registration by the tool's `type`, then publishes the
-// capability and binds the handler under the tool's local `name`. The program
-// routes by `name`, never by `type`.
-func TestBuildRoutesByLocalName(t *testing.T) {
+// Build selects a registration by the granted syscall; the capability it
+// publishes and the handler it binds carry the driver's canonical name — the
+// manifest names nothing.
+func TestBuildPublishesCanonicalNames(t *testing.T) {
 	reg := registry.Default()
-	entries := []registry.Entry{
-		{Name: "myTimer", Type: "core.timer"},
-	}
-	config, err := reg.Build(context.Background(), entries, registry.Services{})
+	config, err := reg.Build(context.Background(), []registry.Entry{{Syscall: "core.timer"}}, registry.Services{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != "myTimer" {
-		t.Fatalf("capabilities = %+v, want one named myTimer", config.Capabilities)
+	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != timer.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities, timer.Capability)
 	}
-	if len(config.Handlers) != 1 || !config.Handlers[0].Handles("myTimer") {
-		t.Fatal("handler does not handle the local name myTimer")
+	if len(config.Handlers) != 1 || !config.Handlers[0].Handles(timer.Capability) {
+		t.Fatalf("handler does not handle %s", timer.Capability)
 	}
-	if config.Handlers[0].Handles("core.timer") || config.Handlers[0].Handles("timer.set") {
-		t.Fatal("handler must route by local name, not by type or fixed capability name")
-	}
-}
-
-// Two instances of the same type are addressable independently by name.
-func TestBuildTwoInstancesOfSameType(t *testing.T) {
-	reg := registry.Default()
-	entries := []registry.Entry{
-		{Name: "shortTimer", Type: "core.timer"},
-		{Name: "longTimer", Type: "core.timer"},
-	}
-	config, err := reg.Build(context.Background(), entries, registry.Services{})
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	if len(config.Handlers) != 2 {
-		t.Fatalf("handlers = %d, want 2", len(config.Handlers))
-	}
-	names := map[string]bool{}
-	for _, c := range config.Capabilities {
-		names[c.Name] = true
-	}
-	if !names["shortTimer"] || !names["longTimer"] {
-		t.Fatalf("capabilities = %+v, want shortTimer and longTimer", config.Capabilities)
+	if config.Handlers[0].Handles("core.timer") {
+		t.Fatal("handler must route by the canonical capability name, not the syscall")
 	}
 }
 
-func TestBuildRejectsUnknownType(t *testing.T) {
+func TestBuildRejectsUnknownSyscall(t *testing.T) {
 	reg := registry.Default()
-	_, err := reg.Build(context.Background(), []registry.Entry{{Name: "x", Type: "core.bogus"}}, registry.Services{})
+	_, err := reg.Build(context.Background(), []registry.Entry{{Syscall: "core.bogus"}}, registry.Services{})
 	if err == nil {
-		t.Fatal("expected error for unknown type")
+		t.Fatal("expected error for unknown syscall")
 	}
 }

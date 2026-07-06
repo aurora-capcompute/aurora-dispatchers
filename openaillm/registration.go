@@ -22,9 +22,9 @@ var validOperations = map[string]struct{}{
 	"openai.models.list": {},
 }
 
-// Operations returns the fixed `openai.*` operation names this tool exposes,
-// sorted for deterministic capability ordering. These are the names the compiled
-// program invokes directly; the tool's local manifest name is cosmetic.
+// Operations returns the fixed `openai.*` operation names this driver
+// exposes, sorted for deterministic capability ordering. These are the names
+// the compiled program invokes directly.
 func Operations() []string {
 	names := make([]string, 0, len(validOperations))
 	for name := range validOperations {
@@ -52,13 +52,11 @@ func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, e
 	return json.Marshal(normalized.Settings)
 }
 
-// Configure publishes the fixed openai.* operations for one core.openaiApi tool.
-// The local name is cosmetic: the program calls the operations by their ABI
-// names, and the tool is kept off the discoverable menu via the manifest
-// `hidden` flag.
+// Configure publishes the fixed openai.* operations for one core.openaiApi
+// grant. The program calls the operations by their ABI names; the grant is
+// kept off the discoverable menu via the manifest `hidden` flag.
 func (Registration) Configure(
 	_ context.Context,
-	_ string,
 	raw json.RawMessage,
 	_ registry.Services,
 	config *builtin.Config,

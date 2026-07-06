@@ -32,7 +32,7 @@ func TestMatchesType(t *testing.T) {
 func TestConfigurePublishesAllOperations(t *testing.T) {
 	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test"}`)
 	var config builtin.Config
-	if err := (Registration{}).Configure(context.Background(), "llmRequest", raw, registry.Services{}, &config); err != nil {
+	if err := (Registration{}).Configure(context.Background(), raw, registry.Services{}, &config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
 	if len(config.Capabilities) != len(validOperations) {
