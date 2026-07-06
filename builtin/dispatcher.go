@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -19,7 +18,6 @@ type Handler interface {
 }
 
 type Config struct {
-	MCP          []*mcp.Handler
 	Handlers     []Handler
 	Capabilities []sys.Capability
 }
@@ -39,11 +37,6 @@ func (d *Dispatcher[K]) Capabilities() []sys.Capability {
 // Dispatch routes a program call to the handler that owns its name. Every tool is
 // addressed by its local manifest name; there are no fixed capability names.
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	for _, handler := range d.MCP {
-		if handler.Handles(call.Name) {
-			return handler.DispatchCall(ctx, call, auth)
-		}
-	}
 	for _, handler := range d.Handlers {
 		if handler.Handles(call.Name) {
 			return handler.DispatchCall(ctx, call, auth)

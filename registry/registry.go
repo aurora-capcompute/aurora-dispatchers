@@ -7,16 +7,13 @@ import (
 	"fmt"
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/aurora-dispatchers/mcp"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
-	"github.com/aurora-capcompute/aurora-dispatchers/timer"
 	"github.com/aurora-capcompute/capcompute/sys"
 	"strings"
 	"time"
 )
 
 type Services struct {
-	MCPServers map[string]mcp.ServerConfig
 	// Tenant identifies whose memory space core.memory grants open. It is a
 	// host-side fact about the agent instance, never guest-supplied.
 	Tenant string
@@ -51,7 +48,7 @@ func New(registrations ...Registration) *Registry {
 // owner (Pardon & Pautasso's RESTful TCC puts them on the participant); an
 // orchestrator-side hold table would be a reservation no other booker can see.
 func Default() *Registry {
-	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{}, MemoryRegistration{})
+	return New(InternetRegistration{}, MemoryRegistration{})
 }
 
 func (r *Registry) Normalize(syscall string, settings json.RawMessage) (json.RawMessage, error) {
@@ -196,106 +193,6 @@ func (InternetRegistration) Configure(
 		Name:        internet.Capability,
 		Description: "Read textual content with HTTP GET. Allowed domains: " + strings.Join(domains, ", "),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"method":{"type":"string","const":"GET"},"url":{"type":"string","format":"uri"}},"required":["method","url"],"additionalProperties":false}`),
-	})
-	return nil
-}
-
-type MCPSettings struct {
-	ServerID string   `json:"server_id,omitempty"`
-	Tools    []string `json:"tools,omitempty"`
-}
-
-type MCPRegistration struct{}
-
-func (MCPRegistration) Matches(syscallType string) bool { return syscallType == "core.mcp" }
-
-func (MCPRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	var settings MCPSettings
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return nil, err
-		}
-	}
-	settings.ServerID = strings.TrimSpace(settings.ServerID)
-	if settings.ServerID == "" {
-		return nil, errors.New("server_id is required")
-	}
-	return json.Marshal(settings)
-}
-
-func (MCPRegistration) Configure(
-	ctx context.Context,
-	raw json.RawMessage,
-	services Services,
-	config *builtin.Config,
-) error {
-	normalized, err := (MCPRegistration{}).Normalize("core.mcp", raw)
-	if err != nil {
-		return err
-	}
-	var settings MCPSettings
-	if err := json.Unmarshal(normalized, &settings); err != nil {
-		return err
-	}
-	server, ok := services.MCPServers[settings.ServerID]
-	if !ok {
-		return fmt.Errorf("MCP server %q is not registered", settings.ServerID)
-	}
-	handler, err := mcp.NewHandler(ctx, server, settings.Tools)
-	if err != nil {
-		return fmt.Errorf("initialize MCP server %q: %w", settings.ServerID, err)
-	}
-	config.MCP = append(config.MCP, handler)
-	config.Capabilities = append(config.Capabilities, handler.Capabilities()...)
-	return nil
-}
-
-type TimerSettings struct {
-	MaxDurationMS int64 `json:"max_duration_ms,omitempty"`
-}
-
-type TimerRegistration struct{}
-
-func (TimerRegistration) Matches(syscallType string) bool { return syscallType == "core.timer" }
-
-func (TimerRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	settings := TimerSettings{
-		MaxDurationMS: int64(timer.DefaultMaxDuration / time.Millisecond),
-	}
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return nil, err
-		}
-	}
-	if settings.MaxDurationMS <= 0 {
-		return nil, fmt.Errorf("max_duration_ms must be positive")
-	}
-	return json.Marshal(settings)
-}
-
-func (TimerRegistration) Configure(
-	_ context.Context,
-	raw json.RawMessage,
-	_ Services,
-	config *builtin.Config,
-) error {
-	normalized, err := (TimerRegistration{}).Normalize("core.timer", raw)
-	if err != nil {
-		return err
-	}
-	var settings TimerSettings
-	if err := json.Unmarshal(normalized, &settings); err != nil {
-		return err
-	}
-	maxDuration := time.Duration(settings.MaxDurationMS) * time.Millisecond
-	config.Handlers = append(config.Handlers, timer.Handler{Name: timer.Capability, MaxDuration: maxDuration})
-	config.Capabilities = append(config.Capabilities, sys.Capability{
-		Name: timer.Capability,
-		Description: fmt.Sprintf(
-			"Set a relative timer and be replayed when it fires. The process pauses until the duration elapses, then continues. Maximum %s.",
-			maxDuration,
-		),
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"duration_seconds":{"type":"integer","minimum":1},"label":{"type":"string"}},"required":["duration_seconds"],"additionalProperties":false}`),
 	})
 	return nil
 }

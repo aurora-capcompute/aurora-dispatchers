@@ -14,9 +14,8 @@ This module is drivers only.
 Packages:
 
 - `builtin`: the leaf dispatcher — routes each syscall to the handler that
-  owns its name (internet reads, registered MCP tools, injected handlers).
+  owns its name (internet reads, injected handlers).
 - `internet`: bounded allowlisted HTTP GET client.
-- `mcp`: stdio MCP discovery and tool calls.
 - `memory`: the `core.memory` tenant-scoped shared store capability —
   subtree-chrooted grants, approval-gated writes, provenance-preserving
   (values re-surface with the taint they were written under). The durable
@@ -30,7 +29,6 @@ Packages:
   network-credential-free.
 - `registry`: assembles built-in drivers and their capability schemas from
   tool entries.
-- `timer`: the `timer.set` durable-wait capability.
 
 Remaining domain driver modules live separately (`-k8s`, `-helm`) so an
 assembly pulls only the clients it ships; `aurora-dispatchers-llm` folded in
