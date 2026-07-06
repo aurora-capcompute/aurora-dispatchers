@@ -12,8 +12,8 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// ToolType is the manifest `type` for an OpenAI-compatible cognition tool.
-const ToolType = "core.openaiApi"
+// SyscallType is the manifest `type` for an OpenAI-compatible cognition syscall.
+const SyscallType = "core.openaiApi"
 
 var validOperations = map[string]struct{}{
 	"openai.chat":        {},
@@ -36,7 +36,7 @@ func Operations() []string {
 
 type Registration struct{}
 
-func (Registration) Matches(toolType string) bool { return toolType == ToolType }
+func (Registration) Matches(syscallType string) bool { return syscallType == SyscallType }
 
 func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	var settings Settings
@@ -63,7 +63,7 @@ func (Registration) Configure(
 	_ registry.Services,
 	config *builtin.Config,
 ) error {
-	normalizedRaw, err := (Registration{}).Normalize(ToolType, raw)
+	normalizedRaw, err := (Registration{}).Normalize(SyscallType, raw)
 	if err != nil {
 		return err
 	}

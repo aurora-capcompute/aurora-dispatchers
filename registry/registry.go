@@ -24,12 +24,12 @@ type Services struct {
 	MemoryStore memory.Store
 }
 
-// Registration builds a leaf I/O dispatcher for one tool `type`. A registration
+// Registration builds a leaf I/O driver for one syscall `type`. A registration
 // is selected by `type`; the capability it publishes and the handler it binds
-// are keyed by the tool's local `name`, which is what the program dispatches to.
+// are keyed by the grant's local `name`, which is what the program dispatches to.
 type Registration interface {
-	Matches(toolType string) bool
-	Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error)
+	Matches(syscallType string) bool
+	Normalize(syscallType string, settings json.RawMessage) (json.RawMessage, error)
 	Configure(ctx context.Context, name string, settings json.RawMessage, services Services, config *builtin.Config) error
 }
 
@@ -53,17 +53,17 @@ func Default() *Registry {
 	return New(InternetRegistration{}, MCPRegistration{}, TimerRegistration{}, MemoryRegistration{})
 }
 
-func (r *Registry) Normalize(toolType string, settings json.RawMessage) (json.RawMessage, error) {
+func (r *Registry) Normalize(syscallType string, settings json.RawMessage) (json.RawMessage, error) {
 	for _, registration := range r.registrations {
-		if registration.Matches(toolType) {
-			return registration.Normalize(toolType, settings)
+		if registration.Matches(syscallType) {
+			return registration.Normalize(syscallType, settings)
 		}
 	}
-	return nil, fmt.Errorf("unsupported tool type %q", toolType)
+	return nil, fmt.Errorf("unsupported syscall type %q", syscallType)
 }
 
-// Entry is one leaf tool to build: `Type` selects the registration, `Name` is
-// the local routing handle the program dispatches to. `Hidden` keeps the tool
+// Entry is one leaf grant to build: `Type` selects the registration, `Name` is
+// the local routing handle the program dispatches to. `Hidden` keeps the grant
 // dispatchable but off the program's discoverable menu.
 type Entry struct {
 	Name     string
@@ -83,15 +83,15 @@ func (r *Registry) Build(ctx context.Context, entries []Entry, services Services
 			}
 		}
 		if selected == nil {
-			return builtin.Config{}, fmt.Errorf("unsupported tool type %q", entry.Type)
+			return builtin.Config{}, fmt.Errorf("unsupported syscall type %q", entry.Type)
 		}
 		before := len(config.Capabilities)
 		if err := selected.Configure(ctx, entry.Name, entry.Settings, services, &config); err != nil {
 			return builtin.Config{}, err
 		}
-		// A hidden tool hides every capability it publishes (e.g. the LLM tool
+		// A hidden grant hides every capability it publishes (e.g. the LLM
 		// publishes openai.* operations under a hidden entry), regardless of the
-		// published names, which may differ from the tool's local name.
+		// published names, which may differ from the grant's local name.
 		if entry.Hidden {
 			for i := before; i < len(config.Capabilities); i++ {
 				config.Capabilities[i].Hidden = true
@@ -101,7 +101,7 @@ func (r *Registry) Build(ctx context.Context, entries []Entry, services Services
 	return config, nil
 }
 
-// InternetPermission is one allowlisted request the tool may make.
+// InternetPermission is one allowlisted request the grant may make.
 type InternetPermission struct {
 	RequestType string `json:"requestType"`
 	Domain      string `json:"domain"`
@@ -116,7 +116,7 @@ type InternetSettings struct {
 
 type InternetRegistration struct{}
 
-func (InternetRegistration) Matches(toolType string) bool { return toolType == "core.internet" }
+func (InternetRegistration) Matches(syscallType string) bool { return syscallType == "core.internet" }
 
 func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	settings := InternetSettings{
@@ -209,7 +209,7 @@ type MCPSettings struct {
 
 type MCPRegistration struct{}
 
-func (MCPRegistration) Matches(toolType string) bool { return toolType == "core.mcp" }
+func (MCPRegistration) Matches(syscallType string) bool { return syscallType == "core.mcp" }
 
 func (MCPRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	var settings MCPSettings
@@ -259,7 +259,7 @@ type TimerSettings struct {
 
 type TimerRegistration struct{}
 
-func (TimerRegistration) Matches(toolType string) bool { return toolType == "core.timer" }
+func (TimerRegistration) Matches(syscallType string) bool { return syscallType == "core.timer" }
 
 func (TimerRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	settings := TimerSettings{
@@ -317,7 +317,7 @@ type MemorySettings struct {
 // ambiently (see capcompute docs/ARCHITECTURE.md, "Shared state").
 type MemoryRegistration struct{}
 
-func (MemoryRegistration) Matches(toolType string) bool { return toolType == "core.memory" }
+func (MemoryRegistration) Matches(syscallType string) bool { return syscallType == "core.memory" }
 
 func (MemoryRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
 	var settings MemorySettings
