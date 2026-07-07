@@ -14,8 +14,12 @@ This module is drivers only.
 Packages:
 
 - `builtin`: the leaf dispatcher — routes each syscall to the handler that
-  owns its name (internet reads, injected handlers).
-- `internet`: bounded allowlisted HTTP GET client.
+  owns its name (internet requests, injected handlers).
+- `internet`: bounded allowlisted HTTP client for requests of **any** method.
+  The grant's `permissions` — `{methods, domain}` pairs, where `methods` may be
+  `["*"]` and `domain` may be `"*"` — are the policy that constrains every
+  request the program can make (checked at dispatch and on every redirect hop);
+  request and response bodies are size-bounded.
 - `memory`: the `core.memory` tenant-scoped shared store capability —
   subtree-chrooted grants, approval-gated writes, provenance-preserving
   (values re-surface with the taint they were written under). The durable

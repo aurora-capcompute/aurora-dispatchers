@@ -14,7 +14,7 @@ import (
 // manifest names nothing.
 func TestBuildPublishesCanonicalNames(t *testing.T) {
 	reg := registry.Default()
-	settings := json.RawMessage(`{"permissions":[{"requestType":"GET","domain":"example.com"}]}`)
+	settings := json.RawMessage(`{"permissions":[{"methods":["GET"],"domain":"example.com"}]}`)
 	config, err := reg.Build(context.Background(),
 		[]registry.Entry{{Syscall: "core.internet", Settings: settings}}, registry.Services{})
 	if err != nil {

@@ -61,13 +61,11 @@ func (Registration) Configure(
 	_ registry.Services,
 	config *builtin.Config,
 ) error {
-	normalizedRaw, err := (Registration{}).Normalize(SyscallType, raw)
-	if err != nil {
-		return err
-	}
 	var settings Settings
-	if err := json.Unmarshal(normalizedRaw, &settings); err != nil {
-		return err
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			return err
+		}
 	}
 	normalized, err := normalizeSettings(settings)
 	if err != nil {

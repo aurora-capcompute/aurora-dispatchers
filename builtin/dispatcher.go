@@ -8,8 +8,8 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-type InternetReader interface {
-	Read(context.Context, internet.ReadRequest) (internet.ReadResponse, error)
+type InternetClient interface {
+	Do(context.Context, internet.Request) (internet.Response, error)
 }
 
 type Handler interface {
@@ -45,28 +45,28 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 	return sys.FailCode(sys.ErrnoNotFound, "unknown call: "+call.Name), nil
 }
 
-// InternetHandler adapts an InternetReader to the Handler interface, bound to a
+// InternetHandler adapts an InternetClient to the Handler interface, bound to a
 // tool's local name. It carries the per-tool require-approval policy.
 type InternetHandler struct {
 	Name            string
-	Reader          InternetReader
+	Client          InternetClient
 	RequireApproval bool
 }
 
 func (h InternetHandler) Handles(name string) bool { return name == h.Name }
 
 func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if h.Reader == nil {
-		return sys.FailCode(sys.ErrnoNotFound, "internet reader is not configured"), nil
+	if h.Client == nil {
+		return sys.FailCode(sys.ErrnoNotFound, "internet client is not configured"), nil
 	}
-	var request internet.ReadRequest
+	var request internet.Request
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
 	if h.RequireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
 	}
-	response, err := h.Reader.Read(ctx, request)
+	response, err := h.Client.Do(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()

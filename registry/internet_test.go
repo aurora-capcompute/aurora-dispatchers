@@ -3,6 +3,7 @@ package registry_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
@@ -15,8 +16,8 @@ func TestInternetMatchesType(t *testing.T) {
 	if !reg.Matches("core.internet") {
 		t.Fatal("should match core.internet")
 	}
-	if reg.Matches("internet.read") {
-		t.Fatal("must match by type, not the old capability name")
+	if reg.Matches(internet.Capability) {
+		t.Fatal("must match by type, not the capability name")
 	}
 }
 
@@ -26,15 +27,29 @@ func TestInternetNormalizeRequiresPermissions(t *testing.T) {
 	}
 }
 
-func TestInternetNormalizeRejectsNonGET(t *testing.T) {
-	raw := json.RawMessage(`{"permissions":[{"requestType":"POST","domain":"example.com"}]}`)
+// Any method the grant allowlists is accepted — the policy, not the driver,
+// decides which methods are permitted.
+func TestInternetNormalizeAcceptsAnyMethod(t *testing.T) {
+	raw := json.RawMessage(`{"permissions":[{"methods":["POST","delete"],"domain":"example.com"}]}`)
+	normalized, err := (registry.InternetRegistration{}).Normalize("core.internet", raw)
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	// Methods are canonicalized (uppercased) in the normalized form.
+	if !strings.Contains(string(normalized), `"POST"`) || !strings.Contains(string(normalized), `"DELETE"`) {
+		t.Fatalf("normalized = %s, want uppercased methods", normalized)
+	}
+}
+
+func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
+	raw := json.RawMessage(`{"permissions":[{"methods":["GET"],"domain":"  "}]}`)
 	if _, err := (registry.InternetRegistration{}).Normalize("core.internet", raw); err == nil {
-		t.Fatal("expected error for non-GET request type")
+		t.Fatal("expected error for empty domain")
 	}
 }
 
 func TestInternetConfigurePublishesCanonicalName(t *testing.T) {
-	raw := json.RawMessage(`{"permissions":[{"requestType":"GET","domain":"example.com"}]}`)
+	raw := json.RawMessage(`{"permissions":[{"methods":["GET","POST"],"domain":"example.com"}]}`)
 	var config builtin.Config
 	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, &config); err != nil {
 		t.Fatalf("configure: %v", err)
