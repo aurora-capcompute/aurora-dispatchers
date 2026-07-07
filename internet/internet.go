@@ -16,7 +16,7 @@ import (
 )
 
 // Capability is the canonical syscall name a core.internet grant publishes.
-const Capability = "internet.fetch"
+const Capability = "net.http"
 
 const (
 	DefaultTimeout          = 10 * time.Second

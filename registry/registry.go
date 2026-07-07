@@ -24,7 +24,7 @@ type Services struct {
 
 // Registration builds a leaf I/O driver for one syscall. A registration is
 // selected by the granted syscall; the capability names it publishes are
-// canonical to the driver (memory.get/put/list, internet.fetch, openai.*) —
+// canonical to the driver (memory.get/put/list, net.http, openai.*) —
 // the manifest names nothing.
 type Registration interface {
 	Matches(syscall string) bool
