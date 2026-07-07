@@ -65,11 +65,15 @@ func (r *Registry) Normalize(syscall string, settings json.RawMessage) (json.Raw
 
 // Entry is one leaf grant to build: `Syscall` selects the registration.
 // `Hidden` keeps the grant dispatchable but off the program's discoverable
-// menu.
+// menu. `Labels` and `Forbid` are the grant's data-flow policy, stamped onto
+// every capability the entry publishes — Labels are the source classes its
+// results carry, Forbid lists labels that may not flow into its calls.
 type Entry struct {
 	Syscall  string
 	Settings json.RawMessage
 	Hidden   bool
+	Labels   []string
+	Forbid   []string
 }
 
 func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (builtin.Config, error) {
@@ -83,11 +87,19 @@ func (r *Registry) Build(ctx context.Context, entries []Entry, services Services
 		if err := selected.Configure(ctx, entry.Settings, services, &config); err != nil {
 			return builtin.Config{}, err
 		}
-		// A hidden grant hides every capability it publishes (e.g. the LLM
-		// publishes openai.* operations under a hidden entry).
-		if entry.Hidden {
-			for i := before; i < len(config.Capabilities); i++ {
+		// Apply the grant's cross-cutting policy to every capability it just
+		// published: a hidden grant keeps them off the discoverable menu (e.g.
+		// the LLM publishes openai.* under a hidden entry); its data-flow
+		// labels/forbid drive the kernel's provenance monitor.
+		for i := before; i < len(config.Capabilities); i++ {
+			if entry.Hidden {
 				config.Capabilities[i].Hidden = true
+			}
+			if len(entry.Labels) > 0 {
+				config.Capabilities[i].Labels = append(config.Capabilities[i].Labels, entry.Labels...)
+			}
+			if len(entry.Forbid) > 0 {
+				config.Capabilities[i].Forbid = append(config.Capabilities[i].Forbid, entry.Forbid...)
 			}
 		}
 	}
