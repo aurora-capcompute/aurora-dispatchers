@@ -8,6 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
@@ -65,15 +67,16 @@ func (r *Registry) Normalize(syscall string, settings json.RawMessage) (json.Raw
 
 // Entry is one leaf grant to build: `Syscall` selects the registration.
 // `Hidden` keeps the grant dispatchable but off the program's discoverable
-// menu. `Labels` and `Forbid` are the grant's data-flow policy, stamped onto
-// every capability the entry publishes — Labels are the source classes its
-// results carry, Forbid lists labels that may not flow into its calls.
+// menu. `Labels` and `Forbid` are the grant's data-flow policy, keyed by
+// published capability name (the key "*" applies to every capability the grant
+// publishes) — Labels are the source classes results carry, Forbid lists labels
+// that may not flow into the operation's calls.
 type Entry struct {
 	Syscall  string
 	Settings json.RawMessage
 	Hidden   bool
-	Labels   []string
-	Forbid   []string
+	Labels   map[string][]string
+	Forbid   map[string][]string
 }
 
 func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (builtin.Config, error) {
@@ -90,20 +93,55 @@ func (r *Registry) Build(ctx context.Context, entries []Entry, services Services
 		// Apply the grant's cross-cutting policy to every capability it just
 		// published: a hidden grant keeps them off the discoverable menu (e.g.
 		// the LLM publishes openai.* under a hidden entry); its data-flow
-		// labels/forbid drive the kernel's provenance monitor.
+		// labels/forbid ("*" plus the per-operation entry) drive the kernel's
+		// provenance monitor.
+		published := make(map[string]struct{}, len(config.Capabilities)-before)
 		for i := before; i < len(config.Capabilities); i++ {
+			name := config.Capabilities[i].Name
+			published[name] = struct{}{}
 			if entry.Hidden {
 				config.Capabilities[i].Hidden = true
 			}
-			if len(entry.Labels) > 0 {
-				config.Capabilities[i].Labels = append(config.Capabilities[i].Labels, entry.Labels...)
-			}
-			if len(entry.Forbid) > 0 {
-				config.Capabilities[i].Forbid = append(config.Capabilities[i].Forbid, entry.Forbid...)
-			}
+			config.Capabilities[i].Labels = applyFlow(config.Capabilities[i].Labels, entry.Labels, name)
+			config.Capabilities[i].Forbid = applyFlow(config.Capabilities[i].Forbid, entry.Forbid, name)
+		}
+		if err := checkFlowOps("labels", entry.Labels, published); err != nil {
+			return builtin.Config{}, fmt.Errorf("%q: %w", entry.Syscall, err)
+		}
+		if err := checkFlowOps("forbid", entry.Forbid, published); err != nil {
+			return builtin.Config{}, fmt.Errorf("%q: %w", entry.Syscall, err)
 		}
 	}
 	return config, nil
+}
+
+// applyFlow adds a policy's wildcard ("*") labels and the labels targeting the
+// named operation to a capability's existing set.
+func applyFlow(existing []string, policy map[string][]string, name string) []string {
+	existing = append(existing, policy["*"]...)
+	existing = append(existing, policy[name]...)
+	return existing
+}
+
+// checkFlowOps rejects a per-operation key that names no capability the grant
+// published — a typo there would otherwise silently leave a source unlabelled
+// or a sink unprotected.
+func checkFlowOps(what string, policy map[string][]string, published map[string]struct{}) error {
+	for op := range policy {
+		if op == "*" {
+			continue
+		}
+		if _, ok := published[op]; !ok {
+			names := make([]string, 0, len(published))
+			for name := range published {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			return fmt.Errorf("%s targets operation %q, which this grant does not publish (publishes: %s)",
+				what, op, strings.Join(names, ", "))
+		}
+	}
+	return nil
 }
 
 func (r *Registry) selectFor(syscall string) Registration {

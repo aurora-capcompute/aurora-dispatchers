@@ -40,19 +40,19 @@ func TestBuildRejectsUnknownSyscall(t *testing.T) {
 	}
 }
 
-// Build stamps the grant's data-flow policy (hidden/labels/forbid) onto every
-// capability it publishes — the source labels the flow monitor accumulates and
-// the forbid set it enforces.
+// Build stamps the grant's data-flow policy onto the capabilities it publishes:
+// a wildcard ("*") reaches every op; a per-operation key targets one; a key
+// naming no published op is a config error.
 func TestBuildStampsGrantPolicyOnEveryCapability(t *testing.T) {
 	reg := registry.Default()
 
-	// A single-capability source grant: hidden + labels + forbid all applied.
+	// A single-capability source grant: hidden + wildcard labels + forbid.
 	config, err := reg.Build(context.Background(), []registry.Entry{{
 		Syscall:  "core.internet",
 		Settings: json.RawMessage(`{"permissions":[{"methods":["GET"],"domain":"example.com"}]}`),
 		Hidden:   true,
-		Labels:   []string{"untrusted_web"},
-		Forbid:   []string{"secret"},
+		Labels:   map[string][]string{"*": {"untrusted_web"}},
+		Forbid:   map[string][]string{"*": {"secret"}},
 	}}, registry.Services{})
 	if err != nil {
 		t.Fatalf("build internet: %v", err)
@@ -71,20 +71,36 @@ func TestBuildStampsGrantPolicyOnEveryCapability(t *testing.T) {
 		t.Errorf("forbid = %v, want [secret]", published.Forbid)
 	}
 
-	// A multi-capability sink grant: the forbid reaches every published op.
+	// A multi-op grant, per-operation targeting: forbid reaches memory.put only,
+	// while the wildcard label reaches every op.
+	services := registry.Services{Tenant: "acme", MemoryStore: memory.NewMapStore()}
 	config, err = reg.Build(context.Background(), []registry.Entry{{
 		Syscall: "core.memory",
-		Forbid:  []string{"untrusted_web"},
-	}}, registry.Services{Tenant: "acme", MemoryStore: memory.NewMapStore()})
+		Labels:  map[string][]string{"*": {"tenant_mem"}},
+		Forbid:  map[string][]string{"memory.put": {"untrusted_web"}},
+	}}, services)
 	if err != nil {
 		t.Fatalf("build memory: %v", err)
 	}
 	if len(config.Capabilities) != 3 {
 		t.Fatalf("memory should publish 3 capabilities, got %d", len(config.Capabilities))
 	}
-	for _, published := range config.Capabilities {
-		if len(published.Forbid) != 1 || published.Forbid[0] != "untrusted_web" {
-			t.Errorf("%s forbid = %v, want [untrusted_web]", published.Name, published.Forbid)
+	for _, cap := range config.Capabilities {
+		wantForbid := cap.Name == "memory.put"
+		got := len(cap.Forbid) == 1 && cap.Forbid[0] == "untrusted_web"
+		if got != wantForbid {
+			t.Errorf("%s forbid = %v, want forbidden=%v", cap.Name, cap.Forbid, wantForbid)
 		}
+		if len(cap.Labels) != 1 || cap.Labels[0] != "tenant_mem" {
+			t.Errorf("%s labels = %v, want [tenant_mem] on every op", cap.Name, cap.Labels)
+		}
+	}
+
+	// A per-operation key naming an op the grant does not publish is rejected.
+	if _, err := reg.Build(context.Background(), []registry.Entry{{
+		Syscall: "core.memory",
+		Forbid:  map[string][]string{"memory.putt": {"x"}},
+	}}, services); err == nil {
+		t.Fatal("expected an error for an unknown operation key")
 	}
 }
