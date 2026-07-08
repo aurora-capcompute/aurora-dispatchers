@@ -112,15 +112,15 @@ func (h InternetHandler) methodPolicy(method string) InternetMethodPolicy {
 	specific := h.Methods[method]
 	return InternetMethodPolicy{
 		RequireApproval: wild.RequireApproval || specific.RequireApproval,
-		Labels:          unionLabels(wild.Labels, specific.Labels),
-		Taints:          unionLabels(wild.Taints, specific.Taints),
+		Labels:          UnionLabels(wild.Labels, specific.Labels),
+		Taints:          UnionLabels(wild.Taints, specific.Taints),
 	}
 }
 
-// unionLabels concatenates two already-normalized label sets, dropping
+// UnionLabels concatenates two already-normalized label sets, dropping
 // duplicates. Order is not significant for flow decisions or result labels
 // (WithLabels re-sorts).
-func unionLabels(a, b []string) []string {
+func UnionLabels(a, b []string) []string {
 	if len(a) == 0 {
 		return b
 	}

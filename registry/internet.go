@@ -144,32 +144,12 @@ func internetMethodPolicies(permissions []InternetPermission) map[string]builtin
 			existing := methods[method]
 			methods[method] = builtin.InternetMethodPolicy{
 				RequireApproval: existing.RequireApproval || approval,
-				Labels:          unionLabels(existing.Labels, permission.Labels),
-				Taints:          unionLabels(existing.Taints, permission.Taints),
+				Labels:          builtin.UnionLabels(existing.Labels, permission.Labels),
+				Taints:          builtin.UnionLabels(existing.Taints, permission.Taints),
 			}
 		}
 	}
 	return methods
-}
-
-// unionLabels concatenates two label sets, dropping duplicates.
-func unionLabels(a, b []string) []string {
-	if len(a) == 0 {
-		return b
-	}
-	if len(b) == 0 {
-		return a
-	}
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, label := range append(append([]string(nil), a...), b...) {
-		if _, dup := seen[label]; dup {
-			continue
-		}
-		seen[label] = struct{}{}
-		out = append(out, label)
-	}
-	return out
 }
 
 // canonicalMethods uppercases and de-duplicates a permission's methods,

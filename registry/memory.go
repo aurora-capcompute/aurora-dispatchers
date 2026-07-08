@@ -56,8 +56,8 @@ func (MemoryRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	config.Capabilities, err = marshalOperationGrants(grants)
-	if err != nil {
+	// parseMemoryConfig already returns grants in canonical (sorted) order.
+	if config.Capabilities, err = json.Marshal(grants); err != nil {
 		return nil, err
 	}
 	return json.Marshal(config)
@@ -168,12 +168,6 @@ func validateSubtree(subtree string) error {
 		}
 	}
 	return nil
-}
-
-// marshalOperationGrants renders granted operations in canonical (sorted) order.
-func marshalOperationGrants(grants []OperationGrant) (json.RawMessage, error) {
-	sortOperationGrants(grants)
-	return json.Marshal(grants)
 }
 
 func sortOperationGrants(grants []OperationGrant) {

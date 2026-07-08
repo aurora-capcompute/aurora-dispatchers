@@ -66,7 +66,6 @@ type Store interface {
 	Activity(ctx context.Context, tenant, activity string) (version int64, done bool, err error)
 }
 
-// Put expectations.
 // Capability is the name a core.memory grant publishes — the syscall's own name.
 // Its operations (get, put, list) are cases of one discriminated ADT, selected
 // by the `operation` field in the call args, not separate capability names.
@@ -120,8 +119,9 @@ type ListResponse struct {
 }
 
 // Handler serves one memory grant: a tenant plus a subtree of that tenant's
-// space. It satisfies builtin.Handler and publishes <name>.get, <name>.put,
-// and <name>.list. Tenant and subtree are host-side grant parameters — the
+// space. It satisfies builtin.Handler and publishes the single core.memory
+// capability; its get/put/list operations are ADT cases selected by the
+// `operation` field. Tenant and subtree are host-side grant parameters — the
 // guest only ever sees keys relative to its subtree.
 type Handler struct {
 	// Name is the published capability name (core.memory).
