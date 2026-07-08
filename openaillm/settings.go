@@ -32,7 +32,6 @@ type Settings struct {
 	MaxRequestBytes   int               `json:"max_request_bytes,omitempty"`
 	AllowInsecureHTTP bool              `json:"allow_insecure_http,omitempty"`
 	Headers           map[string]string `json:"headers,omitempty"`
-	RequireApproval   *bool             `json:"require_approval,omitempty"`
 }
 
 type normalizedSettings struct {
@@ -117,13 +116,6 @@ func validateBaseURL(raw string, allowInsecureHTTP bool) error {
 	default:
 		return fmt.Errorf("base_url scheme must be https")
 	}
-}
-
-func requiresApproval(name string, settings Settings) bool {
-	if settings.RequireApproval != nil {
-		return *settings.RequireApproval
-	}
-	return name != "openai.models.list"
 }
 
 type modelPolicy struct {

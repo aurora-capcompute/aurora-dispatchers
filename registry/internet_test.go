@@ -11,26 +11,26 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
-func TestInternetMatchesType(t *testing.T) {
+func TestInternetMatchesSyscall(t *testing.T) {
 	reg := registry.InternetRegistration{}
 	if !reg.Matches("core.internet") {
 		t.Fatal("should match core.internet")
 	}
-	if reg.Matches(internet.Capability) {
-		t.Fatal("must match by type, not the capability name")
+	if reg.Matches("core.memory") {
+		t.Fatal("must not match another syscall")
 	}
 }
 
-func TestInternetNormalizeRequiresPermissions(t *testing.T) {
+func TestInternetNormalizeRequiresCapabilities(t *testing.T) {
 	if _, err := (registry.InternetRegistration{}).Normalize("core.internet", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("expected error when permissions is empty")
+		t.Fatal("expected error when capabilities is empty")
 	}
 }
 
 // Any method the grant allowlists is accepted — the policy, not the driver,
 // decides which methods are permitted.
 func TestInternetNormalizeAcceptsAnyMethod(t *testing.T) {
-	raw := json.RawMessage(`{"permissions":[{"methods":["POST","delete"],"domain":"example.com"}]}`)
+	raw := json.RawMessage(`{"capabilities":[{"methods":["POST","delete"],"domain":"example.com"}]}`)
 	normalized, err := (registry.InternetRegistration{}).Normalize("core.internet", raw)
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
@@ -42,14 +42,14 @@ func TestInternetNormalizeAcceptsAnyMethod(t *testing.T) {
 }
 
 func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
-	raw := json.RawMessage(`{"permissions":[{"methods":["GET"],"domain":"  "}]}`)
+	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"  "}]}`)
 	if _, err := (registry.InternetRegistration{}).Normalize("core.internet", raw); err == nil {
 		t.Fatal("expected error for empty domain")
 	}
 }
 
-func TestInternetConfigurePublishesCanonicalName(t *testing.T) {
-	raw := json.RawMessage(`{"permissions":[{"methods":["GET","POST"],"domain":"example.com"}]}`)
+func TestInternetConfigurePublishesOneCapability(t *testing.T) {
+	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`)
 	var config builtin.Config
 	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, &config); err != nil {
 		t.Fatalf("configure: %v", err)
@@ -58,6 +58,6 @@ func TestInternetConfigurePublishesCanonicalName(t *testing.T) {
 		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities, internet.Capability)
 	}
 	if len(config.Handlers) != 1 || !config.Handlers[0].Handles(internet.Capability) {
-		t.Fatalf("handler must route by the canonical name %s", internet.Capability)
+		t.Fatalf("handler must route by the capability name %s", internet.Capability)
 	}
 }

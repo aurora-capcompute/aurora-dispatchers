@@ -67,9 +67,10 @@ type Store interface {
 }
 
 // Put expectations.
-// Capability is the canonical name prefix a core.memory grant publishes:
-// memory.get, memory.put, memory.list.
-const Capability = "memory"
+// Capability is the name a core.memory grant publishes — the syscall's own name.
+// Its operations (get, put, list) are cases of one discriminated ADT, selected
+// by the `operation` field in the call args, not separate capability names.
+const Capability = "core.memory"
 
 const (
 	// PutAny overwrites unconditionally — last writer wins.
@@ -123,7 +124,7 @@ type ListResponse struct {
 // and <name>.list. Tenant and subtree are host-side grant parameters — the
 // guest only ever sees keys relative to its subtree.
 type Handler struct {
-	// Name is the tool's local manifest name; operations are <Name>.get etc.
+	// Name is the published capability name (core.memory).
 	Name string
 	// Store is the durable KV store.
 	Store Store
@@ -133,13 +134,22 @@ type Handler struct {
 	// The grant tree does directory permissions: an agent granted "notes"
 	// cannot name anything outside notes/.
 	Subtree string
-	// RequireApprovalOnPut gates writes behind a human approval task.
-	RequireApprovalOnPut bool
+	// Operations are the granted cases keyed by operation name (get/put/list);
+	// an operation absent here is not granted. Each carries its per-operation
+	// approval requirement and data-flow policy.
+	Operations map[string]Operation
 }
 
-func (h Handler) Handles(name string) bool {
-	return name == h.Name+".get" || name == h.Name+".put" || name == h.Name+".list"
+// Operation is one granted memory case's policy: whether it needs human
+// approval, the source classes its results carry (Labels), and the labels it
+// refuses to let flow in (Taints, the sink guard).
+type Operation struct {
+	RequireApproval bool
+	Labels          []string
+	Taints          []string
 }
+
+func (h Handler) Handles(name string) bool { return name == h.Name }
 
 func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if h.Store == nil {
@@ -148,16 +158,52 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if h.Tenant == "" {
 		return sys.FailCode(sys.ErrnoInternal, "memory grant has no tenant"), nil
 	}
-	switch strings.TrimPrefix(call.Name, h.Name+".") {
-	case "get":
-		return h.get(ctx, call)
-	case "put":
-		return h.put(ctx, call, auth)
-	case "list":
-		return h.list(ctx, call)
-	default:
-		return sys.FailCode(sys.ErrnoNotFound, "unknown memory operation: "+call.Name), nil
+	operation, err := peekOperation(call.Args)
+	if err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
+	op, granted := h.Operations[operation]
+	if !granted {
+		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("memory operation %q is not granted", operation)), nil
+	}
+	// Sink guard: refuse before any effect if the run has observed a label this
+	// operation forbids. Deterministic on replay — the taint is rebuilt from the
+	// journal identically, so the same call denies or passes the same way.
+	if blocked := sys.BlockedBy(sys.Taint(ctx), op.Taints); len(blocked) > 0 {
+		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
+			"flow policy: this run has observed %v, which may not flow into memory %q", blocked, operation)), nil
+	}
+	var result sys.SyscallResult
+	switch operation {
+	case "get":
+		result, err = h.get(ctx, call)
+	case "put":
+		result, err = h.put(ctx, call, auth, op.RequireApproval)
+	case "list":
+		result, err = h.list(ctx, call)
+	default:
+		return sys.FailCode(sys.ErrnoNotFound, "unknown memory operation: "+operation), nil
+	}
+	if err != nil || result.Status() != sys.StatusResult {
+		return result, err
+	}
+	// Stamp the operation's source labels (unions with any the value already
+	// carries, e.g. get's stored provenance).
+	return result.WithLabels(op.Labels...), nil
+}
+
+// peekOperation reads the ADT discriminator from a memory call's args.
+func peekOperation(args json.RawMessage) (string, error) {
+	var envelope struct {
+		Operation string `json:"operation"`
+	}
+	if err := json.Unmarshal(args, &envelope); err != nil {
+		return "", fmt.Errorf("decode operation: %v", err)
+	}
+	if envelope.Operation == "" {
+		return "", fmt.Errorf("operation is required")
+	}
+	return envelope.Operation, nil
 }
 
 func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
@@ -183,7 +229,7 @@ func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	return result.WithLabels(labels...), nil
 }
 
-func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorization, requireApproval bool) (sys.SyscallResult, error) {
 	var request PutRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
@@ -213,7 +259,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 			return marshalResult(PutResponse{Key: request.Key, Version: version})
 		}
 	}
-	if h.RequireApprovalOnPut && auth.Decision != sys.Approved {
+	if requireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve writing memory key %q", request.Key)), nil
 	}
 	expect := PutAny

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -45,12 +47,26 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 	return sys.FailCode(sys.ErrnoNotFound, "unknown call: "+call.Name), nil
 }
 
-// InternetHandler adapts an InternetClient to the Handler interface, bound to a
-// tool's local name. It carries the per-tool require-approval policy.
+// InternetHandler adapts an InternetClient to the Handler interface, bound to
+// the published capability name (core.internet). Its allowlist lives in the
+// client's Policy; the per-method policy here is the grant's data-flow and
+// approval declaration, resolved from the call's HTTP method — the method is the
+// ADT discriminator of a single net capability.
 type InternetHandler struct {
-	Name            string
-	Client          InternetClient
+	Name string
+	// Methods is the per-method policy keyed by uppercase HTTP method, with "*"
+	// applying to every method; the two are merged for the request's method.
+	Methods map[string]InternetMethodPolicy
+	Client  InternetClient
+}
+
+// InternetMethodPolicy is one HTTP method's grant policy: whether the request
+// needs human approval, the source classes its response carries (Labels), and
+// the labels barred from flowing into the request (Taints, the sink guard).
+type InternetMethodPolicy struct {
 	RequireApproval bool
+	Labels          []string
+	Taints          []string
 }
 
 func (h InternetHandler) Handles(name string) bool { return name == h.Name }
@@ -63,7 +79,15 @@ func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
-	if h.RequireApproval && auth.Decision != sys.Approved {
+	method := strings.ToUpper(strings.TrimSpace(request.Method))
+	policy := h.methodPolicy(method)
+	// Sink guard: refuse before the request leaves if the run has observed a
+	// label this method forbids.
+	if blocked := sys.BlockedBy(sys.Taint(ctx), policy.Taints); len(blocked) > 0 {
+		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
+			"flow policy: this run has observed %v, which may not flow into a %s request", blocked, method)), nil
+	}
+	if policy.RequireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
 	}
 	response, err := h.Client.Do(ctx, request)
@@ -73,7 +97,46 @@ func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 		}
 		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
 	}
-	return marshalResult(response)
+	result, err := marshalResult(response)
+	if err != nil {
+		return result, err
+	}
+	// The response derives from the network: stamp the method's source labels.
+	return result.WithLabels(policy.Labels...), nil
+}
+
+// methodPolicy merges the wildcard ("*") policy with the request method's own —
+// the union of their approval requirement and label sets.
+func (h InternetHandler) methodPolicy(method string) InternetMethodPolicy {
+	wild := h.Methods["*"]
+	specific := h.Methods[method]
+	return InternetMethodPolicy{
+		RequireApproval: wild.RequireApproval || specific.RequireApproval,
+		Labels:          unionLabels(wild.Labels, specific.Labels),
+		Taints:          unionLabels(wild.Taints, specific.Taints),
+	}
+}
+
+// unionLabels concatenates two already-normalized label sets, dropping
+// duplicates. Order is not significant for flow decisions or result labels
+// (WithLabels re-sorts).
+func unionLabels(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, label := range append(append([]string(nil), a...), b...) {
+		if _, dup := seen[label]; dup {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	return out
 }
 
 func marshalResult(value any) (sys.SyscallResult, error) {

@@ -1,15 +1,16 @@
 // Package registry assembles built-in capability drivers: it selects a
-// registration by the granted syscall and lets it publish that driver's
-// handlers and capability schemas into a builtin.Config. The manifest names
-// nothing — every capability name is canonical to its driver.
+// registration by the granted syscall and lets it publish that driver's handler
+// and one capability into a builtin.Config. The capability is named for the
+// syscall (core.internet, core.memory, core.openaiApi): a leaf grant is an ADT
+// family whose operations are cases of one capability, discriminated inside the
+// call args — never separate names. The grant's data-flow policy (labels/taints)
+// rides on each operation and is enforced by the driver itself, per call.
 package registry
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
@@ -25,13 +26,13 @@ type Services struct {
 }
 
 // Registration builds a leaf I/O driver for one syscall. A registration is
-// selected by the granted syscall; the capability names it publishes are
-// canonical to the driver (memory.get/put/list, net.http, openai.*) —
-// the manifest names nothing.
+// selected by the granted syscall, and publishes exactly one capability named
+// for that syscall — its operations are cases of a discriminated ADT, not
+// separate names.
 type Registration interface {
 	Matches(syscall string) bool
-	Normalize(syscall string, settings json.RawMessage) (json.RawMessage, error)
-	Configure(ctx context.Context, settings json.RawMessage, services Services, config *builtin.Config) error
+	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
+	Configure(ctx context.Context, config json.RawMessage, services Services, out *builtin.Config) error
 }
 
 type Registry struct {
@@ -58,25 +59,22 @@ func Default() *Registry {
 	return New(InternetRegistration{}, MemoryRegistration{})
 }
 
-func (r *Registry) Normalize(syscall string, settings json.RawMessage) (json.RawMessage, error) {
+func (r *Registry) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
 	if selected := r.selectFor(syscall); selected != nil {
-		return selected.Normalize(syscall, settings)
+		return selected.Normalize(syscall, config)
 	}
 	return nil, fmt.Errorf("unsupported syscall %q", syscall)
 }
 
-// Entry is one leaf grant to build: `Syscall` selects the registration.
-// `Hidden` keeps the grant dispatchable but off the program's discoverable
-// menu. `Labels` and `Forbid` are the grant's data-flow policy, keyed by
-// published capability name (the key "*" applies to every capability the grant
-// publishes) — Labels are the source classes results carry, Forbid lists labels
-// that may not flow into the operation's calls.
+// Entry is one leaf grant to build. Syscall selects the registration; Config is
+// the grant's driver configuration — the `capabilities` list and any family-wide
+// knobs — opaque to the runtime and interpreted by the driver. Hidden keeps the
+// published capability dispatchable but off the program's discoverable menu (the
+// LLM driver publishes under a hidden entry, for instance).
 type Entry struct {
-	Syscall  string
-	Settings json.RawMessage
-	Hidden   bool
-	Labels   map[string][]string
-	Forbid   map[string][]string
+	Syscall string
+	Config  json.RawMessage
+	Hidden  bool
 }
 
 func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (builtin.Config, error) {
@@ -87,61 +85,19 @@ func (r *Registry) Build(ctx context.Context, entries []Entry, services Services
 			return builtin.Config{}, fmt.Errorf("unsupported syscall %q", entry.Syscall)
 		}
 		before := len(config.Capabilities)
-		if err := selected.Configure(ctx, entry.Settings, services, &config); err != nil {
+		if err := selected.Configure(ctx, entry.Config, services, &config); err != nil {
 			return builtin.Config{}, err
 		}
-		// Apply the grant's cross-cutting policy to every capability it just
-		// published: a hidden grant keeps them off the discoverable menu (e.g.
-		// the LLM publishes openai.* under a hidden entry); its data-flow
-		// labels/forbid ("*" plus the per-operation entry) drive the kernel's
-		// provenance monitor.
-		published := make(map[string]struct{}, len(config.Capabilities)-before)
-		for i := before; i < len(config.Capabilities); i++ {
-			name := config.Capabilities[i].Name
-			published[name] = struct{}{}
-			if entry.Hidden {
+		// A hidden grant keeps the capability it just published off the
+		// discoverable menu. Data-flow labels/taints are per-operation and live
+		// inside the driver (self-enforced at dispatch), not a build-time stamp.
+		if entry.Hidden {
+			for i := before; i < len(config.Capabilities); i++ {
 				config.Capabilities[i].Hidden = true
 			}
-			config.Capabilities[i].Labels = applyFlow(config.Capabilities[i].Labels, entry.Labels, name)
-			config.Capabilities[i].Forbid = applyFlow(config.Capabilities[i].Forbid, entry.Forbid, name)
-		}
-		if err := checkFlowOps("labels", entry.Labels, published); err != nil {
-			return builtin.Config{}, fmt.Errorf("%q: %w", entry.Syscall, err)
-		}
-		if err := checkFlowOps("forbid", entry.Forbid, published); err != nil {
-			return builtin.Config{}, fmt.Errorf("%q: %w", entry.Syscall, err)
 		}
 	}
 	return config, nil
-}
-
-// applyFlow adds a policy's wildcard ("*") labels and the labels targeting the
-// named operation to a capability's existing set.
-func applyFlow(existing []string, policy map[string][]string, name string) []string {
-	existing = append(existing, policy["*"]...)
-	existing = append(existing, policy[name]...)
-	return existing
-}
-
-// checkFlowOps rejects a per-operation key that names no capability the grant
-// published — a typo there would otherwise silently leave a source unlabelled
-// or a sink unprotected.
-func checkFlowOps(what string, policy map[string][]string, published map[string]struct{}) error {
-	for op := range policy {
-		if op == "*" {
-			continue
-		}
-		if _, ok := published[op]; !ok {
-			names := make([]string, 0, len(published))
-			for name := range published {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			return fmt.Errorf("%s targets operation %q, which this grant does not publish (publishes: %s)",
-				what, op, strings.Join(names, ", "))
-		}
-	}
-	return nil
 }
 
 func (r *Registry) selectFor(syscall string) Registration {

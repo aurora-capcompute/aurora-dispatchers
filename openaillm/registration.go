@@ -1,6 +1,7 @@
 package openaillm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,26 +13,41 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// SyscallType is the manifest `type` for an OpenAI-compatible cognition syscall.
+// SyscallType is the manifest `syscall` for an OpenAI-compatible cognition
+// grant, and the name of the single capability it publishes: its operations
+// (chat, responses, embeddings, models) are cases of one discriminated ADT,
+// selected by the `operation` field in the call args.
 const SyscallType = "core.openaiApi"
 
-var validOperations = map[string]struct{}{
-	"openai.chat":        {},
-	"openai.responses":   {},
-	"openai.embeddings":  {},
-	"openai.models.list": {},
+// openaiOperations are the cases a core.openaiApi grant may enable, each with
+// the field schema its args carry (minus the `operation` discriminator, which
+// registry.OperationBranch injects) and a one-line description.
+var openaiOperations = map[string]struct {
+	schema      json.RawMessage
+	description string
+}{
+	"chat":       {schemas["chat"], "chat: create a Chat Completions response"},
+	"responses":  {schemas["responses"], "responses: create a Responses API response"},
+	"embeddings": {schemas["embeddings"], "embeddings: create embeddings"},
+	"models":     {schemas["models"], "models: list provider models"},
 }
 
-// Operations returns the fixed `openai.*` operation names this driver
-// exposes, sorted for deterministic capability ordering. These are the names
-// the compiled program invokes directly.
+// Operations returns the operation names this driver exposes, sorted.
 func Operations() []string {
-	names := make([]string, 0, len(validOperations))
-	for name := range validOperations {
+	names := make([]string, 0, len(openaiOperations))
+	for name := range openaiOperations {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names
+}
+
+// grantConfig is a core.openaiApi grant's driver configuration: the operations
+// it grants (each an ADT case with its flow policy) plus the connection settings
+// (base_url, api_key, default_model, …), which are flattened alongside.
+type grantConfig struct {
+	Capabilities json.RawMessage `json:"capabilities,omitempty"`
+	Settings
 }
 
 type Registration struct{}
@@ -39,47 +55,103 @@ type Registration struct{}
 func (Registration) Matches(syscallType string) bool { return syscallType == SyscallType }
 
 func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	var settings Settings
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return nil, err
-		}
-	}
-	normalized, err := normalizeSettings(settings)
+	config, grants, err := parseGrantConfig(raw)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(normalized.Settings)
+	normalized, err := normalizeSettings(config.Settings)
+	if err != nil {
+		return nil, err
+	}
+	out := grantConfig{Settings: normalized.Settings}
+	if out.Capabilities, err = json.Marshal(grants); err != nil {
+		return nil, err
+	}
+	return json.Marshal(out)
 }
 
-// Configure publishes the fixed openai.* operations for one core.openaiApi
-// grant. The program calls the operations by their ABI names; the grant is
-// kept off the discoverable menu via the manifest `hidden` flag.
-func (Registration) Configure(
-	_ context.Context,
-	raw json.RawMessage,
-	_ registry.Services,
-	config *builtin.Config,
-) error {
-	var settings Settings
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil {
+// Configure publishes the single core.openaiApi capability — a oneOf over the
+// granted operations — and the handler that serves them. The grant is kept off
+// the discoverable menu via the manifest `hidden` flag (the agent calls the LLM
+// itself; the model never sees it).
+func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry.Services, out *builtin.Config) error {
+	config, grants, err := parseGrantConfig(raw)
+	if err != nil {
+		return err
+	}
+	normalized, err := normalizeSettings(config.Settings)
+	if err != nil {
+		return err
+	}
+	handler, err := findOrCreateHandler(out, normalized)
+	if err != nil {
+		return err
+	}
+
+	branches := make([]json.RawMessage, 0, len(grants))
+	descriptions := make([]string, 0, len(grants))
+	for _, grant := range grants {
+		handler.AddOperation(grant.Operation, normalized, grant)
+		branch, err := registry.OperationBranch(grant.Operation, openaiOperations[grant.Operation].schema)
+		if err != nil {
 			return err
 		}
+		branches = append(branches, branch)
+		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
-	normalized, err := normalizeSettings(settings)
-	if err != nil {
-		return err
-	}
-	handler, err := findOrCreateHandler(config, normalized)
-	if err != nil {
-		return err
-	}
-	for _, op := range Operations() {
-		handler.AddCapability(op, normalized)
-		config.Capabilities = append(config.Capabilities, capabilityFor(op, normalized))
-	}
+	out.Capabilities = append(out.Capabilities, sys.Capability{
+		Name: SyscallType,
+		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
+			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),
+		InputSchema: registry.OneOfSchema(branches),
+	})
 	return nil
+}
+
+func modelScope(settings normalizedSettings) string {
+	if len(settings.AllowedModels) > 0 {
+		return "models: " + strings.Join(settings.AllowedModels, ", ")
+	}
+	return "all models"
+}
+
+// parseGrantConfig validates and canonicalizes a core.openaiApi grant's config:
+// it requires at least one operation from the known set with no duplicates and
+// normalizes each operation's flow policy. Connection settings are validated by
+// normalizeSettings at build time.
+func parseGrantConfig(raw json.RawMessage) (grantConfig, []registry.OperationGrant, error) {
+	var config grantConfig
+	if len(raw) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&config); err != nil {
+			return grantConfig{}, nil, err
+		}
+	}
+	grants, err := registry.DecodeOperationGrants(config.Capabilities)
+	if err != nil {
+		return grantConfig{}, nil, err
+	}
+	if len(grants) == 0 {
+		return grantConfig{}, nil, fmt.Errorf("capabilities must grant at least one operation (%s)", strings.Join(Operations(), ", "))
+	}
+	seen := make(map[string]struct{}, len(grants))
+	for i := range grants {
+		operation := strings.TrimSpace(grants[i].Operation)
+		if _, ok := openaiOperations[operation]; !ok {
+			return grantConfig{}, nil, fmt.Errorf("unknown openai operation %q (want %s)", grants[i].Operation, strings.Join(Operations(), ", "))
+		}
+		if _, dup := seen[operation]; dup {
+			return grantConfig{}, nil, fmt.Errorf("duplicate openai operation %q", operation)
+		}
+		seen[operation] = struct{}{}
+		grants[i].Operation = operation
+		if grants[i].FlowPolicy, err = grants[i].FlowPolicy.Normalized(); err != nil {
+			return grantConfig{}, nil, fmt.Errorf("operation %q: %w", operation, err)
+		}
+	}
+	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
+	return config, grants, nil
 }
 
 func findOrCreateHandler(config *builtin.Config, settings normalizedSettings) (*Handler, error) {
@@ -142,31 +214,9 @@ func (c failedClient) Models(context.Context) (json.RawMessage, error) {
 	return nil, c.err
 }
 
-func capabilityFor(name string, settings normalizedSettings) sys.Capability {
-	models := "all models"
-	if len(settings.AllowedModels) > 0 {
-		models = "models: " + strings.Join(settings.AllowedModels, ", ")
-	}
-	approvalNote := ""
-	if requiresApproval(name, settings.Settings) {
-		approvalNote = " Requires human approval."
-	}
-	descriptions := map[string]string{
-		"openai.chat":        "Create a Chat Completions response.",
-		"openai.responses":   "Create a Responses API response.",
-		"openai.embeddings":  "Create embeddings.",
-		"openai.models.list": "List provider models.",
-	}
-	return sys.Capability{
-		Name:        name,
-		Description: fmt.Sprintf("%s Provider: %s; %s.%s", descriptions[name], settings.BaseURL, models, approvalNote),
-		InputSchema: schemas[name],
-	}
-}
-
 var schemas = map[string]json.RawMessage{
-	"openai.chat":        json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string"},"content":{}},"required":["role","content"],"additionalProperties":true}},"temperature":{"type":"number","minimum":0,"maximum":2},"top_p":{"type":"number","minimum":0,"maximum":1},"max_tokens":{"type":"integer","minimum":1},"max_completion_tokens":{"type":"integer","minimum":1},"response_format":{"type":"object"},"tools":{"type":"array"},"tool_choice":{},"stream":{"const":false}},"required":["messages"],"additionalProperties":true}`),
-	"openai.responses":   json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{},"instructions":{"type":"string"},"max_output_tokens":{"type":"integer","minimum":1},"temperature":{"type":"number","minimum":0,"maximum":2},"tools":{"type":"array"},"stream":{"const":false}},"required":["input"],"additionalProperties":true}`),
-	"openai.embeddings":  json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},"dimensions":{"type":"integer","minimum":1},"encoding_format":{"enum":["float","base64"]}},"required":["input"],"additionalProperties":true}`),
-	"openai.models.list": json.RawMessage(`{"type":"object","additionalProperties":false}`),
+	"chat":       json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string"},"content":{}},"required":["role","content"],"additionalProperties":true}},"temperature":{"type":"number","minimum":0,"maximum":2},"top_p":{"type":"number","minimum":0,"maximum":1},"max_tokens":{"type":"integer","minimum":1},"max_completion_tokens":{"type":"integer","minimum":1},"response_format":{"type":"object"},"tools":{"type":"array"},"tool_choice":{},"stream":{"const":false}},"required":["messages"],"additionalProperties":true}`),
+	"responses":  json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{},"instructions":{"type":"string"},"max_output_tokens":{"type":"integer","minimum":1},"temperature":{"type":"number","minimum":0,"maximum":2},"tools":{"type":"array"},"stream":{"const":false}},"required":["input"],"additionalProperties":true}`),
+	"embeddings": json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},"dimensions":{"type":"integer","minimum":1},"encoding_format":{"enum":["float","base64"]}},"required":["input"],"additionalProperties":true}`),
+	"models":     json.RawMessage(`{"type":"object","additionalProperties":true}`),
 }

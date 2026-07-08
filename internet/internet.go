@@ -15,8 +15,9 @@ import (
 	"time"
 )
 
-// Capability is the canonical syscall name a core.internet grant publishes.
-const Capability = "net.http"
+// Capability is the name a core.internet grant publishes — the syscall's own
+// name. The HTTP method is the ADT discriminator inside the request args.
+const Capability = "core.internet"
 
 const (
 	DefaultTimeout          = 10 * time.Second

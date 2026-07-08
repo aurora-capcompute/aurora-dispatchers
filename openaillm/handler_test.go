@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -36,21 +37,34 @@ func (m *mockClient) Models(context.Context) (json.RawMessage, error) {
 	return json.RawMessage(`{"data":[{"id":"model-a"}]}`), nil
 }
 
-func TestChatYieldsByDefaultAndRunsAfterApproval(t *testing.T) {
-	client := &mockClient{}
-	settings, err := normalizeSettings(Settings{
-		DefaultModel:  "model-a",
-		AllowedModels: []string{"model-a"},
-	})
+// operationHandler builds a handler granting one operation, its approval
+// requirement supplied by the grant entry (nil = the driver's default).
+func operationHandler(t *testing.T, client Client, operation string, settings Settings, requireApproval *bool) *Handler {
+	t.Helper()
+	normalized, err := normalizeSettings(settings)
 	if err != nil {
 		t.Fatalf("settings: %v", err)
 	}
 	handler := NewHandler(client)
-	handler.AddCapability("openai.chat", settings)
-	call := sys.Syscall{
-		Name: "openai.chat",
-		Args: json.RawMessage(`{"messages":[{"role":"user","content":"hello"}]}`),
+	handler.AddOperation(operation, normalized, registry.OperationGrant{Operation: operation, RequireApproval: requireApproval})
+	return handler
+}
+
+func openaiCall(operation, fields string) sys.Syscall {
+	args := `{"operation":"` + operation + `"}`
+	if fields != "" {
+		args = `{"operation":"` + operation + `",` + fields + `}`
 	}
+	return sys.Syscall{Name: SyscallType, Args: json.RawMessage(args)}
+}
+
+func TestChatYieldsByDefaultAndRunsAfterApproval(t *testing.T) {
+	client := &mockClient{}
+	handler := operationHandler(t, client, "chat", Settings{
+		DefaultModel:  "model-a",
+		AllowedModels: []string{"model-a"},
+	}, nil)
+	call := openaiCall("chat", `"messages":[{"role":"user","content":"hello"}]`)
 
 	outcome, err := handler.DispatchCall(context.Background(), call, sys.Authorization{})
 	if err != nil {
@@ -77,26 +91,21 @@ func TestChatYieldsByDefaultAndRunsAfterApproval(t *testing.T) {
 	if body["model"] != "model-a" {
 		t.Fatalf("model = %v, want model-a", body["model"])
 	}
+	// The `operation` discriminator must not be forwarded to the provider.
+	if _, leaked := body["operation"]; leaked {
+		t.Fatal("operation discriminator leaked into the provider request")
+	}
 }
 
 func TestModelPolicyRejectsBeforeProviderCall(t *testing.T) {
 	client := &mockClient{}
 	approval := false
-	settings, err := normalizeSettings(Settings{
-		DefaultModel:    "model-a",
-		AllowedModels:   []string{"model-a"},
-		RequireApproval: &approval,
-	})
-	if err != nil {
-		t.Fatalf("settings: %v", err)
-	}
-	handler := NewHandler(client)
-	handler.AddCapability("openai.embeddings", settings)
+	handler := operationHandler(t, client, "embeddings", Settings{
+		DefaultModel:  "model-a",
+		AllowedModels: []string{"model-a"},
+	}, &approval)
 
-	outcome, err := handler.DispatchCall(context.Background(), sys.Syscall{
-		Name: "openai.embeddings",
-		Args: json.RawMessage(`{"model":"model-b","input":"hello"}`),
-	}, sys.Authorization{})
+	outcome, err := handler.DispatchCall(context.Background(), openaiCall("embeddings", `"model":"model-b","input":"hello"`), sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch embeddings: %v", err)
 	}
@@ -110,17 +119,9 @@ func TestModelPolicyRejectsBeforeProviderCall(t *testing.T) {
 
 func TestModelsListDoesNotRequireApprovalByDefault(t *testing.T) {
 	client := &mockClient{}
-	settings, err := normalizeSettings(Settings{})
-	if err != nil {
-		t.Fatalf("settings: %v", err)
-	}
-	handler := NewHandler(client)
-	handler.AddCapability("openai.models.list", settings)
+	handler := operationHandler(t, client, "models", Settings{}, nil)
 
-	outcome, err := handler.DispatchCall(context.Background(), sys.Syscall{
-		Name: "openai.models.list",
-		Args: json.RawMessage(`{}`),
-	}, sys.Authorization{})
+	outcome, err := handler.DispatchCall(context.Background(), openaiCall("models", ""), sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch models: %v", err)
 	}
@@ -135,24 +136,25 @@ func TestModelsListDoesNotRequireApprovalByDefault(t *testing.T) {
 func TestStreamingIsRejected(t *testing.T) {
 	client := &mockClient{}
 	approval := false
-	settings, err := normalizeSettings(Settings{
-		DefaultModel:    "model-a",
-		RequireApproval: &approval,
-	})
-	if err != nil {
-		t.Fatalf("settings: %v", err)
-	}
-	handler := NewHandler(client)
-	handler.AddCapability("openai.responses", settings)
+	handler := operationHandler(t, client, "responses", Settings{DefaultModel: "model-a"}, &approval)
 
-	outcome, err := handler.DispatchCall(context.Background(), sys.Syscall{
-		Name: "openai.responses",
-		Args: json.RawMessage(`{"input":"hello","stream":true}`),
-	}, sys.Authorization{})
+	outcome, err := handler.DispatchCall(context.Background(), openaiCall("responses", `"input":"hello","stream":true`), sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch responses: %v", err)
 	}
 	if outcome.Status() != sys.StatusFailed {
 		t.Fatalf("outcome = %s, want failed", outcome.Status())
+	}
+}
+
+// An ungranted operation is denied — the grant selects which ADT cases exist.
+func TestUngrantedOperationDenied(t *testing.T) {
+	handler := operationHandler(t, &mockClient{}, "chat", Settings{DefaultModel: "model-a"}, nil)
+	outcome, err := handler.DispatchCall(context.Background(), openaiCall("embeddings", `"input":"x"`), sys.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if outcome.Status() != sys.StatusFailed || outcome.Errno() != sys.ErrnoDenied {
+		t.Fatalf("ungranted op = %v/%v, want failed/denied", outcome.Status(), outcome.Errno())
 	}
 }

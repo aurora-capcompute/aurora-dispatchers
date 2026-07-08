@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,108 +13,163 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// InternetPermission is one allowlisted class of request the grant may make:
-// the methods (an HTTP method list, or ["*"] for any) permitted against a
-// domain (a host, or "*" for any). The permissions together are the policy that
+// InternetPermission is one entry of a core.internet grant's `capabilities`
+// list: the methods (an HTTP method list, or ["*"] for any) permitted against a
+// domain (a host, or "*" for any), the request's data-flow policy, and whether
+// it needs human approval. The permissions together are the allowlist that
 // constrains every request the program can make through this grant.
 type InternetPermission struct {
-	Methods []string `json:"methods"`
-	Domain  string   `json:"domain"`
+	Methods         []string `json:"methods"`
+	Domain          string   `json:"domain"`
+	RequireApproval *bool    `json:"require_approval,omitempty"`
+	FlowPolicy
 }
 
-type InternetSettings struct {
-	Permissions      []InternetPermission `json:"permissions"`
+// internetConfig is a core.internet grant's driver configuration: its
+// capabilities (the allowlist + per-request flow) and the response/request
+// bounds. The HTTP method is the ADT discriminator of the single net capability.
+type internetConfig struct {
+	Capabilities     []InternetPermission `json:"capabilities,omitempty"`
 	TimeoutMS        int64                `json:"timeout_ms,omitempty"`
 	MaxResponseBytes int64                `json:"max_response_bytes,omitempty"`
 	MaxRequestBytes  int64                `json:"max_request_bytes,omitempty"`
-	RequireApproval  bool                 `json:"require_approval,omitempty"`
 }
+
+// internetRequestSchema is the single flat schema every core.internet call
+// carries; `method` is the discriminator the allowlist and flow policy read.
+var internetRequestSchema = json.RawMessage(`{"type":"object","properties":{"method":{"type":"string"},"url":{"type":"string","format":"uri"},"headers":{"type":"object","additionalProperties":{"type":"string"}},"body":{"type":"string"}},"required":["method","url"],"additionalProperties":false}`)
 
 type InternetRegistration struct{}
 
-func (InternetRegistration) Matches(syscall string) bool { return syscall == "core.internet" }
+func (InternetRegistration) Matches(syscall string) bool { return syscall == internet.Capability }
 
 func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	settings, _, err := parseInternetSettings(raw)
+	config, _, err := parseInternetConfig(raw)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(settings)
+	return json.Marshal(config)
 }
 
-func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, config *builtin.Config) error {
-	settings, policy, err := parseInternetSettings(raw)
+func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Config) error {
+	config, policy, err := parseInternetConfig(raw)
 	if err != nil {
 		return err
 	}
 	client := internet.NewConfiguredClient(
 		policy,
-		time.Duration(settings.TimeoutMS)*time.Millisecond,
-		settings.MaxResponseBytes,
-		settings.MaxRequestBytes,
+		time.Duration(config.TimeoutMS)*time.Millisecond,
+		config.MaxResponseBytes,
+		config.MaxRequestBytes,
 	)
-	config.Handlers = append(config.Handlers, builtin.InternetHandler{
-		Name:            internet.Capability,
-		Client:          client,
-		RequireApproval: settings.RequireApproval,
+	out.Handlers = append(out.Handlers, builtin.InternetHandler{
+		Name:    internet.Capability,
+		Methods: internetMethodPolicies(config.Capabilities),
+		Client:  client,
 	})
-	config.Capabilities = append(config.Capabilities, sys.Capability{
+	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name:        internet.Capability,
-		Description: internetDescription(settings.Permissions),
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"method":{"type":"string"},"url":{"type":"string","format":"uri"},"headers":{"type":"object","additionalProperties":{"type":"string"}},"body":{"type":"string"}},"required":["method","url"],"additionalProperties":false}`),
+		Description: internetDescription(config.Capabilities),
+		InputSchema: internetRequestSchema,
 	})
 	return nil
 }
 
-// parseInternetSettings validates and canonicalizes a core.internet grant's
-// settings and derives the request policy from its permissions — the single
-// parse Normalize (which marshals it) and Configure (which builds from it)
-// share.
-func parseInternetSettings(raw json.RawMessage) (InternetSettings, internet.Policy, error) {
-	settings := InternetSettings{
+// parseInternetConfig validates and canonicalizes a core.internet grant's
+// config and derives the request allowlist from its capabilities — the single
+// parse Normalize (which marshals it) and Configure (which builds from it) share.
+func parseInternetConfig(raw json.RawMessage) (internetConfig, internet.Policy, error) {
+	config := internetConfig{
 		TimeoutMS:        int64(internet.DefaultTimeout / time.Millisecond),
 		MaxResponseBytes: internet.DefaultMaxResponseBytes,
 		MaxRequestBytes:  internet.DefaultMaxRequestBytes,
 	}
 	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return InternetSettings{}, internet.Policy{}, err
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&config); err != nil {
+			return internetConfig{}, internet.Policy{}, err
 		}
 	}
-	if len(settings.Permissions) == 0 {
-		return InternetSettings{}, internet.Policy{}, fmt.Errorf("permissions must contain at least one {methods, domain}")
+	if len(config.Capabilities) == 0 {
+		return internetConfig{}, internet.Policy{}, fmt.Errorf("capabilities must contain at least one {methods, domain}")
 	}
 
 	var rules []internet.Rule
-	for i := range settings.Permissions {
-		permission := &settings.Permissions[i]
+	for i := range config.Capabilities {
+		permission := &config.Capabilities[i]
 		domain := strings.TrimSpace(permission.Domain)
 		if domain == "" {
-			return InternetSettings{}, internet.Policy{}, fmt.Errorf("permission %d: domain is empty", i)
+			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: domain is empty", i)
 		}
 		methods := canonicalMethods(permission.Methods)
 		if len(methods) == 0 {
-			return InternetSettings{}, internet.Policy{}, fmt.Errorf("permission %d: methods must contain at least one HTTP method (or \"*\")", i)
+			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: methods must contain at least one HTTP method (or \"*\")", i)
 		}
 		for _, method := range methods {
 			rule, err := internet.NewRule(method, domain)
 			if err != nil {
-				return InternetSettings{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+				return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
 			}
 			rules = append(rules, rule)
 		}
-		*permission = InternetPermission{Methods: methods, Domain: domain}
+		flow, err := permission.FlowPolicy.Normalized()
+		if err != nil {
+			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+		}
+		permission.Methods = methods
+		permission.Domain = domain
+		permission.FlowPolicy = flow
 	}
-	if settings.TimeoutMS <= 0 {
-		return InternetSettings{}, internet.Policy{}, fmt.Errorf("timeout_ms must be positive")
+	if config.TimeoutMS <= 0 {
+		return internetConfig{}, internet.Policy{}, fmt.Errorf("timeout_ms must be positive")
 	}
-	if settings.MaxResponseBytes <= 0 {
-		return InternetSettings{}, internet.Policy{}, fmt.Errorf("max_response_bytes must be positive")
+	if config.MaxResponseBytes <= 0 {
+		return internetConfig{}, internet.Policy{}, fmt.Errorf("max_response_bytes must be positive")
 	}
-	if settings.MaxRequestBytes <= 0 {
-		return InternetSettings{}, internet.Policy{}, fmt.Errorf("max_request_bytes must be positive")
+	if config.MaxRequestBytes <= 0 {
+		return internetConfig{}, internet.Policy{}, fmt.Errorf("max_request_bytes must be positive")
 	}
-	return settings, internet.NewPolicy(rules...), nil
+	return config, internet.NewPolicy(rules...), nil
+}
+
+// internetMethodPolicies aggregates the grant's per-permission flow and approval
+// into a per-method policy the handler reads by the request's method ("*" is the
+// wildcard bucket, merged with the specific method at dispatch).
+func internetMethodPolicies(permissions []InternetPermission) map[string]builtin.InternetMethodPolicy {
+	methods := make(map[string]builtin.InternetMethodPolicy)
+	for _, permission := range permissions {
+		approval := permission.RequireApproval != nil && *permission.RequireApproval
+		for _, method := range permission.Methods {
+			existing := methods[method]
+			methods[method] = builtin.InternetMethodPolicy{
+				RequireApproval: existing.RequireApproval || approval,
+				Labels:          unionLabels(existing.Labels, permission.Labels),
+				Taints:          unionLabels(existing.Taints, permission.Taints),
+			}
+		}
+	}
+	return methods
+}
+
+// unionLabels concatenates two label sets, dropping duplicates.
+func unionLabels(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, label := range append(append([]string(nil), a...), b...) {
+		if _, dup := seen[label]; dup {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	return out
 }
 
 // canonicalMethods uppercases and de-duplicates a permission's methods,
