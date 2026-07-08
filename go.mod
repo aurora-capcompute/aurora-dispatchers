@@ -3,7 +3,7 @@ module github.com/aurora-capcompute/aurora-dispatchers
 go 1.26
 
 require (
-	github.com/aurora-capcompute/capcompute v0.0.0-20260708110059-6d31db5a36aa
+	github.com/aurora-capcompute/capcompute v0.0.0-20260708142052-0dd15c4d6286
 	github.com/openai/openai-go/v3 v3.41.0
 )
 
