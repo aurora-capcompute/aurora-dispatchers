@@ -102,16 +102,16 @@ func TestFilesystemRejectsBadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"no roots":         `{"capabilities":[{"operation":"read"}]}`,
-		"empty roots":      `{"capabilities":[{"operation":"read"}],"roots":[]}`,
-		"missing root":     `{"capabilities":[{"operation":"read"}],"roots":["` + filepath.Join(dir, "nope") + `"]}`,
-		"file as root":     `{"capabilities":[{"operation":"read"}],"roots":["` + file + `"]}`,
-		"no capabilities":  `{"roots":["` + dir + `"]}`,
-		"unknown op":       `{"capabilities":[{"operation":"write"}],"roots":["` + dir + `"]}`,
-		"duplicate op":     `{"capabilities":[{"operation":"read"},{"operation":"read"}],"roots":["` + dir + `"]}`,
-		"bad extension":    `{"capabilities":[{"operation":"read"}],"roots":["` + dir + `"],"extensions":["a/b"]}`,
-		"unknown field":    `{"capabilities":[{"operation":"read"}],"roots":["` + dir + `"],"bogus":1}`,
-		"zero read bytes":  `{"capabilities":[{"operation":"read"}],"roots":["` + dir + `"],"max_read_bytes":-1}`,
+		"no roots":            `{"capabilities":[{"operation":"read"}]}`,
+		"empty roots":         `{"capabilities":[{"operation":"read"}],"roots":[]}`,
+		"missing root":        `{"capabilities":[{"operation":"read"}],"roots":["` + filepath.Join(dir, "nope") + `"]}`,
+		"file as root":        `{"capabilities":[{"operation":"read"}],"roots":["` + file + `"]}`,
+		"no capabilities":     `{"roots":["` + dir + `"]}`,
+		"unknown op":          `{"capabilities":[{"operation":"write"}],"roots":["` + dir + `"]}`,
+		"duplicate op":        `{"capabilities":[{"operation":"read"},{"operation":"read"}],"roots":["` + dir + `"]}`,
+		"bad extension":       `{"capabilities":[{"operation":"read"}],"roots":["` + dir + `"],"extensions":["a/b"]}`,
+		"unknown field":       `{"capabilities":[{"operation":"read"}],"roots":["` + dir + `"],"bogus":1}`,
+		"negative read bytes": `{"capabilities":[{"operation":"read"}],"roots":["` + dir + `"],"max_read_bytes":-1}`,
 	}
 	for name, config := range cases {
 		t.Run(name, func(t *testing.T) {
