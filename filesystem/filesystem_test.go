@@ -345,3 +345,51 @@ func TestReadRejectsSymlinkByDefault(t *testing.T) {
 		t.Fatalf("follow_symlinks should read the target: %q", got.Content)
 	}
 }
+
+func TestReadRejectsIntermediateSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	dir := t.TempDir()
+	write(t, dir, "real/secret.txt", "secret\n")
+	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	// follow=false: a symlink anywhere on the path — here an intermediate
+	// directory — is rejected, not just a final-component link.
+	result := dispatch(t, handler(dir), `{"path":"link/secret.txt"}`)
+	if result.Status() != sys.StatusFailed || !strings.Contains(result.Message(), "symlink") {
+		t.Fatalf("intermediate symlink should be rejected: %q %q", result.Errno(), result.Message())
+	}
+	// follow=true: it is resolved, and the target still lands inside the root.
+	h := handler(dir)
+	h.FollowSymlinks = true
+	if got := decodeRead(t, dispatch(t, h, `{"path":"link/secret.txt"}`)); got.Content != "secret\n" {
+		t.Fatalf("follow_symlinks should read through an intermediate link: %q", got.Content)
+	}
+}
+
+func TestReadSymlinkEscapeWithFollow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside.txt")
+	if err := os.WriteFile(outside, []byte("no\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link.txt")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	// Even with following enabled, a symlink whose target leaves the root is
+	// refused — the real path is what must be contained.
+	h := handler(root)
+	h.FollowSymlinks = true
+	result := dispatch(t, h, `{"path":"link.txt"}`)
+	if result.Status() != sys.StatusFailed || !strings.Contains(result.Message(), "escapes") {
+		t.Fatalf("a symlink escaping the root must fail even with follow: %q %q", result.Errno(), result.Message())
+	}
+}

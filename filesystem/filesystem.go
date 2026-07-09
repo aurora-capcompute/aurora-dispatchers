@@ -171,14 +171,14 @@ func (h Handler) read(ctx context.Context, call sys.Syscall, auth sys.Authorizat
 	}
 	path, display, err := h.resolve(request.Path)
 	if err != nil {
-		return resolveFailure(ctx, err)
+		return failure(ctx, err)
 	}
 	if requireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve reading %s", display)), nil
 	}
 	data, capped, err := readCapped(path, h.MaxReadBytes)
 	if err != nil {
-		return resolveFailure(ctx, err)
+		return failure(ctx, err)
 	}
 	if bytes.IndexByte(data, 0) >= 0 {
 		return sys.FailCode(sys.ErrnoInvalidArgs, "binary content is not supported"), nil
@@ -251,9 +251,11 @@ func splitLines(text string, dataTruncated bool) []string {
 
 // resolve maps a guest path to an absolute file inside a root and its display
 // path (relative to that root). Absolute paths must already fall inside a root;
-// relative paths are tried against each root. Symlinks are rejected unless the
-// grant follows them, and then only when they stay inside a root. Directories
-// and non-regular files are refused: this capability reads files.
+// relative paths are tried against each root. When the grant does not follow
+// symlinks, any symlink on the path — final or intermediate — is rejected; when
+// it does, the whole path is resolved and the real target must still land inside
+// a root. Directories and non-regular files are refused: this capability reads
+// files.
 func (h Handler) resolve(input string) (string, string, error) {
 	if strings.TrimSpace(input) == "" {
 		return "", "", errors.New("path is required")
@@ -267,49 +269,55 @@ func (h Handler) resolve(input string) (string, string, error) {
 		}
 	}
 	for _, candidate := range candidates {
-		root := containingRoot(candidate, h.Roots)
-		if root == "" {
+		if containingRoot(candidate, h.Roots) == "" {
 			continue
 		}
-		info, err := os.Lstat(candidate)
-		if err != nil {
-			continue
+		if _, err := os.Lstat(candidate); err != nil {
+			continue // not here; try the next root
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			if !h.FollowSymlinks {
-				return "", "", fmt.Errorf("symlink traversal is disabled: %s", filepath.ToSlash(relOrBase(root, candidate)))
-			}
+		if h.FollowSymlinks {
+			// Resolve every symlink on the path and require the real target to
+			// stay inside a root.
 			resolved, err := filepath.EvalSymlinks(candidate)
 			if err != nil {
 				return "", "", err
 			}
-			if containingRoot(resolved, h.Roots) == "" {
+			root := containingRoot(resolved, h.Roots)
+			if root == "" {
 				return "", "", errors.New("symlink escapes filesystem roots")
 			}
-			candidate = resolved
-			info, err = os.Stat(candidate)
-			if err != nil {
-				return "", "", err
-			}
+			return h.finishResolve(root, resolved)
 		}
-		if info.IsDir() {
-			return "", "", errors.New("path is a directory; filesystem read serves regular files")
+		// Reject any symlink on the path so a link cannot redirect the read out
+		// of the root.
+		root := containingRoot(candidate, h.Roots)
+		if err := rejectSymlinks(root, candidate); err != nil {
+			return "", "", err
 		}
-		if !info.Mode().IsRegular() {
-			return "", "", errors.New("path is not a regular file")
-		}
-		if !h.FollowSymlinks {
-			if err := rejectSymlinks(root, candidate); err != nil {
-				return "", "", err
-			}
-		}
-		if !h.extensionAllowed(candidate) {
-			return "", "", fmt.Errorf("extension %q is not allowed", strings.ToLower(filepath.Ext(candidate)))
-		}
-		rel, _ := filepath.Rel(root, candidate)
-		return candidate, filepath.ToSlash(rel), nil
+		return h.finishResolve(root, candidate)
 	}
 	return "", "", os.ErrNotExist
+}
+
+// finishResolve confirms path — already inside root and free of disallowed
+// symlinks — is a readable regular file of an allowed extension, and returns it
+// with its root-relative display path.
+func (h Handler) finishResolve(root, path string) (string, string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", "", err
+	}
+	if info.IsDir() {
+		return "", "", errors.New("path is a directory; filesystem read serves regular files")
+	}
+	if !info.Mode().IsRegular() {
+		return "", "", errors.New("path is not a regular file")
+	}
+	if !h.extensionAllowed(path) {
+		return "", "", fmt.Errorf("extension %q is not allowed", strings.ToLower(filepath.Ext(path)))
+	}
+	rel, _ := filepath.Rel(root, path)
+	return path, filepath.ToSlash(rel), nil
 }
 
 func (h Handler) extensionAllowed(path string) bool {
@@ -325,15 +333,6 @@ func (h Handler) extensionAllowed(path string) bool {
 	return false
 }
 
-// relOrBase returns candidate relative to root for a readable error message,
-// falling back to the base name if it cannot be made relative.
-func relOrBase(root, candidate string) string {
-	if rel, err := filepath.Rel(root, candidate); err == nil {
-		return rel
-	}
-	return filepath.Base(candidate)
-}
-
 // containingRoot returns the first root that contains path, or "" if none does.
 func containingRoot(path string, roots []string) string {
 	path = filepath.Clean(path)
@@ -346,9 +345,13 @@ func containingRoot(path string, roots []string) string {
 	return ""
 }
 
-// rejectSymlinks walks every segment from root to path and fails if any is a
-// symlink, so an intermediate symlinked directory cannot smuggle a read out of
-// the root when symlink following is disabled.
+// errSymlink is returned when a symlink lies on a path the grant does not follow.
+// It carries no filesystem path so a read never leaks an absolute host path.
+var errSymlink = errors.New("symlink traversal is disabled")
+
+// rejectSymlinks walks every segment from root to path and fails with errSymlink
+// if any is a symlink, so a symlinked component — final or intermediate — cannot
+// redirect a read out of the root when symlink following is disabled.
 func rejectSymlinks(root, path string) error {
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
@@ -365,7 +368,7 @@ func rejectSymlinks(root, path string) error {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink traversal is disabled: %s", current)
+			return errSymlink
 		}
 	}
 	return nil
@@ -396,9 +399,9 @@ func readCapped(path string, limit int64) ([]byte, bool, error) {
 	return data, false, nil
 }
 
-// resolveFailure classifies a resolve/read error into a guest-visible failure,
+// failure classifies a resolve/read error into a guest-visible failure,
 // preferring the context error when the call was cancelled.
-func resolveFailure(ctx context.Context, err error) (sys.SyscallResult, error) {
+func failure(ctx context.Context, err error) (sys.SyscallResult, error) {
 	if ctx.Err() != nil {
 		return sys.SyscallResult{}, ctx.Err()
 	}
