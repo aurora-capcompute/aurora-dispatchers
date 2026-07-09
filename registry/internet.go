@@ -231,26 +231,9 @@ func buildInjections(permissions []InternetPermission, services Services) ([]bui
 		if err != nil {
 			return nil, fmt.Errorf("permission %d: %w", i, err)
 		}
-		headers := make(map[string]string, len(permission.InjectHeaders))
-		var labels []string
-		for name, injection := range permission.InjectHeaders {
-			canonical := http.CanonicalHeaderKey(strings.TrimSpace(name))
-			var secret Secret
-			if ref := strings.TrimSpace(injection.Secret); ref != "" {
-				secret = SecretRef(ref)
-			} else {
-				secret = LiteralSecret(injection.Value)
-			}
-			value, err := secret.Resolve(services.Secrets)
-			if err != nil {
-				return nil, fmt.Errorf("permission %d header %q: %w", i, canonical, err)
-			}
-			headers[canonical] = injection.Prefix + value
-			credName := secret.Ref()
-			if credName == "" {
-				credName = "inline"
-			}
-			labels = append(labels, "credential:"+credName+"@"+CredentialFingerprint(services.AuditKey, value))
+		headers, labels, err := resolveInjectedHeaders(permission.InjectHeaders, services)
+		if err != nil {
+			return nil, fmt.Errorf("permission %d: %w", i, err)
 		}
 		out = append(out, builtin.CredentialInjection{
 			Methods: permission.Methods,
@@ -260,6 +243,36 @@ func buildInjections(permissions []InternetPermission, services Services) ([]bui
 		})
 	}
 	return out, nil
+}
+
+// resolveInjectedHeaders resolves a set of header injections host-side into the
+// concrete header values to attach and the audit labels naming each credential
+// (its keyed fingerprint, never its value). Shared by the internet and template
+// drivers so credential resolution has one implementation. A missing/unknown
+// referenced secret is a fail-closed error — the driver refuses to build.
+func resolveInjectedHeaders(inject map[string]HeaderInjection, services Services) (map[string]string, []string, error) {
+	headers := make(map[string]string, len(inject))
+	var labels []string
+	for name, injection := range inject {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(name))
+		var secret Secret
+		if ref := strings.TrimSpace(injection.Secret); ref != "" {
+			secret = SecretRef(ref)
+		} else {
+			secret = LiteralSecret(injection.Value)
+		}
+		value, err := secret.Resolve(services.Secrets)
+		if err != nil {
+			return nil, nil, fmt.Errorf("header %q: %w", canonical, err)
+		}
+		headers[canonical] = injection.Prefix + value
+		credName := secret.Ref()
+		if credName == "" {
+			credName = "inline"
+		}
+		labels = append(labels, "credential:"+credName+"@"+CredentialFingerprint(services.AuditKey, value))
+	}
+	return headers, labels, nil
 }
 
 // internetMethodPolicies aggregates the grant's per-permission flow and approval

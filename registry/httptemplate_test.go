@@ -1,0 +1,116 @@
+package registry_test
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+)
+
+func TestTemplateMatches(t *testing.T) {
+	reg := registry.HTTPTemplateRegistration{}
+	if !reg.Matches("core.httpTemplate") {
+		t.Fatal("should match core.httpTemplate")
+	}
+	if reg.Matches("core.internet") {
+		t.Fatal("must not match another syscall")
+	}
+}
+
+func TestTemplateNormalizeRejectsBadConfigs(t *testing.T) {
+	cases := map[string]string{
+		"no operations":          `{"base_url":"https://onyx.example.com","operations":[]}`,
+		"plain http origin":      `{"base_url":"http://onyx.example.com","operations":[{"name":"s","method":"GET","path":"/s"}]}`,
+		"wildcard method":        `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"*","path":"/s"}]}`,
+		"relative path":          `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"GET","path":"s"}]}`,
+		"bad param type":         `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"GET","path":"/s","params":{"q":{"type":"blob"}}}]}`,
+		"placeholder no param":   `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"POST","path":"/s","body":{"m":"{{q}}"}}]}`,
+		"duplicate operation":    `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"GET","path":"/a"},{"name":"s","method":"GET","path":"/b"}]}`,
+		"injection on plainhttp": `{"base_url":"http://onyx.example.com","inject_headers":{"Authorization":{"secret":"X"}},"operations":[{"name":"s","method":"GET","path":"/s"}]}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := (registry.HTTPTemplateRegistration{}).Normalize("core.httpTemplate", json.RawMessage(raw)); err == nil {
+				t.Fatalf("Normalize accepted an invalid config (%s)", name)
+			}
+		})
+	}
+}
+
+// A loopback origin may use plain http (no wire to sniff), and a valid grant
+// normalizes cleanly.
+func TestTemplateNormalizeAcceptsValid(t *testing.T) {
+	for _, base := range []string{"https://onyx.example.com", "http://127.0.0.1:8080"} {
+		raw := `{"base_url":"` + base + `","operations":[{"name":"search","method":"POST","path":"/s","body":{"m":"{{q}}"},"params":{"q":{"type":"string","required":true}}}]}`
+		if _, err := (registry.HTTPTemplateRegistration{}).Normalize("core.httpTemplate", json.RawMessage(raw)); err != nil {
+			t.Fatalf("Normalize rejected a valid grant on %q: %v", base, err)
+		}
+	}
+}
+
+func templateConfigJSON() string {
+	return `{"base_url":"https://onyx.example.com",` +
+		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}},` +
+		`"operations":[{"name":"search","description":"Search the KB.","method":"POST","path":"/api/search",` +
+		`"body":{"message":"{{query}}","persona_id":0},"params":{"query":{"type":"string","required":true,"description":"the question"}}}]}`
+}
+
+// Configure publishes one capability named for the syscall, a oneOf over the
+// operations, and a handler that routes it.
+func TestTemplateConfigurePublishesCapability(t *testing.T) {
+	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
+	var config builtin.Config
+	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, &config); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != "core.httpTemplate" {
+		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Capabilities)
+	}
+	schema := string(config.Capabilities[0].InputSchema)
+	for _, want := range []string{`"oneOf"`, `"search"`, `"query"`} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("schema missing %q: %s", want, schema)
+		}
+	}
+	desc := config.Capabilities[0].Description
+	if !strings.Contains(desc, "search") || !strings.Contains(desc, "Search the KB.") {
+		t.Fatalf("description does not document the operation: %s", desc)
+	}
+	if len(config.Handlers) != 1 || !config.Handlers[0].Handles("core.httpTemplate") {
+		t.Fatalf("handler must route core.httpTemplate")
+	}
+	// The resolved token must never appear in the published surface.
+	if strings.Contains(schema, "tok-abc") || strings.Contains(desc, "tok-abc") {
+		t.Fatal("SECURITY: the resolved credential leaked into the published capability")
+	}
+}
+
+// A referenced secret the resolver cannot supply fails the driver build — at
+// activation — never at request time.
+func TestTemplateConfigureFailsClosedOnMissingSecret(t *testing.T) {
+	var config builtin.Config
+	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), registry.Services{}, &config); err == nil {
+		t.Fatal("Configure built a handler referencing a secret with no resolver")
+	}
+	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
+	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, &config); err == nil {
+		t.Fatal("Configure built a handler referencing an unknown secret")
+	}
+}
+
+// Normalize persists only the credential reference, never a resolved value.
+func TestTemplateNormalizeKeepsSecretReference(t *testing.T) {
+	normalized, err := (registry.HTTPTemplateRegistration{}).Normalize("core.httpTemplate", json.RawMessage(templateConfigJSON()))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !strings.Contains(string(normalized), `"secret":"ONYX_TOKEN"`) {
+		t.Fatalf("normalized dropped the reference: %s", normalized)
+	}
+	if strings.Contains(string(normalized), "tok-abc") {
+		t.Fatalf("normalized leaked a resolved value: %s", normalized)
+	}
+}
