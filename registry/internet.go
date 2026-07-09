@@ -26,6 +26,13 @@ type InternetPermission struct {
 	Methods         []string `json:"methods"`
 	Domain          string   `json:"domain"`
 	RequireApproval *bool    `json:"require_approval,omitempty"`
+	// Description is an author-supplied usage note for this origin — how to call
+	// it, which paths and body shape it expects — woven into the published
+	// capability's description (the model's tool doc) beside the origin's methods
+	// and domain. It is manifest-authored trusted policy, never guest- or
+	// network-supplied; do not put a secret value here, as it is persisted and
+	// shown to the model.
+	Description string `json:"description,omitempty"`
 	// InjectHeaders attaches host-held request headers (e.g. an Authorization
 	// bearer token) to requests this permission allows. Because it carries a
 	// credential, a permission that injects one must be a specific https host
@@ -149,8 +156,13 @@ func parseInternetConfig(raw json.RawMessage) (internetConfig, internet.Policy, 
 		if err != nil {
 			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
 		}
+		description, err := sanitizeDescription(permission.Description)
+		if err != nil {
+			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+		}
 		permission.Methods = methods
 		permission.Domain = domain
+		permission.Description = description
 		permission.FlowPolicy = flow
 		if len(permission.InjectHeaders) > 0 {
 			if err := validateInjection(domain, permission.InjectHeaders); err != nil {
@@ -290,15 +302,46 @@ func canonicalMethods(methods []string) []string {
 	return out
 }
 
+// maxPermissionDescriptionLen bounds an author-supplied usage note so a manifest
+// cannot bloat the model's tool prompt without limit.
+const maxPermissionDescriptionLen = 2000
+
+// sanitizeDescription trims and bounds an author-supplied usage note. The text
+// is manifest-authored (trusted policy, never guest- or network-supplied), but
+// it lands verbatim in the model's tool prompt, so it is length-bounded and
+// refused if it carries a control character that would corrupt that prompt
+// (newline and tab, which format it, are allowed).
+func sanitizeDescription(raw string) (string, error) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return "", nil
+	}
+	if len(text) > maxPermissionDescriptionLen {
+		return "", fmt.Errorf("description is %d bytes, over the %d-byte limit", len(text), maxPermissionDescriptionLen)
+	}
+	for _, r := range text {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("description contains a control character %q", r)
+		}
+	}
+	return text, nil
+}
+
+// internetDescription composes the published capability's description — the
+// model's tool doc — from each permitted origin: its methods, its domain, and
+// the author's usage note when supplied.
 func internetDescription(permissions []InternetPermission) string {
 	var b strings.Builder
-	b.WriteString("Make an HTTP request (any method the grant allows) and read the bounded response. Allowed:")
-	for i, permission := range permissions {
-		if i > 0 {
-			b.WriteString(";")
+	b.WriteString("Make an HTTP request (any method the grant allows) and read the bounded response. Allowed origins:")
+	for _, permission := range permissions {
+		fmt.Fprintf(&b, "\n- %s → %s", strings.Join(permission.Methods, "/"), permission.Domain)
+		if permission.Description != "" {
+			b.WriteString(": ")
+			b.WriteString(permission.Description)
 		}
-		fmt.Fprintf(&b, " %s → %s", strings.Join(permission.Methods, "/"), permission.Domain)
 	}
-	b.WriteString(".")
 	return b.String()
 }
