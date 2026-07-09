@@ -41,12 +41,14 @@ and guest instances are owned by the runtime
               │  HTTP /v1
          aurora-dist                         ← the server (one binary you run)
               │  assembled from…
-   ┌──────────┼─────────────────────┐
- aurora-       aurora-dispatchers     capcompute
- capcompute    ◀ YOU ARE HERE         (the kernel)
- (orchestr.)   (capability drivers)
-              │
-        aurora-brains                        ← Wasm agent programs that emit the syscalls
+   ┌──────────┴──────────┐
+ aurora-capcompute    aurora-dispatchers     ← orchestration runtime + capability drivers
+                      ◀ YOU ARE HERE
+   └──────────┬──────────┘
+              │  both built on
+         capcompute                          ← the kernel (the foundation)
+
+   aurora-brains  →  Wasm agent programs that emit the syscalls
 ```
 
 An assembly (like [aurora-dist](https://github.com/aurora-capcompute/aurora-dist))
