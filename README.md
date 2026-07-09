@@ -1,53 +1,176 @@
 # aurora-dispatchers
 
-Reusable capability drivers for `capcompute` assemblies: concrete external-I/O
-clients, their configuration, and the capability schemas they publish. Every
-driver speaks the kernel's `sys` vocabulary (`sys.Dispatcher`, `sys.Syscall`,
-`sys.SyscallResult` with errno-classified failures) and yields for approval by
-returning `sys.Yield` until the dispatch carries an approved
-`sys.Authorization`.
+**The "device drivers" that let a sandboxed agent touch the real world — safely.**
+`aurora-dispatchers` is a Go library of ready‑made capability drivers for Aurora:
+make an HTTP call, read a file, get/put shared memory, or call an LLM. Each driver
+runs the action *for* the agent, under a scoped, approval‑gated, recorded grant.
 
-Durable processes, journals, approval tasks, and guest instances are owned by
-the runtime (`aurora-capcompute`); channels and control planes by the assembly.
-This module is drivers only.
+> New here? The first two sections explain what a "dispatcher" is and where it fits.
+> Then see [Quick start](#quick-start-5-minutes) and the
+> [assembly example](#example-assembling-a-dispatcher).
 
-Packages:
+---
 
-- `builtin`: the leaf dispatcher — routes each syscall to the handler that
-  owns its name (internet requests, injected handlers).
-- `filesystem`: the `core.filesystem` **read-only** host-file capability — a
-  single capability whose `read` operation is selected by the `operation` field
-  in the call args. A grant is chrooted to one or more `roots` (every path,
-  absolute or relative, must resolve inside one; symlink escapes are rejected),
-  reads a file whole or by an inclusive 1-based `start_line`/`end_line` range,
-  and stamps the grant's provenance `labels` on the result so file contents
-  enter the flow monitor tainted at their source. Read-only for now — it grants
-  no writes; any future mutating operation is a new case of this same
-  capability, never a separate name.
-- `internet`: bounded allowlisted HTTP client for requests of **any** method,
-  publishing the single `core.internet` capability. The grant's `capabilities`
-  list — `{methods, domain}` entries, where `methods` may be `["*"]` and
-  `domain` may be `"*"`, each optionally carrying its own `labels`/`taints`/
-  `require_approval` — is the policy that constrains every request the program
-  can make (checked at dispatch and on every redirect hop); the program selects
-  one with the `method` field inside the call args, and request and response
-  bodies are size-bounded.
-- `memory`: the `core.memory` tenant-scoped shared store capability — a single
-  capability whose `get`/`put` operations are selected by the `operation` field
-  in the call args, with subtree-chrooted grants, per-operation approval gating,
-  and provenance preservation (values re-surface with the taint they were
-  written under). The durable `memory.Store` behind it is injected.
-- `openaillm`: the `core.openaiApi` cognition tool — the standard LLM driver.
-  It publishes a single `core.openaiApi` capability whose operations —
-  `chat` / `responses` / `embeddings` / `models.list`, selected by an
-  `operation` discriminator inside the call args — run against any
-  OpenAI-compatible provider (base URL, key, and default model flattened onto
-  the grant; each granted operation carries its own approval policy). Registered
-  explicitly — `registry.New(..., openaillm.Registration{})` — since
-  `registry.Default()` stays network-credential-free.
-- `registry`: assembles built-in drivers and their capability schemas from
-  tool entries.
+## What is this, in plain words?
 
-Remaining domain driver modules live separately (`-k8s`, `-helm`) so an
-assembly pulls only the clients it ships; `aurora-dispatchers-llm` folded in
-here as `openaillm`.
+An Aurora agent is a Wasm program with **zero ambient authority** — it can't open a
+socket, read a file, or call an API by itself. Instead it emits a **syscall**
+("please GET https://example.com"), and the matching **dispatcher** performs that
+action on its behalf — but only within the limits of a **grant** you wrote in the
+agent's manifest.
+
+Every dispatcher in this repo enforces the same three safety mechanisms:
+
+1. **Least privilege** — a grant scopes exactly what's allowed (which domains,
+   which files, which operations). Anything outside it is denied.
+2. **Approval gating** — mark a grant `require_approval: true` and the driver
+   *yields* ("Approve this?") instead of acting, until a human says yes.
+3. **Data‑flow tracking** — results are stamped with provenance **labels**, and a
+   driver refuses a call whose inputs are too "tainted" to flow into that action.
+
+This module is **drivers only**. The durable processes, journal, approval tasks,
+and guest instances are owned by the runtime
+([aurora-capcompute](https://github.com/aurora-capcompute/aurora-capcompute)).
+
+## Where this fits in the Aurora system
+
+```
+        you (a human)
+              │
+   aurora-cli / aurora-slack-connector      ← clients you talk to
+              │  HTTP /v1
+         aurora-dist                         ← the server (one binary you run)
+              │  assembled from…
+   ┌──────────┼─────────────────────┐
+ aurora-       aurora-dispatchers     capcompute
+ capcompute    ◀ YOU ARE HERE         (the kernel)
+ (orchestr.)   (capability drivers)
+              │
+        aurora-brains                        ← Wasm agent programs that emit the syscalls
+```
+
+An assembly (like [aurora-dist](https://github.com/aurora-capcompute/aurora-dist))
+builds a `registry.Registry` from these drivers, calls `Registry.Build(...)` with a
+tenant's granted syscalls, and hands the resulting dispatcher to the runtime. The
+runtime then feeds each agent syscall to that dispatcher — journaling, approving,
+and replaying around it.
+
+## The drivers (features)
+
+| Capability | Package | What it does | Key safety limits |
+| --- | --- | --- | --- |
+| `core.internet` | `internet/` | Bounded HTTP client, any method | Allowlist of `METHOD:origin`; **SSRF guard** blocks loopback/private/metadata IPs (post‑DNS, defeats rebinding); size + time bounds; policy re‑checked on every redirect |
+| `core.filesystem` | `filesystem/` | **Read‑only** host‑file reads | Chrooted to declared `roots`; rejects symlink escapes; whole‑file or 1‑based line range; byte/line caps; optional extension allowlist; returns a SHA‑256 hash |
+| `core.memory` | `memory/` | Tenant‑scoped durable shared key/value store | `get`/`put`/`list`/`search`; subtree‑chrooted; optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
+| `core.scratch` | `registry/scratch.go` | Process‑local *ephemeral* store | Same operations as `core.memory` but a fresh, private store per process — cleared when it ends (a place to offload a large read out of the model's context) |
+| `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
+| `core.httpTemplate` | `builtin/template.go` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
+
+Two shared mechanisms make grants expressive and safe:
+
+- **Discriminated‑union capabilities** — one capability name per syscall; its
+  multiple operations are selected by an `"operation"` (or HTTP `"method"`)
+  discriminator *inside the args*, never by inventing new names.
+- **Host‑held secrets** — a grant references a secret by name (`{"secret":"OPENAI_KEY"}`);
+  the value is resolved host‑side and never enters the manifest, journal, or guest.
+
+## Quick start (5 minutes)
+
+This is a **library** — there's no binary to run. "Setup" is building and testing it.
+
+**Prerequisites:** Go 1.26+.
+
+```sh
+git clone https://github.com/aurora-capcompute/aurora-dispatchers
+cd aurora-dispatchers
+
+go build ./...
+go test ./...          # builtin, filesystem, internet, memory, openaillm, registry
+go vet ./...
+```
+
+The tests double as worked examples — read `registry/build_test.go`,
+`openaillm/registration_test.go`, `internet/internet_test.go`, and
+`memory/memory_test.go`.
+
+## Example: assembling a dispatcher
+
+You pick which registrations to include, then `Build` a dispatcher from a tenant's
+grants. `registry.Default()` is the credential‑free set (internet + memory);
+credentialed drivers like the LLM are added explicitly.
+
+```go
+// Credential-free built-ins, or add the LLM driver explicitly:
+reg := registry.New(
+    registry.InternetRegistration{},
+    registry.MemoryRegistration{},
+    openaillm.Registration{},   // carries credentials, so it's opt-in
+)
+
+services := registry.Services{
+    Tenant:      "acme",
+    MemoryStore: memory.NewMapStore(), // swap for a durable Store in production
+    Secrets:     mySecretResolver,     // resolves {"secret":"OPENAI_KEY"} host-side
+}
+
+cfg, err := reg.Build(ctx, []registry.Entry{
+    {Syscall: "core.internet",
+     Config: json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"example.com"}]}`)},
+    {Syscall: "core.memory",
+     Config: json.RawMessage(`{"capabilities":[{"operation":"get"},{"operation":"put","require_approval":true}]}`)},
+    {Syscall: "core.openaiApi", Hidden: true,
+     Config: json.RawMessage(`{"api_key":{"secret":"OPENAI_KEY"},"default_model":"gpt-4o","capabilities":[{"operation":"chat"}]}`)},
+}, services)
+
+dispatcher := builtin.New[MyKernelState](cfg) // a sys.Dispatcher the runtime can drive
+```
+
+**Registration is explicit, not magic** — there's no global `init()` auto‑register.
+You construct the `Registry` with exactly the drivers you want, and each is matched
+to a syscall by name. Note `FilesystemRegistration`, `ScratchRegistration`, and
+`HTTPTemplateRegistration` exist but are **not** in `Default()` — add them yourself.
+
+## Configuration
+
+There are no env vars read directly here — config arrives as JSON grant configs
+plus an injected `registry.Services`. Highlights per driver:
+
+- **openaillm** — `base_url` (default `https://api.openai.com/v1`), `api_key`
+  (literal or `{"secret":"NAME"}`), `default_model`, `allowed_models`, `timeout`
+  (2m), `max_request_bytes`, `headers` (Authorization/Host forbidden). The OpenAI
+  SDK is built with explicit options so stray `OPENAI_*` env vars can't override a
+  configured provider.
+- **internet** — `capabilities[]{methods, domain, require_approval, inject_headers,
+  labels, taints}`, `timeout_ms`, `max_response_bytes`, `allow_private_network`.
+- **filesystem** — `roots[]` (required, existing absolute dirs), `extensions[]`,
+  `max_read_bytes` (2 MiB), `max_lines` (10000), `follow_symlinks`.
+- **memory / scratch** — `capabilities[]{operation, require_approval, labels,
+  taints}`, `subtree`.
+- **httptemplate** — `base_url`, `operations[]{name, method, path, query, body,
+  params}`, `inject_headers`, bounds.
+
+## Project layout
+
+```
+builtin/     the leaf Dispatcher (routes syscall name → handler) + HTTP handlers
+internet/    core.internet: bounded, allowlisted HTTP client + SSRF guard
+filesystem/  core.filesystem: read-only, chrooted file reads
+memory/      core.memory: tenant KV store (MapStore is the in-memory reference impl)
+openaillm/   core.openaiApi: the LLM driver (client / handler / settings / registration)
+registry/    the Registration interface + Registry.Build, per-syscall registrations,
+             ADT/schema helpers (adt.go) and secret resolution (secret.go)
+```
+
+## Dependencies
+
+Only two direct dependencies: `github.com/aurora-capcompute/capcompute` (the `sys`
+vocabulary every driver speaks) and `github.com/openai/openai-go/v3` (used only by
+`openaillm`). Domain drivers like `-k8s` and `-helm` live in their own modules so an
+assembly pulls only the clients it ships.
+
+## Related repos
+
+- [capcompute](https://github.com/aurora-capcompute/capcompute) — the kernel whose `sys` vocabulary these drivers speak
+- [aurora-capcompute](https://github.com/aurora-capcompute/aurora-capcompute) — the runtime that drives these dispatchers
+- [aurora-dist](https://github.com/aurora-capcompute/aurora-dist) — the assembly that wires them into a server
+- [aurora-brains](https://github.com/aurora-capcompute/aurora-brains) — the agent programs that emit the syscalls
