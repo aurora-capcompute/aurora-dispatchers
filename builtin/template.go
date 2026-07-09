@@ -25,25 +25,23 @@ import (
 // the path/query, structurally in the JSON body — so a value can never break out
 // of its slot to alter the method, host, path, or JSON shape.
 type TemplateHandler struct {
-	Name string
-	// BaseURL is the fixed scheme://host every operation targets.
-	BaseURL string
-	// Headers are the host-held request headers (e.g. an injected Authorization)
-	// attached to every operation. The guest can neither supply nor read them.
-	Headers map[string]string
-	// CredentialLabels name the injected credential(s) for the journal — the keyed
-	// fingerprint, never the value — stamped on every result.
-	CredentialLabels []string
-	Client           InternetClient
-	// Operations is the published operation set, keyed by name.
+	Name   string
+	Client InternetClient
+	// Operations is the published operation set, keyed by name. Each operation
+	// carries its own origin and its own host-held credential, so one grant can
+	// front several APIs — the ADT over `operation` is the menu.
 	Operations map[string]TemplateOperation
 }
 
 // TemplateOperation is one fixed request the guest may invoke by name, with the
-// declared parameters substituted into its path, query, and body.
+// declared parameters substituted into its path, query, and body. Each operation
+// is self-contained: its own origin, its own host-attached credential, and its
+// own flow policy — so operations in one grant may target different hosts.
 type TemplateOperation struct {
 	Name   string
 	Method string
+	// BaseURL is this operation's fixed scheme://host.
+	BaseURL string
 	// Path is the fixed path (starting with "/"), optionally carrying {{param}}
 	// placeholders substituted percent-encoded.
 	Path string
@@ -56,6 +54,13 @@ type TemplateOperation struct {
 	// value cannot inject JSON syntax.
 	Body   any
 	Params map[string]TemplateParam
+	// Headers are the host-held request headers (e.g. an injected Authorization)
+	// attached to this operation only, bound to its origin. The guest can neither
+	// supply nor read them.
+	Headers map[string]string
+	// CredentialLabels name this operation's injected credential(s) for the journal
+	// — the keyed fingerprint, never the value — stamped on its result.
+	CredentialLabels []string
 	// Labels/Taints/RequireApproval are this operation's flow and approval policy,
 	// enforced exactly as for core.internet.
 	Labels          []string
@@ -110,21 +115,21 @@ func (h TemplateHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(h.CredentialLabels...), nil
+		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(operation.CredentialLabels...), nil
 	}
 	result, err := marshalResult(response)
 	if err != nil {
 		return result, err
 	}
-	return result.WithLabels(append(append([]string(nil), operation.Labels...), h.CredentialLabels...)...), nil
+	return result.WithLabels(append(append([]string(nil), operation.Labels...), operation.CredentialLabels...)...), nil
 }
 
-// render assembles the concrete request from the fixed template and the
-// validated parameters. Every guest value is placed through an encoding that
+// render assembles the concrete request from the operation's fixed template and
+// the validated parameters. Every guest value is placed through an encoding that
 // keeps it inside its slot: PathEscape in the path, query-encoding in the query,
 // and structural JSON substitution in the body.
 func (h TemplateHandler) render(operation TemplateOperation, params map[string]any) (internet.Request, error) {
-	target := h.BaseURL + expandString(operation.Path, params, url.PathEscape)
+	target := operation.BaseURL + expandString(operation.Path, params, url.PathEscape)
 	if len(operation.Query) > 0 {
 		values := url.Values{}
 		for key, tmpl := range operation.Query {
@@ -143,8 +148,8 @@ func (h TemplateHandler) render(operation TemplateOperation, params map[string]a
 		body = string(raw)
 	}
 
-	headers := make(map[string]string, len(h.Headers))
-	for name, value := range h.Headers {
+	headers := make(map[string]string, len(operation.Headers))
+	for name, value := range operation.Headers {
 		headers[name] = value
 	}
 	return internet.Request{Method: operation.Method, URL: target, Headers: headers, Body: body}, nil

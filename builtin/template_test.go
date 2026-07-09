@@ -31,18 +31,18 @@ func templateCall(operation string, fields map[string]any) sys.Syscall {
 
 func searchHandler(t *testing.T, client builtin.InternetClient) builtin.TemplateHandler {
 	return builtin.TemplateHandler{
-		Name:             "core.httpTemplate",
-		BaseURL:          "https://onyx.example.com",
-		Headers:          map[string]string{"Authorization": "Bearer tok-abc"},
-		CredentialLabels: []string{"credential:ONYX_TOKEN@abc123def456"},
-		Client:           client,
+		Name:   "core.httpTemplate",
+		Client: client,
 		Operations: map[string]builtin.TemplateOperation{
 			"search": {
-				Name:   "search",
-				Method: "POST",
-				Path:   "/api/chat/send-message-simple-api",
-				Body:   mustParse(t, `{"message":"{{query}}","persona_id":0}`),
-				Params: map[string]builtin.TemplateParam{"query": {Type: "string", Required: true}},
+				Name:             "search",
+				Method:           "POST",
+				BaseURL:          "https://onyx.example.com",
+				Path:             "/api/chat/send-message-simple-api",
+				Body:             mustParse(t, `{"message":"{{query}}","persona_id":0}`),
+				Params:           map[string]builtin.TemplateParam{"query": {Type: "string", Required: true}},
+				Headers:          map[string]string{"Authorization": "Bearer tok-abc"},
+				CredentialLabels: []string{"credential:ONYX_TOKEN@abc123def456"},
 			},
 		},
 	}
@@ -111,15 +111,15 @@ func TestTemplateBodySubstitutionIsInjectionSafe(t *testing.T) {
 func TestTemplatePathAndQueryAreEncoded(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := builtin.TemplateHandler{
-		Name:    "core.httpTemplate",
-		BaseURL: "https://onyx.example.com",
-		Client:  client,
+		Name:   "core.httpTemplate",
+		Client: client,
 		Operations: map[string]builtin.TemplateOperation{
 			"doc": {
-				Name:   "doc",
-				Method: "GET",
-				Path:   "/api/docs/{{id}}",
-				Query:  map[string]string{"q": "{{term}}"},
+				Name:    "doc",
+				Method:  "GET",
+				BaseURL: "https://onyx.example.com",
+				Path:    "/api/docs/{{id}}",
+				Query:   map[string]string{"q": "{{term}}"},
 				Params: map[string]builtin.TemplateParam{
 					"id":   {Type: "string", Required: true},
 					"term": {Type: "string", Required: true},
@@ -144,16 +144,16 @@ func TestTemplatePathAndQueryAreEncoded(t *testing.T) {
 func TestTemplateTypedParamSubstitution(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := builtin.TemplateHandler{
-		Name:    "core.httpTemplate",
-		BaseURL: "https://onyx.example.com",
-		Client:  client,
+		Name:   "core.httpTemplate",
+		Client: client,
 		Operations: map[string]builtin.TemplateOperation{
 			"search": {
-				Name:   "search",
-				Method: "POST",
-				Path:   "/s",
-				Body:   mustParse(t, `{"top_k":"{{k}}"}`),
-				Params: map[string]builtin.TemplateParam{"k": {Type: "integer", Required: true}},
+				Name:    "search",
+				Method:  "POST",
+				BaseURL: "https://onyx.example.com",
+				Path:    "/s",
+				Body:    mustParse(t, `{"top_k":"{{k}}"}`),
+				Params:  map[string]builtin.TemplateParam{"k": {Type: "integer", Required: true}},
 			},
 		},
 	}
@@ -191,12 +191,11 @@ func TestTemplateRejectsBadCalls(t *testing.T) {
 func TestTemplateSinkGuardAndApproval(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := builtin.TemplateHandler{
-		Name:    "core.httpTemplate",
-		BaseURL: "https://onyx.example.com",
-		Client:  client,
+		Name:   "core.httpTemplate",
+		Client: client,
 		Operations: map[string]builtin.TemplateOperation{
 			"write": {
-				Name: "write", Method: "POST", Path: "/w",
+				Name: "write", Method: "POST", BaseURL: "https://onyx.example.com", Path: "/w",
 				Taints: []string{"secret"}, RequireApproval: true,
 			},
 		},

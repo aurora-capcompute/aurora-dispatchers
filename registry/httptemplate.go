@@ -17,7 +17,8 @@ import (
 
 // HTTPTemplateSyscall is the manifest `syscall` for a templated-request grant and
 // the name of the single capability it publishes. Its operations are cases of one
-// discriminated ADT, selected by the `operation` field in the call args.
+// discriminated ADT, selected by the `operation` field in the call args — and
+// each operation is self-contained, so one grant can front several APIs.
 const HTTPTemplateSyscall = "core.httpTemplate"
 
 // templatePlaceholderName matches a {{param}} placeholder and captures the name.
@@ -28,32 +29,41 @@ var validParamTypes = map[string]struct{}{
 	"string": {}, "integer": {}, "number": {}, "boolean": {},
 }
 
-// templateConfig is a core.httpTemplate grant's driver configuration: the fixed
-// origin every operation targets, the credential(s) attached host-side, the
-// response/request bounds, and the operation set. The guest may invoke an
-// operation and fill its declared parameters — nothing else on the origin.
+// templateConfig is a core.httpTemplate grant's driver configuration: a set of
+// named operations plus the shared transport bounds. Each operation targets its
+// own origin with its own host-held credential, so a single grant can front
+// several APIs; the guest picks one by name and fills only its parameters.
 type templateConfig struct {
-	BaseURL             string                     `json:"base_url"`
-	TimeoutMS           int64                      `json:"timeout_ms,omitempty"`
-	MaxResponseBytes    int64                      `json:"max_response_bytes,omitempty"`
-	MaxRequestBytes     int64                      `json:"max_request_bytes,omitempty"`
-	AllowPrivateNetwork bool                       `json:"allow_private_network,omitempty"`
-	InjectHeaders       map[string]HeaderInjection `json:"inject_headers,omitempty"`
-	Operations          []templateOperation        `json:"operations"`
+	// BaseURL is an optional default origin (scheme://host) for operations that
+	// give only a path; an operation may override it with its own base_url.
+	BaseURL             string              `json:"base_url,omitempty"`
+	TimeoutMS           int64               `json:"timeout_ms,omitempty"`
+	MaxResponseBytes    int64               `json:"max_response_bytes,omitempty"`
+	MaxRequestBytes     int64               `json:"max_request_bytes,omitempty"`
+	AllowPrivateNetwork bool                `json:"allow_private_network,omitempty"`
+	Operations          []templateOperation `json:"operations"`
 }
 
-// templateOperation is one named request the guest may invoke: a fixed method,
-// path, optional query and JSON body carrying {{param}} placeholders, and the
-// parameter contract that decides what the guest may fill.
+// templateOperation is one named request the guest may invoke: a fixed origin,
+// method, path, optional query and JSON body carrying {{param}} placeholders, the
+// parameter contract that decides what the guest may fill, and the credential(s)
+// attached host-side for this operation only.
 type templateOperation struct {
-	Name            string                   `json:"name"`
-	Description     string                   `json:"description,omitempty"`
-	Method          string                   `json:"method"`
-	Path            string                   `json:"path"`
-	Query           map[string]string        `json:"query,omitempty"`
-	Body            json.RawMessage          `json:"body,omitempty"`
-	Params          map[string]templateParam `json:"params,omitempty"`
-	RequireApproval *bool                    `json:"require_approval,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Method      string `json:"method"`
+	// BaseURL is this operation's origin (scheme://host); it overrides the grant
+	// default. Required if the grant sets no default.
+	BaseURL string                   `json:"base_url,omitempty"`
+	Path    string                   `json:"path"`
+	Query   map[string]string        `json:"query,omitempty"`
+	Body    json.RawMessage          `json:"body,omitempty"`
+	Params  map[string]templateParam `json:"params,omitempty"`
+	// InjectHeaders attaches host-held headers (e.g. an Authorization bearer
+	// token) to this operation's request, bound to its origin. Per-operation so a
+	// credential is never sent to another operation's host.
+	InjectHeaders   map[string]HeaderInjection `json:"inject_headers,omitempty"`
+	RequireApproval *bool                      `json:"require_approval,omitempty"`
 	FlowPolicy
 }
 
@@ -83,11 +93,21 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	if err != nil {
 		return err
 	}
-	// Resolve the host-held credential(s) at activation. A missing referenced
-	// secret fails the build here, never silently at request time.
-	headers, credentialLabels, err := resolveInjectedHeaders(config.InjectHeaders, services)
-	if err != nil {
-		return fmt.Errorf("core.httpTemplate: %w", err)
+	operations := make(map[string]builtin.TemplateOperation, len(config.Operations))
+	branches := make([]json.RawMessage, 0, len(config.Operations))
+	for _, operation := range config.Operations {
+		// Resolve this operation's host-held credential at activation. A missing
+		// referenced secret fails the build here, never silently at request time.
+		headers, credentialLabels, err := resolveInjectedHeaders(operation.InjectHeaders, services)
+		if err != nil {
+			return fmt.Errorf("core.httpTemplate operation %q: %w", operation.Name, err)
+		}
+		compiled, branch, err := compileOperation(operation, headers, credentialLabels)
+		if err != nil {
+			return fmt.Errorf("operation %q: %w", operation.Name, err)
+		}
+		operations[operation.Name] = compiled
+		branches = append(branches, branch)
 	}
 
 	client := internet.NewConfiguredClient(
@@ -98,24 +118,10 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	)
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 
-	operations := make(map[string]builtin.TemplateOperation, len(config.Operations))
-	branches := make([]json.RawMessage, 0, len(config.Operations))
-	for _, operation := range config.Operations {
-		compiled, branch, err := compileOperation(operation)
-		if err != nil {
-			return fmt.Errorf("operation %q: %w", operation.Name, err)
-		}
-		operations[operation.Name] = compiled
-		branches = append(branches, branch)
-	}
-
 	out.Handlers = append(out.Handlers, builtin.TemplateHandler{
-		Name:             HTTPTemplateSyscall,
-		BaseURL:          config.BaseURL,
-		Headers:          headers,
-		CredentialLabels: credentialLabels,
-		Client:           client,
-		Operations:       operations,
+		Name:       HTTPTemplateSyscall,
+		Client:     client,
+		Operations: operations,
 	})
 	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name:        HTTPTemplateSyscall,
@@ -125,12 +131,12 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	return nil
 }
 
-// parseTemplateConfig validates and canonicalizes a template grant: a fixed
-// https (or loopback) origin, at least one operation with a unique name, a valid
-// method and absolute path, a JSON body template if present, valid parameter
-// types, and every {{param}} placeholder resolving to a declared parameter. The
-// single parse Normalize (which marshals it) and Configure (which builds from it)
-// share.
+// parseTemplateConfig validates and canonicalizes a template grant: at least one
+// operation with a unique name, each resolving to a fixed https (or loopback)
+// origin, a valid method and absolute path, a JSON body template if present,
+// valid parameter types, credential injection bound to the operation's origin,
+// and every {{param}} placeholder resolving to a declared parameter. The single
+// parse Normalize (which marshals it) and Configure (which builds from it) share.
 func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 	var config templateConfig
 	if len(raw) > 0 {
@@ -141,21 +147,13 @@ func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 		}
 	}
 
-	// The origin is a fixed scheme+host, https or loopback — a credential-bearing
-	// grant must not send in the clear, and the path is per-operation.
-	origin, err := internet.NewRule(internet.AnyMethod, strings.TrimSpace(config.BaseURL))
-	if err != nil {
-		return templateConfig{}, fmt.Errorf("base_url: %w", err)
-	}
-	if origin.Scheme == "http" && !isLoopbackHost(origin.Host) {
-		return templateConfig{}, fmt.Errorf("base_url must be https (host %q is plain http)", origin.Host)
-	}
-	config.BaseURL = origin.Scheme + "://" + origin.Host
-
-	if len(config.InjectHeaders) > 0 {
-		if err := validateInjection(config.BaseURL, config.InjectHeaders); err != nil {
-			return templateConfig{}, err
+	var defaultOrigin string
+	if strings.TrimSpace(config.BaseURL) != "" {
+		origin, err := templateOrigin(config.BaseURL)
+		if err != nil {
+			return templateConfig{}, fmt.Errorf("base_url: %w", err)
 		}
+		config.BaseURL, defaultOrigin = origin, origin
 	}
 	if len(config.Operations) == 0 {
 		return templateConfig{}, fmt.Errorf("operations must contain at least one operation")
@@ -164,6 +162,24 @@ func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 	seen := make(map[string]struct{}, len(config.Operations))
 	for i := range config.Operations {
 		operation := &config.Operations[i]
+		rawOrigin := strings.TrimSpace(operation.BaseURL)
+		if rawOrigin == "" {
+			rawOrigin = defaultOrigin
+		}
+		if rawOrigin == "" {
+			return templateConfig{}, fmt.Errorf("operation %d: base_url is required (set it on the operation or as a grant default)", i)
+		}
+		origin, err := templateOrigin(rawOrigin)
+		if err != nil {
+			return templateConfig{}, fmt.Errorf("operation %d base_url: %w", i, err)
+		}
+		operation.BaseURL = origin
+		// A credential must be bound to this operation's specific origin.
+		if len(operation.InjectHeaders) > 0 {
+			if err := validateInjection(origin, operation.InjectHeaders); err != nil {
+				return templateConfig{}, fmt.Errorf("operation %d: %w", i, err)
+			}
+		}
 		if err := normalizeOperation(operation); err != nil {
 			return templateConfig{}, fmt.Errorf("operation %d: %w", i, err)
 		}
@@ -180,7 +196,25 @@ func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 	return config, nil
 }
 
-// normalizeOperation validates and canonicalizes one operation in place.
+// templateOrigin validates a scheme://host origin (https, or http on loopback
+// where there is no wire to sniff) and returns it canonicalized.
+func templateOrigin(raw string) (string, error) {
+	rule, err := internet.NewRule(internet.AnyMethod, strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if rule.AnyHost {
+		return "", fmt.Errorf("origin must be a specific host, not %q", "*")
+	}
+	if rule.Scheme == "http" && !isLoopbackHost(rule.Host) {
+		return "", fmt.Errorf("origin must be https (host %q is plain http)", rule.Host)
+	}
+	return rule.Scheme + "://" + rule.Host, nil
+}
+
+// normalizeOperation validates and canonicalizes one operation's method, path,
+// body, parameters, flow policy, and placeholder references in place. The origin
+// and credential injection are validated by the caller.
 func normalizeOperation(operation *templateOperation) error {
 	operation.Name = strings.TrimSpace(operation.Name)
 	if operation.Name == "" {
@@ -207,8 +241,6 @@ func normalizeOperation(operation *templateOperation) error {
 		return err
 	}
 	operation.FlowPolicy = flow
-	// Every placeholder must resolve to a declared parameter, so a manifest typo
-	// surfaces now rather than sending a literal "{{...}}" to the origin.
 	for _, ref := range placeholderRefs(operation) {
 		if _, ok := operation.Params[ref]; !ok {
 			return fmt.Errorf("placeholder {{%s}} has no matching parameter", ref)
@@ -234,9 +266,9 @@ func placeholderRefs(operation *templateOperation) []string {
 	return refs
 }
 
-// compileOperation builds the handler-side operation and its published input
-// schema branch.
-func compileOperation(operation templateOperation) (builtin.TemplateOperation, json.RawMessage, error) {
+// compileOperation builds the handler-side operation (with its resolved headers
+// and audit labels) and its published input schema branch.
+func compileOperation(operation templateOperation, headers map[string]string, credentialLabels []string) (builtin.TemplateOperation, json.RawMessage, error) {
 	var body any
 	if len(operation.Body) > 0 {
 		if err := json.Unmarshal(operation.Body, &body); err != nil {
@@ -248,15 +280,18 @@ func compileOperation(operation templateOperation) (builtin.TemplateOperation, j
 		params[name] = builtin.TemplateParam{Type: param.Type, Required: param.Required}
 	}
 	compiled := builtin.TemplateOperation{
-		Name:            operation.Name,
-		Method:          operation.Method,
-		Path:            operation.Path,
-		Query:           operation.Query,
-		Body:            body,
-		Params:          params,
-		Labels:          operation.FlowPolicy.Labels,
-		Taints:          operation.FlowPolicy.Taints,
-		RequireApproval: operation.RequireApproval != nil && *operation.RequireApproval,
+		Name:             operation.Name,
+		Method:           operation.Method,
+		BaseURL:          operation.BaseURL,
+		Path:             operation.Path,
+		Query:            operation.Query,
+		Body:             body,
+		Params:           params,
+		Headers:          headers,
+		CredentialLabels: credentialLabels,
+		Labels:           operation.FlowPolicy.Labels,
+		Taints:           operation.FlowPolicy.Taints,
+		RequireApproval:  operation.RequireApproval != nil && *operation.RequireApproval,
 	}
 	branch, err := OperationBranch(operation.Name, operationParamSchema(operation))
 	if err != nil {
@@ -296,18 +331,20 @@ func operationParamSchema(operation templateOperation) json.RawMessage {
 	return raw
 }
 
-// templatePolicy is the egress allowlist: each operation's method against the
-// fixed origin, so the constructed request can reach only what the grant defines.
+// templatePolicy is the egress allowlist: each operation's method against its own
+// origin (unioned, deduplicated), so a constructed request can reach only what
+// the grant's operations define.
 func templatePolicy(config templateConfig) internet.Policy {
 	seen := make(map[string]struct{}, len(config.Operations))
 	var rules []internet.Rule
 	for _, operation := range config.Operations {
-		if _, ok := seen[operation.Method]; ok {
+		key := operation.Method + " " + operation.BaseURL
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[operation.Method] = struct{}{}
-		// base_url already validated in parseTemplateConfig, so NewRule cannot fail.
-		rule, _ := internet.NewRule(operation.Method, config.BaseURL)
+		seen[key] = struct{}{}
+		// Origin and method already validated in parseTemplateConfig.
+		rule, _ := internet.NewRule(operation.Method, operation.BaseURL)
 		rules = append(rules, rule)
 	}
 	return internet.NewPolicy(rules...)
@@ -315,9 +352,9 @@ func templatePolicy(config templateConfig) internet.Policy {
 
 func templateDescription(config templateConfig) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Call a named operation against %s; fill only the declared parameters. Operations:", config.BaseURL)
+	b.WriteString("Call a named operation; fill only its declared parameters. Operations:")
 	for _, operation := range config.Operations {
-		fmt.Fprintf(&b, "\n- %s (%s %s)", operation.Name, operation.Method, operation.Path)
+		fmt.Fprintf(&b, "\n- %s (%s %s%s)", operation.Name, operation.Method, operation.BaseURL, operation.Path)
 		if operation.Description != "" {
 			b.WriteString(": ")
 			b.WriteString(operation.Description)
