@@ -33,6 +33,10 @@ type internetConfig struct {
 	TimeoutMS        int64                `json:"timeout_ms,omitempty"`
 	MaxResponseBytes int64                `json:"max_response_bytes,omitempty"`
 	MaxRequestBytes  int64                `json:"max_request_bytes,omitempty"`
+	// AllowPrivateNetwork opts this grant out of the SSRF guard, permitting
+	// requests to loopback/private/link-local addresses. Off by default: a grant
+	// reaches internal services only when the manifest says so explicitly.
+	AllowPrivateNetwork bool `json:"allow_private_network,omitempty"`
 }
 
 // internetRequestSchema is the single flat schema every core.internet call
@@ -62,6 +66,8 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, _ 
 		config.MaxResponseBytes,
 		config.MaxRequestBytes,
 	)
+	// SSRF guard on unless the grant explicitly opted into private networks.
+	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 	out.Handlers = append(out.Handlers, builtin.InternetHandler{
 		Name:    internet.Capability,
 		Methods: internetMethodPolicies(config.Capabilities),

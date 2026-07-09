@@ -18,7 +18,7 @@ func TestAllowedGETSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := internet.NewClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
 	response, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err != nil {
 		t.Fatalf("do: %v", err)
@@ -49,7 +49,7 @@ func TestAllowedPOSTSendsBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := internet.NewClient(mustPolicy(t, "POST:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "POST:"+server.URL))
 	response, err := client.Do(context.Background(), internet.Request{
 		Method:  "POST",
 		URL:     server.URL,
@@ -73,7 +73,7 @@ func TestDisallowedDomainFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := internet.NewClient(mustPolicy(t, "GET:https://example.com"))
+	client := loopbackClient(mustPolicy(t, "GET:https://example.com"))
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err == nil || !strings.Contains(err.Error(), "not allowlisted") {
 		t.Fatalf("error = %v, want not-allowlisted", err)
@@ -88,7 +88,7 @@ func TestDisallowedMethodFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := internet.NewClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
 	_, err := client.Do(context.Background(), internet.Request{Method: "DELETE", URL: server.URL})
 	if err == nil || !strings.Contains(err.Error(), "not allowlisted") {
 		t.Fatalf("error = %v, want not-allowlisted", err)
@@ -121,7 +121,7 @@ func TestHostWildcardPinsMethod(t *testing.T) {
 }
 
 func TestNonHTTPSchemeFails(t *testing.T) {
-	client := internet.NewClient(mustPolicy(t, "GET:https://example.com"))
+	client := loopbackClient(mustPolicy(t, "GET:https://example.com"))
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: "file:///tmp/data.txt"})
 	if err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("error = %v, want scheme-not-allowed", err)
@@ -139,7 +139,7 @@ func TestRedirectToDisallowedDomainFails(t *testing.T) {
 	}))
 	defer source.Close()
 
-	client := internet.NewClient(mustPolicy(t, "GET:"+source.URL))
+	client := loopbackClient(mustPolicy(t, "GET:"+source.URL))
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: source.URL})
 	if err == nil || !strings.Contains(err.Error(), "not allowlisted") {
 		t.Fatalf("error = %v, want not-allowlisted", err)
@@ -152,7 +152,7 @@ func TestResponseBodyIsByteLimited(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := internet.NewClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
 	client.MaxBytes = 3
 	response, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err != nil {
@@ -169,7 +169,7 @@ func TestRequestBodyIsByteLimited(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := internet.NewClient(mustPolicy(t, "POST:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "POST:"+server.URL))
 	client.MaxRequestBytes = 4
 	_, err := client.Do(context.Background(), internet.Request{Method: "POST", URL: server.URL, Body: "toolong"})
 	if err == nil || !strings.Contains(err.Error(), "request body exceeds") {
@@ -184,4 +184,58 @@ func mustPolicy(t *testing.T, raw string) internet.Policy {
 		t.Fatalf("parse policy: %v", err)
 	}
 	return policy
+}
+
+// loopbackClient allows private-network dials because these tests serve from
+// httptest (127.0.0.1). Production blocks them unless a grant opts in — see
+// TestBlocksPrivateNetworkByDefault.
+func loopbackClient(policy internet.Policy) *internet.Client {
+	c := internet.NewClient(policy)
+	c.AllowPrivateNetwork = true
+	return c
+}
+
+// The SSRF guard: allowlisting a name does not authorize reaching a non-public
+// address it resolves to. By default a connection whose resolved IP is
+// loopback/private/link-local (the 169.254.169.254 metadata endpoint, a
+// localhost admin port, an RFC 1918 host) is refused at dial time, so a
+// public-looking grant cannot be turned into internal access.
+func TestBlocksPrivateNetworkByDefault(t *testing.T) {
+	var reached bool
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}))
+	defer server.Close()
+
+	// The server is on 127.0.0.1; the policy allowlists exactly it, yet the
+	// default guard must still refuse the dial.
+	client := internet.NewClient(mustPolicy(t, "GET:"+server.URL))
+	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
+	if err == nil {
+		t.Fatal("a loopback request succeeded with the SSRF guard on")
+	}
+	if reached {
+		t.Fatal("SECURITY: the request reached a private-network server despite the guard")
+	}
+	if !strings.Contains(err.Error(), "non-public") && !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("error = %v, want a blocked/non-public dial error", err)
+	}
+}
+
+func TestAllowPrivateNetworkOptIn(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("internal"))
+	}))
+	defer server.Close()
+
+	// The explicit opt-in is what a grant meant to reach an internal service sets.
+	client := internet.NewClient(mustPolicy(t, "GET:"+server.URL))
+	client.AllowPrivateNetwork = true
+	response, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
+	if err != nil {
+		t.Fatalf("opt-in private request failed: %v", err)
+	}
+	if response.Body != "internal" {
+		t.Fatalf("body = %q, want internal", response.Body)
+	}
 }

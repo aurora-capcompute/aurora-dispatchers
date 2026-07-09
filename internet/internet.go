@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -178,6 +180,15 @@ type Client struct {
 	Timeout         time.Duration
 	MaxBytes        int64
 	MaxRequestBytes int64
+	// AllowPrivateNetwork lifts the SSRF guard: by default a request is refused
+	// at dial time if the resolved address is loopback/private/link-local/etc.,
+	// so an allowlisted *public* domain that (through DNS or rebinding) points at
+	// an internal address — the cloud metadata endpoint 169.254.169.254, a
+	// localhost admin port, an RFC 1918 host — cannot be reached. Reaching a
+	// private network must be an explicit, manifest-declared choice, not a
+	// surprise of name resolution. Set true only when a grant is meant to talk to
+	// an internal service.
+	AllowPrivateNetwork bool
 }
 
 func NewClient(policy Policy) *Client {
@@ -200,14 +211,64 @@ func NewConfiguredClient(policy Policy, timeout time.Duration, maxResponseBytes,
 		MaxBytes:        maxResponseBytes,
 		MaxRequestBytes: maxRequestBytes,
 	}
-	client.HTTPClient = &http.Client{
+	// A dial-time guard, in addition to the policy: net.Dialer.Control runs after
+	// DNS resolution with the actual IP about to be connected, so it catches a
+	// name that resolves to a private address and defeats DNS rebinding (the
+	// resolved IP, not the requested name, is what is checked).
+	dialer := &net.Dialer{
 		Timeout: client.Timeout,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			if client.AllowPrivateNetwork {
+				return nil
+			}
+			return guardDialAddress(address)
+		},
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = dialer.DialContext
+	client.HTTPClient = &http.Client{
+		Timeout:   client.Timeout,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
 			// Re-check every redirect hop against the policy.
 			return client.Policy.Check(req.Method, req.URL)
 		},
 	}
 	return client
+}
+
+// guardDialAddress refuses a connection whose resolved address is not a public
+// unicast IP — loopback, RFC 1918 / ULA private, link-local (incl. the
+// 169.254.169.254 metadata endpoint), unspecified, or multicast. `address` is
+// the post-resolution host:port net.Dialer.Control receives, so this holds even
+// when a public-looking name resolves to an internal address.
+func guardDialAddress(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("blocked: unparseable dial address %q", address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("blocked: dial address %q did not resolve to an IP", address)
+	}
+	if !isPublicIP(ip) {
+		return fmt.Errorf("blocked connection to non-public address %s (set allow_private_network to permit)", ip)
+	}
+	return nil
+}
+
+// isPublicIP reports whether ip is a globally routable unicast address — the
+// only class the internet driver dials without an explicit private-network opt-in.
+func isPublicIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+		return false
+	}
+	return true
 }
 
 // Do makes one request. The method is unconstrained by the client — the policy
