@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
@@ -547,5 +548,66 @@ func TestMapStoreActivityMemory(t *testing.T) {
 	}
 	if _, done, _ := store.Activity(ctx, "acme", ""); done {
 		t.Fatal("empty activity key was recorded")
+	}
+}
+
+// TestMemorySearch greps a stored multi-line value: the RE2 pattern matches by
+// line, ignore_case and context widen the result, a missing key is found:false,
+// a malformed pattern is a clean error, and an ungranted op is denied. The full
+// value stays host-side; only matching lines come back.
+func TestMemorySearch(t *testing.T) {
+	store := memory.NewMapStore()
+	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
+		Operations: map[string]memory.Operation{"put": {}, "search": {}}}
+
+	// A document with real newlines, stored as a JSON string value.
+	dispatch(t, h, "put", `{"key":"doc","value":"first line\nAlan Turing was a mathematician\nthird line\nturing test\nlast line"}`, sys.Authorization{})
+
+	decode := func(res sys.SyscallResult) memory.SearchResponse {
+		t.Helper()
+		if res.Status() != sys.StatusResult {
+			t.Fatalf("search failed: %#v", res)
+		}
+		var sr memory.SearchResponse
+		if err := json.Unmarshal(res.Result(), &sr); err != nil {
+			t.Fatalf("decode search: %v", err)
+		}
+		return sr
+	}
+
+	// Case-sensitive: only the capitalized "Turing" line matches, at line 2.
+	sr := decode(dispatch(t, h, "search", `{"key":"doc","pattern":"Turing"}`, sys.Authorization{}))
+	if !sr.Found || len(sr.Matches) != 1 || sr.Matches[0].Line != 2 || !strings.Contains(sr.Matches[0].Text, "Alan Turing") {
+		t.Fatalf("case-sensitive search = %+v", sr)
+	}
+
+	// ignore_case catches both "Turing" (line 2) and "turing" (line 4).
+	sr = decode(dispatch(t, h, "search", `{"key":"doc","pattern":"turing","ignore_case":true}`, sys.Authorization{}))
+	if len(sr.Matches) != 2 || sr.Matches[0].Line != 2 || sr.Matches[1].Line != 4 {
+		t.Fatalf("ignore_case search = %+v", sr)
+	}
+
+	// context:1 returns the line before and after the hit.
+	sr = decode(dispatch(t, h, "search", `{"key":"doc","pattern":"mathematician","context":1}`, sys.Authorization{}))
+	if len(sr.Matches) != 1 || !strings.Contains(sr.Matches[0].Text, "first line") || !strings.Contains(sr.Matches[0].Text, "third line") {
+		t.Fatalf("context search = %+v", sr)
+	}
+
+	// A missing key is found:false, not an error.
+	sr = decode(dispatch(t, h, "search", `{"key":"absent","pattern":"x"}`, sys.Authorization{}))
+	if sr.Found || len(sr.Matches) != 0 {
+		t.Fatalf("missing-key search = %+v", sr)
+	}
+
+	// A malformed regex is a clean invalid-args failure.
+	bad := dispatch(t, h, "search", `{"key":"doc","pattern":"[unclosed"}`, sys.Authorization{})
+	if bad.Status() != sys.StatusFailed || bad.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("bad pattern = %#v", bad)
+	}
+
+	// An ungranted operation is denied (list is not in the grant set).
+	denied := dispatch(t, h, "list", `{}`, sys.Authorization{})
+	if denied.Status() != sys.StatusFailed || denied.Errno() != sys.ErrnoDenied {
+		t.Fatalf("ungranted list = %#v", denied)
 	}
 }

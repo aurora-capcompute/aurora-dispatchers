@@ -23,9 +23,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -118,6 +120,47 @@ type ListResponse struct {
 	Keys []string `json:"keys"`
 }
 
+// SearchRequest greps one stored value with an RE2 regex. It is the bounded read
+// that makes a large value usable without pulling it whole into context: the
+// full value is searched host-side and only the matching lines come back.
+type SearchRequest struct {
+	Key     string `json:"key"`
+	Pattern string `json:"pattern"`
+	// IgnoreCase makes the match case-insensitive (an RE2 (?i) prefix).
+	IgnoreCase bool `json:"ignore_case,omitempty"`
+	// Context is the number of surrounding lines to return with each match
+	// (grep -C), clamped to a small maximum.
+	Context int `json:"context,omitempty"`
+	// MaxMatches caps how many matches come back (default 20), clamped.
+	MaxMatches int `json:"max_matches,omitempty"`
+}
+
+// Match is one grep hit: the 1-based line number and the matching line, with any
+// requested surrounding context, truncated if very long.
+type Match struct {
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+type SearchResponse struct {
+	Key     string  `json:"key"`
+	Found   bool    `json:"found"`
+	Matches []Match `json:"matches"`
+	// Truncated reports that a cap (match count or total size) stopped the scan
+	// before the whole value was searched.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// Grep result bounds — a search over any-size value returns a small, capped
+// result so it never re-floods the context it was meant to keep small.
+const (
+	searchDefaultMaxMatches = 20
+	searchMaxMatches        = 100
+	searchMaxContextLines   = 5
+	searchMaxMatchBytes     = 512
+	searchMaxTotalBytes     = 16 * 1024
+)
+
 // Handler serves one memory grant: a tenant plus a subtree of that tenant's
 // space. It satisfies builtin.Handler and publishes the single core.memory
 // capability; its get/put/list operations are ADT cases selected by the
@@ -181,6 +224,8 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 		result, err = h.put(ctx, call, auth, op.RequireApproval)
 	case "list":
 		result, err = h.list(ctx, call)
+	case "search":
+		result, err = h.search(ctx, call)
 	default:
 		return sys.FailCode(sys.ErrnoNotFound, "unknown memory operation: "+operation), nil
 	}
@@ -317,6 +362,113 @@ func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult,
 // qualify validates a guest key and roots it under the grant's subtree.
 // Chroot semantics: keys are relative slash-paths; traversal cannot escape
 // because escapes are rejected, not resolved.
+func (h Handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+	var request SearchRequest
+	if err := json.Unmarshal(call.Args, &request); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
+	}
+	qualified, err := h.qualify(request.Key)
+	if err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
+	}
+	pattern := request.Pattern
+	if request.IgnoreCase {
+		pattern = "(?i)" + pattern
+	}
+	// RE2 is linear-time with no catastrophic backtracking, so a pattern from an
+	// untrusted model is safe to compile and run over a large value.
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("invalid pattern: %v", err)), nil
+	}
+	value, labels, _, found, err := h.Store.Get(ctx, h.Tenant, qualified)
+	if err != nil {
+		return storeFailure(ctx, err)
+	}
+	response := SearchResponse{Key: request.Key, Found: found, Matches: []Match{}}
+	if found {
+		response.Matches, response.Truncated = grepValue(value, re, request.Context, request.MaxMatches)
+	}
+	result, err := marshalResult(response)
+	if err != nil {
+		return result, err
+	}
+	// Carry the stored value's provenance, exactly like get: a match extracted
+	// from a tainted value is itself tainted.
+	return result.WithLabels(labels...), nil
+}
+
+// grepValue scans the value line by line, returning up to a bounded number of
+// matches — each with its 1-based line number and any requested surrounding
+// context — and whether a cap cut the scan short. A JSON string value is
+// searched as its decoded text (so real newlines are line breaks); any other
+// value is searched as its stored JSON bytes.
+func grepValue(value json.RawMessage, re *regexp.Regexp, contextLines, maxMatches int) ([]Match, bool) {
+	contextLines = clampInt(contextLines, 0, searchMaxContextLines)
+	if maxMatches <= 0 {
+		maxMatches = searchDefaultMaxMatches
+	}
+	maxMatches = clampInt(maxMatches, 1, searchMaxMatches)
+
+	lines := strings.Split(valueText(value), "\n")
+	matches := make([]Match, 0, maxMatches)
+	total := 0
+	for i, line := range lines {
+		if !re.MatchString(line) {
+			continue
+		}
+		if len(matches) >= maxMatches {
+			return matches, true
+		}
+		start := i - contextLines
+		if start < 0 {
+			start = 0
+		}
+		end := i + contextLines + 1
+		if end > len(lines) {
+			end = len(lines)
+		}
+		block := truncateBytes(strings.Join(lines[start:end], "\n"), searchMaxMatchBytes)
+		matches = append(matches, Match{Line: i + 1, Text: block})
+		if total += len(block); total >= searchMaxTotalBytes {
+			return matches, true
+		}
+	}
+	return matches, false
+}
+
+// valueText decodes a stored value to searchable text: a JSON string yields its
+// unescaped content (with real newlines); anything else yields its raw JSON.
+func valueText(value json.RawMessage) string {
+	var text string
+	if json.Unmarshal(value, &text) == nil {
+		return text
+	}
+	return string(value)
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// truncateBytes caps a string at max bytes on a rune boundary, marking the cut.
+func truncateBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
 func (h Handler) qualify(key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("key is required")

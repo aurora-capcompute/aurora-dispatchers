@@ -42,6 +42,10 @@ var memoryOperations = map[string]struct {
 		schema:      json.RawMessage(`{"type":"object","properties":{"prefix":{"type":"string"}},"additionalProperties":false}`),
 		description: "list: list keys under a prefix",
 	},
+	"search": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"pattern":{"type":"string","minLength":1},"ignore_case":{"type":"boolean"},"context":{"type":"integer","minimum":0,"maximum":5},"max_matches":{"type":"integer","minimum":1,"maximum":100}},"required":["key","pattern"],"additionalProperties":false}`),
+		description: "search: grep a stored value with an RE2 regex — returns matching lines with line numbers (and optional surrounding context), bounded, so a large value is queried without reading it whole",
+	},
 }
 
 // MemoryRegistration provides tenant-scoped shared memory — the filesystem
@@ -130,13 +134,13 @@ func parseMemoryConfig(raw json.RawMessage) (memoryConfig, []OperationGrant, err
 		return memoryConfig{}, nil, err
 	}
 	if len(grants) == 0 {
-		return memoryConfig{}, nil, fmt.Errorf("capabilities must grant at least one operation (get, put, list)")
+		return memoryConfig{}, nil, fmt.Errorf("capabilities must grant at least one operation (get, put, list, search)")
 	}
 	seen := make(map[string]struct{}, len(grants))
 	for i := range grants {
 		operation := strings.TrimSpace(grants[i].Operation)
 		if _, ok := memoryOperations[operation]; !ok {
-			return memoryConfig{}, nil, fmt.Errorf("unknown memory operation %q (want get, put, or list)", grants[i].Operation)
+			return memoryConfig{}, nil, fmt.Errorf("unknown memory operation %q (want get, put, list, or search)", grants[i].Operation)
 		}
 		if _, dup := seen[operation]; dup {
 			return memoryConfig{}, nil, fmt.Errorf("duplicate memory operation %q", operation)
