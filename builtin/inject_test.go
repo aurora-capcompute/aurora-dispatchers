@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
@@ -81,6 +82,29 @@ func TestInjectHostWinsOverGuestHeader(t *testing.T) {
 	}
 	if got := client.seen.Headers["Authorization"]; got != "Bearer tok-abc" {
 		t.Fatalf("Authorization = %q, want the host value to win over the guest's forgery", got)
+	}
+}
+
+// Host-wins holds even when the guest supplies the header under a different
+// casing: the credential must not be left overridable by a lowercase alias.
+func TestInjectHostWinsRegardlessOfGuestHeaderCasing(t *testing.T) {
+	client := &recordingClient{response: internet.Response{Status: 200}}
+	handler := injectingHandler(client)
+
+	call := internetCallWithHeaders("GET", "https://onyx.example.com/v1/data",
+		map[string]string{"authorization": "Bearer guest-forged"})
+	if _, err := handler.DispatchCall(context.Background(), call, sys.Authorization{}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	// Exactly one Authorization (any casing) reaches the wire, and it is the host's.
+	var seen []string
+	for name, value := range client.seen.Headers {
+		if strings.EqualFold(name, "Authorization") {
+			seen = append(seen, value)
+		}
+	}
+	if len(seen) != 1 || seen[0] != "Bearer tok-abc" {
+		t.Fatalf("Authorization headers reaching the wire = %v, want exactly [Bearer tok-abc]", seen)
 	}
 }
 

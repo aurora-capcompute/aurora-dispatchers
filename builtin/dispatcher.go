@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -164,6 +165,16 @@ func (h InternetHandler) inject(request *internet.Request, method string) []stri
 			request.Headers = make(map[string]string, len(rule.Headers))
 		}
 		for name, value := range rule.Headers {
+			// Host wins over any guest header of the same name — whatever casing
+			// the guest used. rule.Headers keys are canonical; drop every guest key
+			// that canonicalizes to the same name before setting the host's, so a
+			// guest "authorization" cannot survive alongside the host "Authorization"
+			// (two map keys net/http would then apply in nondeterministic order).
+			for existing := range request.Headers {
+				if http.CanonicalHeaderKey(existing) == name {
+					delete(request.Headers, existing)
+				}
+			}
 			request.Headers[name] = value
 		}
 		labels = append(labels, rule.Labels...)
