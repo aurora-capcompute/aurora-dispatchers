@@ -68,6 +68,10 @@ func TestTemplateRendersRequestAndInjectsCredential(t *testing.T) {
 	if got := client.seen.Headers["Authorization"]; got != "Bearer tok-abc" {
 		t.Fatalf("Authorization = %q, want the injected credential", got)
 	}
+	// A JSON body must be declared, or a JSON API rejects it as unparsed (422).
+	if got := client.seen.Headers["Content-Type"]; got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
 	var body map[string]any
 	if err := json.Unmarshal([]byte(client.seen.Body), &body); err != nil {
 		t.Fatalf("body is not valid JSON: %q", client.seen.Body)

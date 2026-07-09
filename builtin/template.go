@@ -148,9 +148,17 @@ func (h TemplateHandler) render(operation TemplateOperation, params map[string]a
 		body = string(raw)
 	}
 
-	headers := make(map[string]string, len(operation.Headers))
+	headers := make(map[string]string, len(operation.Headers)+1)
 	for name, value := range operation.Headers {
 		headers[name] = value
+	}
+	// The template body is JSON, so declare it — without Content-Type a JSON API
+	// (FastAPI and the like) ignores the body and rejects the request as if the
+	// fields were missing (a 422). A host-set header of the same name wins.
+	if body != "" {
+		if _, ok := headers["Content-Type"]; !ok {
+			headers["Content-Type"] = "application/json"
+		}
 	}
 	return internet.Request{Method: operation.Method, URL: target, Headers: headers, Body: body}, nil
 }
