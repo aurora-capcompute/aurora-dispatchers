@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -331,17 +332,44 @@ func sanitizeDescription(raw string) (string, error) {
 }
 
 // internetDescription composes the published capability's description — the
-// model's tool doc — from each permitted origin: its methods, its domain, and
-// the author's usage note when supplied.
+// model's tool doc — from each permitted origin: its methods, its domain, the
+// author's usage note when supplied, and, for a credential-injecting origin, an
+// automatic note that the header is attached host-side.
 func internetDescription(permissions []InternetPermission) string {
 	var b strings.Builder
 	b.WriteString("Make an HTTP request (any method the grant allows) and read the bounded response. Allowed origins:")
 	for _, permission := range permissions {
 		fmt.Fprintf(&b, "\n- %s → %s", strings.Join(permission.Methods, "/"), permission.Domain)
+		parts := make([]string, 0, 2)
 		if permission.Description != "" {
+			parts = append(parts, permission.Description)
+		}
+		if note := injectedHeaderNote(permission.InjectHeaders); note != "" {
+			parts = append(parts, note)
+		}
+		if len(parts) > 0 {
 			b.WriteString(": ")
-			b.WriteString(permission.Description)
+			b.WriteString(strings.Join(parts, " "))
 		}
 	}
 	return b.String()
+}
+
+// injectedHeaderNote tells the model which headers this origin has attached for
+// it host-side, so it does not try to set them (a guest value is overridden at
+// dispatch). It names the headers only — never the secret reference or value.
+func injectedHeaderNote(headers map[string]HeaderInjection) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, http.CanonicalHeaderKey(strings.TrimSpace(name)))
+	}
+	sort.Strings(names)
+	pronoun := "it"
+	if len(names) > 1 {
+		pronoun = "them"
+	}
+	return fmt.Sprintf("(%s attached automatically — do not set %s.)", strings.Join(names, ", "), pronoun)
 }

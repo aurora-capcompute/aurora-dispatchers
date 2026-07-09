@@ -62,6 +62,48 @@ func TestInternetDescriptionRejectsUnsafeText(t *testing.T) {
 	}
 }
 
+// A credential-injecting origin is annotated automatically so the model knows
+// the header is supplied for it and must not be set by the guest — naming the
+// header, never the secret.
+func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
+	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"https://onyx.example.com",` +
+		`"description":"Onyx KB.","inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
+	var config builtin.Config
+	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, &config); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	got := config.Capabilities[0].Description
+	for _, want := range []string{"Onyx KB.", "Authorization", "attached automatically", "do not set it"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("description missing %q:\n%s", want, got)
+		}
+	}
+	// The note must never reveal the secret reference or its value.
+	for _, leak := range []string{"ONYX_TOKEN", "tok-abc"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("SECURITY: description leaked %q:\n%s", leak, got)
+		}
+	}
+}
+
+// Multiple injected headers are listed together and pluralized.
+func TestInternetDescriptionAnnotatesMultipleInjectedHeaders(t *testing.T) {
+	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://onyx.example.com",` +
+		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN"},"X-Api-Key":{"secret":"ONYX_KEY"}}}]}`)
+	var config builtin.Config
+	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "t", "ONYX_KEY": "k"}}
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, &config); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	got := config.Capabilities[0].Description
+	for _, want := range []string{"Authorization, X-Api-Key", "do not set them"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("description missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func mustJSON(s string) string {
 	out, err := json.Marshal(s)
 	if err != nil {
