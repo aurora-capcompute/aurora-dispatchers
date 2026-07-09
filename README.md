@@ -15,6 +15,15 @@ Packages:
 
 - `builtin`: the leaf dispatcher — routes each syscall to the handler that
   owns its name (internet requests, injected handlers).
+- `filesystem`: the `core.filesystem` **read-only** host-file capability — a
+  single capability whose `read` operation is selected by the `operation` field
+  in the call args. A grant is chrooted to one or more `roots` (every path,
+  absolute or relative, must resolve inside one; symlink escapes are rejected),
+  reads a file whole or by an inclusive 1-based `start_line`/`end_line` range,
+  and stamps the grant's provenance `labels` on the result so file contents
+  enter the flow monitor tainted at their source. Read-only for now — it grants
+  no writes; any future mutating operation is a new case of this same
+  capability, never a separate name.
 - `internet`: bounded allowlisted HTTP client for requests of **any** method,
   publishing the single `core.internet` capability. The grant's `capabilities`
   list — `{methods, domain}` entries, where `methods` may be `["*"]` and
