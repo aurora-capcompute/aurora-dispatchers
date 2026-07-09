@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
 const (
@@ -20,8 +22,11 @@ const (
 var headerPattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
 
 type Settings struct {
-	BaseURL           string            `json:"base_url,omitempty"`
-	APIKey            string            `json:"api_key,omitempty"`
+	BaseURL string `json:"base_url,omitempty"`
+	// APIKey is the provider credential: a literal (soft-deprecated — it sprawls
+	// into the manifest and journal) or a {"secret":"NAME"} reference resolved
+	// host-side so the value never enters the manifest, journal, or guest.
+	APIKey            registry.Secret   `json:"api_key,omitempty"`
 	APIKeyOptional    bool              `json:"api_key_optional,omitempty"`
 	DefaultModel      string            `json:"default_model,omitempty"`
 	AllowedModels     []string          `json:"allowed_models,omitempty"`
@@ -37,6 +42,9 @@ type Settings struct {
 type normalizedSettings struct {
 	Settings
 	timeout time.Duration
+	// apiKey is the resolved credential value, set by Configure after resolving
+	// Settings.APIKey through the secret resolver. It is never persisted.
+	apiKey string
 }
 
 func normalizeSettings(settings Settings) (normalizedSettings, error) {

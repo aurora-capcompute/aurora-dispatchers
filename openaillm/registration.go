@@ -74,7 +74,7 @@ func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, e
 // granted operations — and the handler that serves them. The grant is kept off
 // the discoverable menu via the manifest `hidden` flag (the agent calls the LLM
 // itself; the model never sees it).
-func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry.Services, out *builtin.Config) error {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services, out *builtin.Config) error {
 	config, grants, err := parseGrantConfig(raw)
 	if err != nil {
 		return err
@@ -83,6 +83,14 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry
 	if err != nil {
 		return err
 	}
+	// Resolve the credential host-side (activation): a missing referenced secret
+	// fails the build here, never silently at call time. The value is never
+	// persisted — Normalize keeps only the reference.
+	apiKey, err := config.Settings.APIKey.Resolve(services.Secrets)
+	if err != nil {
+		return fmt.Errorf("core.openaiApi api_key: %w", err)
+	}
+	normalized.apiKey = apiKey
 	handler, err := findOrCreateHandler(out, normalized)
 	if err != nil {
 		return err
@@ -187,7 +195,7 @@ func connectionFor(settings normalizedSettings) connectionSettings {
 	sort.Strings(headers)
 	return connectionSettings{
 		baseURL:        settings.BaseURL,
-		apiKey:         settings.APIKey,
+		apiKey:         settings.apiKey,
 		apiKeyOptional: settings.APIKeyOptional,
 		organization:   settings.Organization,
 		project:        settings.Project,

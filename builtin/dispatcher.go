@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
@@ -58,6 +59,35 @@ type InternetHandler struct {
 	// applying to every method; the two are merged for the request's method.
 	Methods map[string]InternetMethodPolicy
 	Client  InternetClient
+	// Injections attach host-held credential headers to matching (method, host)
+	// requests. The header values are resolved host-side and are never supplied
+	// by, visible to, or overridable by the guest.
+	Injections []CredentialInjection
+}
+
+// CredentialInjection attaches host-held headers to outbound requests whose
+// method and host it matches. It is bound to a specific host (never a wildcard)
+// and — by construction at build time — only to https or loopback origins, so a
+// credential cannot be sent in the clear or to an unintended host. The guest
+// never sees Headers and cannot override them (host wins). Labels are stamped on
+// the result so the journal records which credential was used, never the value.
+type CredentialInjection struct {
+	Methods []string          // uppercase HTTP methods, or ["*"] for any
+	Host    string            // lowercased request host[:port] this applies to
+	Headers map[string]string // header name -> full host-held value
+	Labels  []string          // provenance labels stamped when applied
+}
+
+func (c CredentialInjection) applies(method, host string) bool {
+	if !strings.EqualFold(c.Host, host) {
+		return false
+	}
+	for _, m := range c.Methods {
+		if m == internet.AnyMethod || strings.EqualFold(m, method) {
+			return true
+		}
+	}
+	return false
 }
 
 // InternetMethodPolicy is one HTTP method's grant policy: whether the request
@@ -90,19 +120,63 @@ func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 	if policy.RequireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
 	}
+
+	// Attach any host-held credential for this (method, host). Host wins over a
+	// guest header of the same name, so the guest can neither read nor override
+	// it; the value is never in the call args, so it never reaches the journaled
+	// intent. The returned labels name the credential (not its value) for audit.
+	credentialLabels := h.inject(&request, method)
+
 	response, err := h.Client.Do(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
+		// A failed attempt still records which credential it carried.
+		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(credentialLabels...), nil
 	}
 	result, err := marshalResult(response)
 	if err != nil {
 		return result, err
 	}
-	// The response derives from the network: stamp the method's source labels.
-	return result.WithLabels(policy.Labels...), nil
+	// The response derives from the network: stamp the method's source labels and
+	// the credential provenance.
+	return result.WithLabels(append(append([]string(nil), policy.Labels...), credentialLabels...)...), nil
+}
+
+// inject attaches matching credential headers to the request (host wins over a
+// guest-supplied header) and returns the provenance labels to stamp on the
+// result. The injected values are host-held and never echoed to the guest.
+func (h InternetHandler) inject(request *internet.Request, method string) []string {
+	if len(h.Injections) == 0 {
+		return nil
+	}
+	host := requestHost(request.URL)
+	if host == "" {
+		return nil
+	}
+	var labels []string
+	for _, rule := range h.Injections {
+		if !rule.applies(method, host) {
+			continue
+		}
+		if request.Headers == nil {
+			request.Headers = make(map[string]string, len(rule.Headers))
+		}
+		for name, value := range rule.Headers {
+			request.Headers[name] = value
+		}
+		labels = append(labels, rule.Labels...)
+	}
+	return labels
+}
+
+func requestHost(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return strings.ToLower(parsed.Host)
 }
 
 // methodPolicy merges the wildcard ("*") policy with the request method's own —

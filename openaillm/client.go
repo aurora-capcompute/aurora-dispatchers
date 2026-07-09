@@ -24,7 +24,7 @@ type sdkClient struct {
 }
 
 func NewClient(settings normalizedSettings) (Client, error) {
-	if settings.APIKey == "" && !settings.APIKeyOptional {
+	if settings.apiKey == "" && !settings.APIKeyOptional {
 		return nil, fmt.Errorf("api_key is required")
 	}
 
@@ -36,7 +36,7 @@ func NewClient(settings normalizedSettings) (Client, error) {
 	}
 	options := []option.RequestOption{
 		option.WithBaseURL(settings.BaseURL),
-		option.WithAPIKey(settings.APIKey),
+		option.WithAPIKey(settings.apiKey),
 		option.WithHTTPClient(httpClient),
 		option.WithOrganization(settings.Organization),
 		option.WithProject(settings.Project),

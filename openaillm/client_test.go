@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
 func TestSDKClientUsesCompatibleEndpointsAndHeaders(t *testing.T) {
@@ -42,12 +44,13 @@ func TestSDKClientUsesCompatibleEndpointsAndHeaders(t *testing.T) {
 	settings, err := normalizeSettings(Settings{
 		BaseURL:           server.URL + "/v1",
 		AllowInsecureHTTP: true,
-		APIKey:            "test-key",
+		APIKey:            registry.LiteralSecret("test-key"),
 		Headers:           map[string]string{"X-Gateway-Tenant": "tenant-a"},
 	})
 	if err != nil {
 		t.Fatalf("settings: %v", err)
 	}
+	settings.apiKey = "test-key" // resolved host-side by Configure in production
 	client, err := NewClient(settings)
 	if err != nil {
 		t.Fatalf("new client: %v", err)

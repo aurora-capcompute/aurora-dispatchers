@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
+
+var headerNamePattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
 
 // InternetPermission is one entry of a core.internet grant's `capabilities`
 // list: the methods (an HTTP method list, or ["*"] for any) permitted against a
@@ -22,7 +26,22 @@ type InternetPermission struct {
 	Methods         []string `json:"methods"`
 	Domain          string   `json:"domain"`
 	RequireApproval *bool    `json:"require_approval,omitempty"`
+	// InjectHeaders attaches host-held request headers (e.g. an Authorization
+	// bearer token) to requests this permission allows. Because it carries a
+	// credential, a permission that injects one must be a specific https host
+	// (never domain "*", never plain http off loopback), and the guest can
+	// neither supply nor read the value. Keyed by header name.
+	InjectHeaders map[string]HeaderInjection `json:"inject_headers,omitempty"`
 	FlowPolicy
+}
+
+// HeaderInjection is one host-attached header value: drawn from a host-held
+// secret (Secret ref, recommended) or a literal (Value, soft-deprecated), with
+// an optional Prefix such as "Bearer ". Exactly one of Secret or Value is set.
+type HeaderInjection struct {
+	Secret string `json:"secret,omitempty"`
+	Value  string `json:"value,omitempty"`
+	Prefix string `json:"prefix,omitempty"`
 }
 
 // internetConfig is a core.internet grant's driver configuration: its
@@ -55,8 +74,14 @@ func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMe
 	return json.Marshal(config)
 }
 
-func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Config) error {
+func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
 	config, policy, err := parseInternetConfig(raw)
+	if err != nil {
+		return err
+	}
+	// Resolve credential injections host-side. A missing secret fails here — at
+	// driver build / activation — never silently at request time.
+	injections, err := buildInjections(config.Capabilities, services)
 	if err != nil {
 		return err
 	}
@@ -69,9 +94,10 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, _ 
 	// SSRF guard on unless the grant explicitly opted into private networks.
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 	out.Handlers = append(out.Handlers, builtin.InternetHandler{
-		Name:    internet.Capability,
-		Methods: internetMethodPolicies(config.Capabilities),
-		Client:  client,
+		Name:       internet.Capability,
+		Methods:    internetMethodPolicies(config.Capabilities),
+		Client:     client,
+		Injections: injections,
 	})
 	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name:        internet.Capability,
@@ -126,6 +152,11 @@ func parseInternetConfig(raw json.RawMessage) (internetConfig, internet.Policy, 
 		permission.Methods = methods
 		permission.Domain = domain
 		permission.FlowPolicy = flow
+		if len(permission.InjectHeaders) > 0 {
+			if err := validateInjection(domain, permission.InjectHeaders); err != nil {
+				return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+			}
+		}
 	}
 	if config.TimeoutMS <= 0 {
 		return internetConfig{}, internet.Policy{}, fmt.Errorf("timeout_ms must be positive")
@@ -137,6 +168,85 @@ func parseInternetConfig(raw json.RawMessage) (internetConfig, internet.Policy, 
 		return internetConfig{}, internet.Policy{}, fmt.Errorf("max_request_bytes must be positive")
 	}
 	return config, internet.NewPolicy(rules...), nil
+}
+
+// validateInjection enforces the credential-safety rules on a permission's
+// injected headers: the origin must be a specific host (never "*") and https
+// (loopback may use http, where there is no wire to sniff), each header name
+// must be a valid, non-transport-controlled name, and each injection must name
+// exactly one source. Structural only — resolution happens in Configure.
+func validateInjection(domain string, headers map[string]HeaderInjection) error {
+	origin, err := internet.NewRule(internet.AnyMethod, domain)
+	if err != nil {
+		return err
+	}
+	if origin.AnyHost {
+		return fmt.Errorf(`inject_headers cannot be used with domain "*": a credential must be bound to a specific host`)
+	}
+	if origin.Scheme == "http" && !isLoopbackHost(origin.Host) {
+		return fmt.Errorf("a credential-injecting permission must use https (host %q is plain http)", origin.Host)
+	}
+	for name, injection := range headers {
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(name))
+		if canonical == "" || !headerNamePattern.MatchString(canonical) {
+			return fmt.Errorf("invalid inject header name %q", name)
+		}
+		switch canonical {
+		case "Host", "Content-Length":
+			return fmt.Errorf("header %q cannot be injected", canonical)
+		}
+		if (strings.TrimSpace(injection.Secret) != "") == (injection.Value != "") {
+			return fmt.Errorf(`inject_headers[%q]: set exactly one of "secret" or "value"`, name)
+		}
+	}
+	return nil
+}
+
+// buildInjections resolves each credential-injecting permission into a host-held
+// header set the internet handler attaches at dispatch. Called only from
+// Configure (activation), so a missing/unknown secret fails the driver build —
+// recorded there — rather than silently at request time. The resolved value is
+// never persisted (Normalize keeps only the reference).
+func buildInjections(permissions []InternetPermission, services Services) ([]builtin.CredentialInjection, error) {
+	var out []builtin.CredentialInjection
+	for i := range permissions {
+		permission := permissions[i]
+		if len(permission.InjectHeaders) == 0 {
+			continue
+		}
+		origin, err := internet.NewRule(internet.AnyMethod, permission.Domain)
+		if err != nil {
+			return nil, fmt.Errorf("permission %d: %w", i, err)
+		}
+		headers := make(map[string]string, len(permission.InjectHeaders))
+		var labels []string
+		for name, injection := range permission.InjectHeaders {
+			canonical := http.CanonicalHeaderKey(strings.TrimSpace(name))
+			var secret Secret
+			if ref := strings.TrimSpace(injection.Secret); ref != "" {
+				secret = SecretRef(ref)
+			} else {
+				secret = LiteralSecret(injection.Value)
+			}
+			value, err := secret.Resolve(services.Secrets)
+			if err != nil {
+				return nil, fmt.Errorf("permission %d header %q: %w", i, canonical, err)
+			}
+			headers[canonical] = injection.Prefix + value
+			credName := secret.Ref()
+			if credName == "" {
+				credName = "inline"
+			}
+			labels = append(labels, "credential:"+credName+"@"+CredentialFingerprint(services.AuditKey, value))
+		}
+		out = append(out, builtin.CredentialInjection{
+			Methods: permission.Methods,
+			Host:    strings.ToLower(origin.Host),
+			Headers: headers,
+			Labels:  labels,
+		})
+	}
+	return out, nil
 }
 
 // internetMethodPolicies aggregates the grant's per-permission flow and approval

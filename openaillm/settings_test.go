@@ -3,12 +3,14 @@ package openaillm
 import (
 	"reflect"
 	"testing"
+
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
 func TestNormalizeSettingsCleansPolicy(t *testing.T) {
 	settings, err := normalizeSettings(Settings{
 		BaseURL:       "https://llm.example.com/v1/",
-		APIKey:        "sk-test",
+		APIKey:        registry.LiteralSecret("sk-test"),
 		AllowedModels: []string{" model-b ", "model-a", "model-a"},
 		Timeout:       "120s",
 	})
@@ -18,8 +20,8 @@ func TestNormalizeSettingsCleansPolicy(t *testing.T) {
 	if settings.BaseURL != "https://llm.example.com/v1" {
 		t.Fatalf("base URL = %q", settings.BaseURL)
 	}
-	if settings.APIKey != "sk-test" {
-		t.Fatalf("API key = %q", settings.APIKey)
+	if settings.APIKey != registry.LiteralSecret("sk-test") {
+		t.Fatalf("API key not preserved through normalize")
 	}
 	if !reflect.DeepEqual(settings.AllowedModels, []string{"model-a", "model-b"}) {
 		t.Fatalf("allowed models = %#v", settings.AllowedModels)

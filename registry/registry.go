@@ -23,6 +23,13 @@ type Services struct {
 	Tenant string
 	// MemoryStore is the durable KV store behind core.memory grants.
 	MemoryStore memory.Store
+	// Secrets resolves manifest secret references (e.g. an injected
+	// Authorization token, an api_key) to their host-held values. Nil means no
+	// references may be used — a grant that references one fails to build.
+	Secrets SecretResolver
+	// AuditKey keys the credential fingerprints stamped on results (empty is
+	// allowed; it yields a stable but unkeyed fingerprint).
+	AuditKey []byte
 }
 
 // Registration builds a leaf I/O driver for one syscall. A registration is
