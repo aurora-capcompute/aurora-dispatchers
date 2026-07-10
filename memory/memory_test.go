@@ -84,6 +84,32 @@ func dispatchCtx(t *testing.T, ctx context.Context, h memory.Handler, operation,
 	return result
 }
 
+// list carries the union of the listed values' provenance, so key names are not
+// a label-free channel: a value written while the run was tainted taints a
+// later list, matching get/search.
+func TestListCarriesValueLabels(t *testing.T) {
+	store := memory.NewMapStore()
+	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+
+	tainted := sys.WithTaint(context.Background(), []string{"untrusted_web"})
+	if r := dispatchCtx(t, tainted, h, "put", `{"key":"notes/x","value":"v"}`, sys.Authorization{}); r.Status() != sys.StatusResult {
+		t.Fatalf("put = %v", r.Status())
+	}
+	r := dispatch(t, h, "list", `{"prefix":"notes"}`, sys.Authorization{})
+	if r.Status() != sys.StatusResult {
+		t.Fatalf("list = %v", r.Status())
+	}
+	found := false
+	for _, l := range r.Labels() {
+		if l == "untrusted_web" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("list labels = %v, want the listed value's taint (untrusted_web)", r.Labels())
+	}
+}
+
 func TestMemoryRoundTripAcrossSessions(t *testing.T) {
 	store := memory.NewMapStore()
 	// Two handlers = two grants in two different sessions of one tenant.
@@ -510,7 +536,7 @@ func TestMapStoreActivityMemory(t *testing.T) {
 	if _, _, _, ok, _ := store.Get(ctx, "acme", "act-1"); ok {
 		t.Fatal("activity record surfaced through Get")
 	}
-	if keys, _ := store.List(ctx, "acme", ""); len(keys) != 1 || keys[0] != "notes/a" {
+	if keys, _ := store.List(ctx, "acme", ""); len(keys) != 1 || keys[0].Key != "notes/a" {
 		t.Fatalf("list = %v, want only notes/a", keys)
 	}
 

@@ -5,8 +5,27 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
+
+// EgressForbidFloor is the reserved taint every network-egress sink refuses by
+// default, unioned on top of a manifest's declared per-operation taints. It
+// makes the flow policy fail CLOSED on omission: labeling a SOURCE with the
+// reserved class once — e.g. a filesystem read over a secrets dir,
+// {"operation":"read","labels":["secret"]} — guarantees that data cannot flow to
+// any network egress (internet of any method, http templates, the LLM provider)
+// even when a sink's own "taints" list forgets it. Lift it only through the
+// governed sys.declassify. A manifest that never uses the reserved label is
+// unaffected (the floor is inert unless something is labeled with it).
+var EgressForbidFloor = []string{"secret"}
+
+// WithEgressFloor unions the egress forbid floor onto an operation's declared
+// sink taints. Applied at every network-egress driver's build so a sink is never
+// a fully open channel for the reserved secret class.
+func WithEgressFloor(taints []string) []string {
+	return builtin.UnionLabels(taints, EgressForbidFloor)
+}
 
 // FlowPolicy is the per-operation data-flow declaration carried on a leaf grant's
 // capability entry. Labels are the source classes the operation's results carry —

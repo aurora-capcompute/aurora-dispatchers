@@ -287,7 +287,10 @@ func internetMethodPolicies(permissions []InternetPermission) map[string]builtin
 			methods[method] = builtin.InternetMethodPolicy{
 				RequireApproval: existing.RequireApproval || approval,
 				Labels:          builtin.UnionLabels(existing.Labels, permission.Labels),
-				Taints:          builtin.UnionLabels(existing.Taints, permission.Taints),
+				// Every internet request is egress — the URL, query, headers, and
+				// body all leave the host — so floor the reserved secret class into
+				// the sink guard regardless of the method or the manifest's taints.
+				Taints: WithEgressFloor(builtin.UnionLabels(existing.Taints, permission.Taints)),
 			}
 		}
 	}

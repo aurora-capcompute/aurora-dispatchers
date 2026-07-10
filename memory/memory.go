@@ -60,12 +60,23 @@ type Store interface {
 	// expectation records nothing: a conflict is a non-effect, safe to
 	// re-evaluate. "" bypasses the activity memory (keyless = at-least-once).
 	Put(ctx context.Context, tenant, key string, value json.RawMessage, labels []string, expect int64, activity string) (int64, error)
-	List(ctx context.Context, tenant, prefix string) (keys []string, err error)
+	// List returns each matching key WITH the provenance labels of its stored
+	// value, so enumerating keys carries the same taint a get of each value would
+	// — key names are not a label-free side channel a tainted writer can use to
+	// smuggle data to a later reader.
+	List(ctx context.Context, tenant, prefix string) (keys []ListedKey, err error)
 	// Activity reports whether a put under this activity key already executed,
 	// and the version it recorded. The handler asks before any gating, so a
 	// re-driven, already-performed effect returns its result instead of
 	// re-yielding for an approval that was already granted.
 	Activity(ctx context.Context, tenant, activity string) (version int64, done bool, err error)
+}
+
+// ListedKey is a key returned by List together with the provenance labels of its
+// stored value.
+type ListedKey struct {
+	Key    string
+	Labels []string
 }
 
 // Capability is the name a core.memory grant publishes — the syscall's own name.
@@ -343,26 +354,30 @@ func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult,
 		}
 		prefix = qualified
 	}
-	keys, err := h.Store.List(ctx, h.Tenant, prefix)
+	entries, err := h.Store.List(ctx, h.Tenant, prefix)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	// NOTE (DIFC): unlike get/search, list returns key NAMES without the stored
-	// values' provenance labels (only this op's own Labels are stamped by the
-	// caller). Key names are thus a low-bandwidth channel that does not carry
-	// value taint — an adversarial guest could encode data in a key name while
-	// tainted and read it back untainted via list elsewhere. Closing this fully
-	// needs Store.List to return per-key labels (a cross-repo interface change);
-	// value confidentiality is unaffected (values re-emerge tainted via get/search).
-	relative := make([]string, 0, len(keys))
-	for _, key := range keys {
+	// Return keys relative to the grant's subtree — the guest's view — and carry
+	// the union of the listed values' provenance labels, so a key name derived
+	// from tainted data cannot be read back label-free (get/search already
+	// re-stamp their values; list now matches for key names).
+	relative := make([]string, 0, len(entries))
+	var labels []string
+	for _, entry := range entries {
+		key := entry.Key
 		if h.Subtree != "" {
 			key = strings.TrimPrefix(strings.TrimPrefix(key, h.Subtree), "/")
 		}
 		relative = append(relative, key)
+		labels = append(labels, entry.Labels...)
 	}
 	sort.Strings(relative)
-	return marshalResult(ListResponse{Keys: relative})
+	result, err := marshalResult(ListResponse{Keys: relative})
+	if err != nil {
+		return result, err
+	}
+	return result.WithLabels(labels...), nil
 }
 
 // qualify validates a guest key and roots it under the grant's subtree.
@@ -582,15 +597,15 @@ func (s *MapStore) Activity(_ context.Context, tenant, activity string) (int64, 
 	return version, done, nil
 }
 
-func (s *MapStore) List(_ context.Context, tenant, prefix string) ([]string, error) {
+func (s *MapStore) List(_ context.Context, tenant, prefix string) ([]ListedKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var keys []string
-	for key := range s.tenants[tenant] {
+	var keys []ListedKey
+	for key, stored := range s.tenants[tenant] {
 		if prefix == "" || key == prefix || strings.HasPrefix(key, prefix+"/") {
-			keys = append(keys, key)
+			keys = append(keys, ListedKey{Key: key, Labels: append([]string(nil), stored.labels...)})
 		}
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
 	return keys, nil
 }

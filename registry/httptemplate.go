@@ -290,8 +290,10 @@ func compileOperation(operation templateOperation, headers map[string]string, cr
 		Headers:          headers,
 		CredentialLabels: credentialLabels,
 		Labels:           operation.FlowPolicy.Labels,
-		Taints:           operation.FlowPolicy.Taints,
-		RequireApproval:  operation.RequireApproval != nil && *operation.RequireApproval,
+		// A template operation issues an HTTP request — egress — so floor the
+		// reserved secret class into its sink guard on top of any declared taints.
+		Taints:          WithEgressFloor(operation.FlowPolicy.Taints),
+		RequireApproval: operation.RequireApproval != nil && *operation.RequireApproval,
 	}
 	branch, err := OperationBranch(operation.Name, operationParamSchema(operation))
 	if err != nil {
