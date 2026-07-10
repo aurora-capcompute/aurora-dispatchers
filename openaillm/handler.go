@@ -62,7 +62,7 @@ func (h *Handler) AddOperation(operation string, settings normalizedSettings, gr
 		modelPolicy:     newModelPolicy(settings.AllowedModels),
 		maxRequestBytes: settings.MaxRequestBytes,
 		requireApproval: requireApproval,
-		labels: grant.Labels,
+		labels:          grant.Labels,
 		// A provider call sends the prompt/messages off-host — egress — so floor
 		// the reserved secret class into the sink guard on top of any declared taints.
 		taints: registry.WithEgressFloor(grant.Taints),
