@@ -76,12 +76,16 @@ func newTestHandler(srv *recordingServer, resources []Permission) Handler {
 
 func fixtureResources() []Permission {
 	return []Permission{
+		// Default posture: get+list, list returns metadata only, no pagination.
 		{Group: "", Version: "v1", Resource: "pods", Verbs: map[string]bool{"get": true, "list": true},
 			Namespaces: []string{"default", "kube-system"}, Labels: []string{"k8s"}},
+		// FullObjects: list returns whole objects (the heavier opt-in).
 		{Group: "", Version: "v1", Resource: "nodes", Verbs: map[string]bool{"get": true, "list": true},
-			ClusterScoped: true},
+			ClusterScoped: true, FullObjects: true},
+		// Pagination enabled so a continue token is accepted.
 		{Group: "apps", Version: "v1", Resource: "deployments", Verbs: map[string]bool{"get": true, "list": true},
-			Namespaces: []string{"*"}},
+			Namespaces: []string{"*"}, AllowPagination: true},
+		// MetadataOnly: both get and list return metadata; list-only.
 		{Group: "", Version: "v1", Resource: "configmaps", Verbs: map[string]bool{"list": true},
 			Namespaces: []string{"default"}, MetadataOnly: true},
 	}
@@ -179,10 +183,11 @@ func TestListBoundsAndSelectors(t *testing.T) {
 		t.Fatalf("list query %q lacks a server-side timeout", query)
 	}
 
-	// An over-max limit is clamped to the ceiling — a guest cannot ask for more.
+	// An over-max limit is clamped to the resource's ceiling — a guest cannot ask
+	// for more than the (small, default) page size.
 	dispatch(t, h, ctx, `{"operation":"list","resource":"pods","namespace":"default","limit":100000}`)
-	if _, _, query, _, _, _ := srv.snapshot(); !strings.Contains(query, "limit=500") {
-		t.Fatalf("over-max limit not clamped: %q", query)
+	if _, _, query, _, _, _ := srv.snapshot(); !strings.Contains(query, "limit=100") {
+		t.Fatalf("over-max limit not clamped to the default ceiling: %q", query)
 	}
 
 	// Selectors pass through url-encoded.
@@ -193,11 +198,28 @@ func TestListBoundsAndSelectors(t *testing.T) {
 	}
 }
 
-func TestContinueDropsResourceVersion(t *testing.T) {
+// Pagination is refused unless the grant enables it — a guest cannot walk a
+// whole collection page by page.
+func TestPaginationRefusedByDefault(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
 	h := newTestHandler(srv, fixtureResources())
-	dispatch(t, h, context.Background(), `{"operation":"list","resource":"pods","namespace":"default","continue":"eyJ2IjoxfQ"}`)
+	r := dispatch(t, h, context.Background(), `{"operation":"list","resource":"pods","namespace":"default","continue":"eyJ2IjoxfQ"}`)
+	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("continue on a non-paginating grant = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
+	}
+	if _, _, _, _, _, hits := srv.snapshot(); hits != 0 {
+		t.Fatal("a refused paginating list reached the API server")
+	}
+}
+
+// When a grant enables pagination, a continue token is sent and does not also
+// pin resourceVersion=0 (the token carries its own).
+func TestContinueWhenPaginationEnabled(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	h := newTestHandler(srv, fixtureResources())
+	dispatch(t, h, context.Background(), `{"operation":"list","group":"apps","resource":"deployments","namespace":"default","continue":"eyJ2IjoxfQ"}`)
 	_, _, query, _, _, _ := srv.snapshot()
 	if strings.Contains(query, "resourceVersion=0") {
 		t.Fatalf("continue paging must not also pin resourceVersion=0: %q", query)
@@ -213,17 +235,59 @@ func TestMetadataOnlyAcceptHeader(t *testing.T) {
 	h := newTestHandler(srv, fixtureResources())
 	ctx := context.Background()
 
-	// The grant forces metadata-only on configmaps: the list asks for the
-	// metadata list representation, so payload data never leaves the API server.
+	// A plain list defaults to metadata-only — object payloads never leave the
+	// API server unless the grant opts into full objects.
+	dispatch(t, h, ctx, `{"operation":"list","resource":"pods","namespace":"default"}`)
+	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1" {
+		t.Fatalf("default list accept = %q, want metadata-list", accept)
+	}
+
+	// A full-objects grant returns whole objects.
+	dispatch(t, h, ctx, `{"operation":"list","resource":"nodes"}`)
+	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json" {
+		t.Fatalf("full-objects list accept = %q, want application/json", accept)
+	}
+
+	// A MetadataOnly grant is metadata for list too.
 	dispatch(t, h, ctx, `{"operation":"list","resource":"configmaps","namespace":"default"}`)
 	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1" {
 		t.Fatalf("configmap list accept = %q, want metadata-list", accept)
 	}
 
-	// A request can tighten a full-object resource to metadata-only for a get.
+	// A get returns the full object by default...
+	dispatch(t, h, ctx, `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
+	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json" {
+		t.Fatalf("default get accept = %q, want full object", accept)
+	}
+	// ...but a request may tighten it to metadata-only.
 	dispatch(t, h, ctx, `{"operation":"get","resource":"pods","namespace":"default","name":"web-0","metadata_only":true}`)
 	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1" {
 		t.Fatalf("metadata-only get accept = %q", accept)
+	}
+}
+
+// A grant's max_list_items caps the page below the default.
+func TestPerResourceListCap(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	resources := []Permission{{Group: "", Version: "v1", Resource: "events",
+		Verbs: map[string]bool{"list": true}, Namespaces: []string{"default"}, MaxListItems: 5}}
+	h := newTestHandler(srv, resources)
+	dispatch(t, h, context.Background(), `{"operation":"list","resource":"events","namespace":"default","limit":100}`)
+	if _, _, query, _, _, _ := srv.snapshot(); !strings.Contains(query, "limit=5") {
+		t.Fatalf("per-resource cap not applied: %q", query)
+	}
+}
+
+// The AllNamespaceList fixture uses deployments, which now enables pagination —
+// keep the all-namespace list metadata default intact.
+func TestFullObjectsClusterList(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	h := newTestHandler(srv, fixtureResources())
+	dispatch(t, h, context.Background(), `{"operation":"list","resource":"nodes"}`)
+	if _, path, _, _, _, _ := srv.snapshot(); path != "/api/v1/nodes" {
+		t.Fatalf("cluster-scoped list path = %q", path)
 	}
 }
 

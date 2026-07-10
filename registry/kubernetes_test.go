@@ -60,6 +60,8 @@ func TestKubernetesConfigErrors(t *testing.T) {
 		"bad resource name":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"Pods","namespaces":["default"]}]}`,
 		"negative rate":            `{"endpoint":"https://api.test","token":"t","requests_per_second":-1,"capabilities":[{"resource":"pods","namespaces":["default"]}]}`,
 		"unknown field":            `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"]}],"bogus":1}`,
+		"metadata and full":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"metadata_only":true,"full_objects":true}]}`,
+		"max_list_items too big":   `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"max_list_items":100000}]}`,
 	}
 	reg := k8sRegistry()
 	for name, config := range cases {
@@ -113,6 +115,28 @@ func TestKubernetesBuildFailsClosedOnMissingSecret(t *testing.T) {
 		[]registry.Entry{{Syscall: k8s.Capability, Config: config}}, registry.Services{Secrets: mapResolver{}})
 	if err == nil {
 		t.Fatal("build succeeded with an unresolved token secret")
+	}
+}
+
+// The deployment-wide DisableList switch refuses any list-enabled grant, so the
+// driver is get-only cluster-wide regardless of what a manifest asks — the
+// testing-phase guarantee that no (potentially heavy) list can be issued.
+func TestKubernetesDisableListSwitch(t *testing.T) {
+	reg := registry.New(registry.KubernetesRegistration{DisableList: true})
+	listGrant := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["get","list"]}]}`)
+	if _, err := reg.Build(context.Background(),
+		[]registry.Entry{{Syscall: k8s.Capability, Config: listGrant}}, registry.Services{}); err == nil {
+		t.Fatal("a list-enabled grant built despite DisableList")
+	}
+	// Get-only still builds.
+	getGrant := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["get"]}]}`)
+	built, err := reg.Build(context.Background(),
+		[]registry.Entry{{Syscall: k8s.Capability, Config: getGrant}}, registry.Services{})
+	if err != nil {
+		t.Fatalf("get-only grant rejected under DisableList: %v", err)
+	}
+	if schema := string(built.Capabilities[0].InputSchema); strings.Contains(schema, `"const":"list"`) {
+		t.Fatalf("get-only grant published a list branch: %s", schema)
 	}
 }
 

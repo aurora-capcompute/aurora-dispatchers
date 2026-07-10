@@ -45,9 +45,16 @@ const (
 	DefaultTimeout          = 10 * time.Second
 	DefaultMaxResponseBytes = 256 * 1024
 	DefaultListLimit        = 50
-	DefaultMaxListLimit     = 500
-	DefaultRequestsPerSec   = 5
-	DefaultBurst            = 5
+	// DefaultMaxListLimit is the default per-resource page-size ceiling. It is
+	// intentionally small: list is the one read that can be heavy on the API
+	// server, so a grant must opt into a larger page (up to MaxListItemsCeiling)
+	// deliberately.
+	DefaultMaxListLimit = 100
+	// MaxListItemsCeiling is the absolute cap a grant's max_list_items may not
+	// exceed — a page larger than this is never issued, whatever a manifest asks.
+	MaxListItemsCeiling   = 500
+	DefaultRequestsPerSec = 5
+	DefaultBurst          = 5
 
 	// maxRetryAfter caps how long a server-supplied Retry-After can park a grant,
 	// so a misconfigured or hostile endpoint cannot freeze it indefinitely.
@@ -90,14 +97,28 @@ type Response struct {
 // It is host-authored trusted policy — the path a request is built from comes
 // from here, never from the guest's raw strings.
 type Permission struct {
-	Group           string
-	Version         string
-	Resource        string
-	Verbs           map[string]bool
-	Namespaces      []string // allowed namespaces; "*" means any; ignored when ClusterScoped
-	ClusterScoped   bool     // the resource is not namespaced (nodes, namespaces, PVs)
-	MetadataOnly    bool     // force metadata-only reads of this resource
-	StrongRead      bool     // read through to etcd instead of the watch cache
+	Group         string
+	Version       string
+	Resource      string
+	Verbs         map[string]bool
+	Namespaces    []string // allowed namespaces; "*" means any; ignored when ClusterScoped
+	ClusterScoped bool     // the resource is not namespaced (nodes, namespaces, PVs)
+	// MetadataOnly forces every read of this resource (get and list) to return
+	// object metadata only. FullObjects opts a list into returning full objects —
+	// the heavier mode; by default a list returns metadata only, while a get
+	// (one object, always bounded) returns the full object. The two are mutually
+	// exclusive.
+	MetadataOnly bool
+	FullObjects  bool
+	// AllowPagination lets a list carry a continue token to page through a
+	// collection. Off by default: without it a guest gets at most one bounded
+	// page and cannot walk (or re-walk) the whole collection.
+	AllowPagination bool
+	// MaxListItems is the hard page-size ceiling for this resource's lists
+	// (clamped to MaxListItemsCeiling at build). A request's limit is clamped to
+	// it; 0 means the default.
+	MaxListItems    int
+	StrongRead      bool // read through to etcd instead of the watch cache
 	RequireApproval bool
 	Labels          []string
 	Taints          []string
@@ -367,7 +388,16 @@ func (h Handler) prepare(verb string, request Request, permission Permission) (p
 	if !permission.StrongRead {
 		query.Set("resourceVersion", "0")
 	}
-	metadataOnly := permission.MetadataOnly || (request.MetadataOnly != nil && *request.MetadataOnly)
+	// Metadata-only is the gentle default for a list — object payloads (a
+	// ConfigMap's data, a Pod's whole spec) never leave the API server unless the
+	// grant opts into full objects. A get returns the full single object (already
+	// bounded) unless the grant or request restricts it. A request may always
+	// tighten to metadata-only, never loosen.
+	requestMeta := request.MetadataOnly != nil && *request.MetadataOnly
+	metadataOnly := permission.MetadataOnly || requestMeta
+	if verb == VerbList {
+		metadataOnly = metadataOnly || !permission.FullObjects
+	}
 
 	var name string
 	if verb == VerbGet {
@@ -376,13 +406,18 @@ func (h Handler) prepare(verb string, request Request, permission Permission) (p
 		}
 		name = request.Name
 	} else {
-		// A list is always bounded and time-boxed on the server side.
+		// A list is always bounded and time-boxed on the server side. The page is
+		// clamped to the grant's ceiling, so a guest cannot ask for a large page.
+		ceiling := permission.MaxListItems
+		if ceiling <= 0 || ceiling > MaxListItemsCeiling {
+			ceiling = DefaultMaxListLimit
+		}
 		limit := request.Limit
 		if limit <= 0 {
 			limit = DefaultListLimit
 		}
-		if limit > DefaultMaxListLimit {
-			limit = DefaultMaxListLimit
+		if limit > ceiling {
+			limit = ceiling
 		}
 		query.Set("limit", strconv.Itoa(limit))
 		if seconds := int(h.Client.timeout / time.Second); seconds >= 1 {
@@ -395,6 +430,11 @@ func (h Handler) prepare(verb string, request Request, permission Permission) (p
 			query.Set("fieldSelector", request.FieldSelector)
 		}
 		if request.Continue != "" {
+			// Paging can walk (or re-walk) a whole collection, so it is refused
+			// unless the grant explicitly enables it.
+			if !permission.AllowPagination {
+				return prepared{}, fmt.Errorf("pagination is not enabled for %s", resourceLabel(permission))
+			}
 			query.Set("continue", request.Continue)
 			// A continue token pages a prior list; its resourceVersion is pinned by
 			// the token, so resourceVersion must not also be sent.

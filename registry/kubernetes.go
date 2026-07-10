@@ -34,11 +34,23 @@ type KubernetesResource struct {
 	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
 	// persistentvolumes). Its reads carry no namespace.
 	ClusterScoped bool `json:"cluster_scoped,omitempty"`
-	// MetadataOnly forces every read of this resource to return only object
-	// metadata (names, labels, timestamps) — never the object body. Set it on
-	// resources whose payload is sensitive or heavy (a ConfigMap's data) to keep
-	// the values out of the guest entirely.
+	// MetadataOnly forces every read of this resource (get and list) to return
+	// only object metadata (names, labels, timestamps) — never the object body.
+	// Set it on resources whose payload is sensitive or heavy (a ConfigMap's
+	// data) to keep the values out of the guest entirely.
 	MetadataOnly bool `json:"metadata_only,omitempty"`
+	// FullObjects opts a list into returning full objects. By default a list
+	// returns metadata only (the gentle default — the API server serializes far
+	// less), while a get always returns the full single object. Mutually
+	// exclusive with MetadataOnly.
+	FullObjects bool `json:"full_objects,omitempty"`
+	// AllowPagination lets a list carry a continue token to page through a
+	// collection. Off by default: without it a guest gets at most one bounded
+	// page and cannot walk the whole collection.
+	AllowPagination bool `json:"allow_pagination,omitempty"`
+	// MaxListItems caps this resource's list page size (default 100, hard ceiling
+	// 500). Lower it to keep lists tiny during testing.
+	MaxListItems int `json:"max_list_items,omitempty"`
 	// StrongRead reads through to etcd (a quorum read) instead of the API
 	// server's watch cache. Off by default: cache reads are far lighter on the
 	// cluster, at the cost of possibly-slightly-stale data.
@@ -88,7 +100,20 @@ var kubernetesOperations = map[string]struct {
 // KubernetesRegistration provides a read-only, rate-limited window onto a
 // Kubernetes API server. It publishes core.kubernetes with get and list
 // operations over an author-declared resource allowlist; there is no write path.
-type KubernetesRegistration struct{}
+//
+// The zero value is the safe default. The two fields are a deployment-wide
+// safety valve that no manifest can override — for a testing phase, set
+// DisableList to guarantee the driver is get-only cluster-wide (every grant that
+// enables list then fails to build), or MaxListItems to cap every list far below
+// what any grant asks. The distribution sets these from operator config/env.
+type KubernetesRegistration struct {
+	// DisableList refuses to build any grant that enables the list verb, so only
+	// single-object get reads — provably light — are possible.
+	DisableList bool
+	// MaxListItems, when > 0, caps every resource's list page size to at most
+	// this, regardless of the grant's own max_list_items.
+	MaxListItems int
+}
 
 func (KubernetesRegistration) Matches(syscall string) bool { return syscall == k8s.Capability }
 
@@ -101,7 +126,7 @@ func (KubernetesRegistration) Normalize(_ string, raw json.RawMessage) (json.Raw
 	return json.Marshal(config)
 }
 
-func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
+func (r KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
 	config, resources, err := parseKubernetesConfig(raw)
 	if err != nil {
 		return err
@@ -125,6 +150,13 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 	for _, resource := range resources {
 		verbs := map[string]bool{}
 		for _, verb := range resource.Verbs {
+			// Deployment-wide safety valve: refuse to build a list-enabled grant
+			// when the operator has disabled list, so no manifest can bring list
+			// back. The reconciliation guard requires the published set to match the
+			// grant, so this fails loud rather than silently dropping the verb.
+			if verb == k8s.VerbList && r.DisableList {
+				return fmt.Errorf("list is disabled for this deployment; grant only get on %s", resourceDisplayName(resource))
+			}
 			verbs[verb] = true
 			verbsGranted[verb] = true
 		}
@@ -136,6 +168,9 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 			Namespaces:      resource.Namespaces,
 			ClusterScoped:   resource.ClusterScoped,
 			MetadataOnly:    resource.MetadataOnly,
+			FullObjects:     resource.FullObjects,
+			AllowPagination: resource.AllowPagination,
+			MaxListItems:    r.effectiveListCap(resource.MaxListItems),
 			StrongRead:      resource.StrongRead,
 			RequireApproval: resource.RequireApproval != nil && *resource.RequireApproval,
 			Labels:          resource.Labels,
@@ -251,6 +286,16 @@ func normalizeResource(resource KubernetesResource) (KubernetesResource, error) 
 	}
 	resource.Namespaces = namespaces
 
+	if resource.MetadataOnly && resource.FullObjects {
+		return KubernetesResource{}, fmt.Errorf("metadata_only and full_objects are mutually exclusive")
+	}
+	if resource.MaxListItems < 0 {
+		return KubernetesResource{}, fmt.Errorf("max_list_items must not be negative")
+	}
+	if resource.MaxListItems > k8s.MaxListItemsCeiling {
+		return KubernetesResource{}, fmt.Errorf("max_list_items %d exceeds the ceiling of %d", resource.MaxListItems, k8s.MaxListItemsCeiling)
+	}
+
 	// A read-only driver reading Secret values would exfiltrate every credential
 	// in scope, so core Secrets may be granted for their metadata only (names and
 	// labels, never data). Remove this rail deliberately if a use case needs it.
@@ -356,6 +401,30 @@ func credentialLabel(name string, auditKey []byte, token string) string {
 
 func durationMS(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
 
+// effectiveListCap folds a grant's max_list_items together with the
+// deployment-wide cap and the absolute ceiling into the one concrete page-size
+// bound the driver enforces — never larger than any of them.
+func (r KubernetesRegistration) effectiveListCap(grantCap int) int {
+	cap := grantCap
+	if cap <= 0 {
+		cap = k8s.DefaultMaxListLimit
+	}
+	if r.MaxListItems > 0 && r.MaxListItems < cap {
+		cap = r.MaxListItems
+	}
+	if cap > k8s.MaxListItemsCeiling {
+		cap = k8s.MaxListItemsCeiling
+	}
+	return cap
+}
+
+func resourceDisplayName(r KubernetesResource) string {
+	if r.Group == "" {
+		return r.Resource
+	}
+	return r.Resource + "." + r.Group
+}
+
 func sortKubernetesResources(resources []KubernetesResource) {
 	sort.Slice(resources, func(i, j int) bool {
 		if resources[i].Group != resources[j].Group {
@@ -389,8 +458,11 @@ func kubernetesDescription(resources []KubernetesResource, verbsGranted map[stri
 			scope = "cluster-scoped"
 		}
 		fmt.Fprintf(&b, " version %q — %s, %s", resource.Version, strings.Join(resource.Verbs, "/"), scope)
-		if resource.MetadataOnly {
+		switch {
+		case resource.MetadataOnly:
 			b.WriteString(" (metadata only)")
+		case !resource.FullObjects:
+			b.WriteString(" (list returns metadata only)")
 		}
 	}
 	return b.String()
