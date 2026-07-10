@@ -92,3 +92,22 @@ func ValidateResourceIdentity(group, version, resource string) error {
 // ValidateNamespaceName checks a namespace — the exported guard the registry
 // uses to validate an allowlist entry's namespaces.
 func ValidateNamespaceName(namespace string) error { return validateNamespace(namespace) }
+
+// ValidateResourceRule validates a config-side (group, version, resource)
+// allowlist entry, where group and resource may be "*" (wildcard). A concrete
+// resource is validated together with its version; a wildcard resource's version
+// is ignored (the guest supplies it, validated per request).
+func ValidateResourceRule(group, version, resource string) error {
+	if group != "*" {
+		if err := validateGroup(group); err != nil {
+			return err
+		}
+	}
+	if resource == "*" {
+		return nil
+	}
+	if err := validateResource(resource); err != nil {
+		return err
+	}
+	return validateVersion(version)
+}

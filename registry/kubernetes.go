@@ -14,46 +14,47 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// KubernetesResource is one entry of a core.kubernetes grant's `capabilities`
-// allowlist: a resource type and the namespaces it may be read in, plus its
-// data-flow policy. It is the whole allowlist that constrains every read this
-// grant can make. There is only one operation — get one object by name — so a
-// resource that is granted is a resource the guest may get.
-type KubernetesResource struct {
-	// Verbs are the operations granted on this resource. Only "get" is supported
-	// today (the driver is get-only); empty defaults to ["get"]. This is the
-	// explicit, forward-compatible allowlist — when the driver grows another
-	// operation, a grant enables it by naming it here (and it stays disabled
-	// until named). There are no write verbs.
-	Verbs []string `json:"verbs,omitempty"`
-	// Group/Version/Resource identify the resource type; Group "" is the core
-	// group, Version defaults to v1.
+// KubernetesVerbGrant is one case of a core.kubernetes grant's `capabilities`
+// ADT, discriminated by verb: the read verb it enables and the resources that
+// verb may read. get is the only verb available today. Making the verb the
+// discriminator groups an operation with the resources it applies to — the
+// natural shape once more than one operation exists.
+type KubernetesVerbGrant struct {
+	Verb      string                   `json:"verb"`
+	Resources []KubernetesResourceRule `json:"resources"`
+}
+
+// KubernetesResourceRule is one resource a verb grant covers. Resource "*" (and
+// Group "*") is a wildcard matching any — the guest then names a concrete
+// resource per call, still strictly validated. Each rule carries its own scope
+// (namespaces / cluster-scoped), read shape (metadata_only), approval, and flow.
+type KubernetesResourceRule struct {
+	// Group is the API group ("" is the core group, "*" is any). Version pins a
+	// concrete resource's version (default v1); it is ignored for a wildcard
+	// resource.
 	Group    string `json:"group,omitempty"`
 	Version  string `json:"version,omitempty"`
 	Resource string `json:"resource"`
-	// Namespaces are the namespaces this resource may be read in; "*" means any
-	// (the guest still names a concrete namespace per get — the wildcard only
-	// removes the restriction on which). Required for a namespaced resource, and
-	// must be empty for a cluster-scoped one.
+	// Namespaces are the namespaces this rule may be read in; "*" means any.
+	// Required for a namespaced rule, must be empty for a cluster-scoped one.
 	Namespaces []string `json:"namespaces,omitempty"`
 	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
 	// persistentvolumes). Its reads carry no namespace.
 	ClusterScoped bool `json:"cluster_scoped,omitempty"`
-	// MetadataOnly forces every read of this resource to return only object
-	// metadata (names, labels, timestamps) — never the object body. Set it on
-	// resources whose payload is sensitive or heavy (a ConfigMap's data) to keep
-	// the values out of the guest entirely.
+	// MetadataOnly forces reads matched by this rule to return only object
+	// metadata — never the object body. (Core Secrets are metadata-only by rule,
+	// enforced even against a wildcard that omits this.)
 	MetadataOnly    bool  `json:"metadata_only,omitempty"`
 	RequireApproval *bool `json:"require_approval,omitempty"`
 	FlowPolicy
 }
 
 // kubernetesConfig is a core.kubernetes grant's driver configuration: the
-// resource allowlist, an optional explicit API-server override (else the pod's
-// in-cluster service account is used), and the request bounds and pacing that
-// keep the driver gentle on the API server.
+// verb-discriminated allowlist, an optional explicit API-server override (else
+// the pod's in-cluster service account is used), and the request bounds and
+// pacing that keep the driver gentle on the API server.
 type kubernetesConfig struct {
-	Capabilities []KubernetesResource `json:"capabilities,omitempty"`
+	Capabilities []KubernetesVerbGrant `json:"capabilities,omitempty"`
 	// Endpoint/Token/CACert are the explicit-config override. When both Endpoint
 	// and Token are set the driver talks to that API server; otherwise it uses
 	// the in-cluster service account. A bearer Token must be a secret reference
@@ -84,16 +85,16 @@ type KubernetesRegistration struct{}
 func (KubernetesRegistration) Matches(syscall string) bool { return syscall == k8s.Capability }
 
 func (KubernetesRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, resources, err := parseKubernetesConfig(raw)
+	config, grants, err := parseKubernetesConfig(raw)
 	if err != nil {
 		return nil, err
 	}
-	config.Capabilities = resources
+	config.Capabilities = grants
 	return json.Marshal(config)
 }
 
 func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
-	config, resources, err := parseKubernetesConfig(raw)
+	config, grants, err := parseKubernetesConfig(raw)
 	if err != nil {
 		return err
 	}
@@ -111,24 +112,25 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		return err
 	}
 
-	permissions := make([]k8s.Permission, 0, len(resources))
-	for _, resource := range resources {
-		verbs := make(map[string]bool, len(resource.Verbs))
-		for _, verb := range resource.Verbs {
-			verbs[verb] = true
+	// Flatten each (verb, resource-rule) into one Permission the handler scans.
+	var permissions []k8s.Permission
+	verbsGranted := map[string]bool{}
+	for _, grant := range grants {
+		verbsGranted[grant.Verb] = true
+		for _, rule := range grant.Resources {
+			permissions = append(permissions, k8s.Permission{
+				Verb:            grant.Verb,
+				Group:           rule.Group,
+				Version:         rule.Version,
+				Resource:        rule.Resource,
+				Namespaces:      rule.Namespaces,
+				ClusterScoped:   rule.ClusterScoped,
+				MetadataOnly:    rule.MetadataOnly,
+				RequireApproval: rule.RequireApproval != nil && *rule.RequireApproval,
+				Labels:          rule.Labels,
+				Taints:          rule.Taints,
+			})
 		}
-		permissions = append(permissions, k8s.Permission{
-			Group:           resource.Group,
-			Version:         resource.Version,
-			Resource:        resource.Resource,
-			Verbs:           verbs,
-			Namespaces:      resource.Namespaces,
-			ClusterScoped:   resource.ClusterScoped,
-			MetadataOnly:    resource.MetadataOnly,
-			RequireApproval: resource.RequireApproval != nil && *resource.RequireApproval,
-			Labels:          resource.Labels,
-			Taints:          resource.Taints,
-		})
 	}
 
 	out.Handlers = append(out.Handlers, k8s.Handler{
@@ -138,23 +140,31 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		Resources:       permissions,
 	})
 
-	branch, err := OperationBranch(k8s.VerbGet, getOperationSchema)
-	if err != nil {
-		return err
+	// One guest-facing ADT branch per granted verb (get today).
+	branches := make([]json.RawMessage, 0, len(verbsGranted))
+	for _, verb := range []string{k8s.VerbGet} {
+		if !verbsGranted[verb] {
+			continue
+		}
+		branch, err := OperationBranch(verb, getOperationSchema)
+		if err != nil {
+			return err
+		}
+		branches = append(branches, branch)
 	}
 	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name:        k8s.Capability,
-		Description: kubernetesDescription(resources),
-		InputSchema: OneOfSchema([]json.RawMessage{branch}),
+		Description: kubernetesDescription(grants),
+		InputSchema: OneOfSchema(branches),
 	})
 	return nil
 }
 
 // parseKubernetesConfig validates and canonicalizes a core.kubernetes grant's
 // config — the single parse Normalize and Configure share. It rejects unknown
-// fields, requires at least one resource, and normalizes each resource's
-// version, namespaces, and flow policy.
-func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesResource, error) {
+// fields, requires at least one verb grant, and normalizes each verb case and
+// its resource rules.
+func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesVerbGrant, error) {
 	var config kubernetesConfig
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -164,23 +174,22 @@ func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesR
 		}
 	}
 	if len(config.Capabilities) == 0 {
-		return kubernetesConfig{}, nil, fmt.Errorf("capabilities must grant at least one resource")
+		return kubernetesConfig{}, nil, fmt.Errorf("capabilities must grant at least one verb")
 	}
-	seen := make(map[string]struct{}, len(config.Capabilities))
-	resources := make([]KubernetesResource, len(config.Capabilities))
-	for i, resource := range config.Capabilities {
-		normalized, err := normalizeResource(resource)
+	seenVerb := make(map[string]struct{}, len(config.Capabilities))
+	grants := make([]KubernetesVerbGrant, len(config.Capabilities))
+	for i, grant := range config.Capabilities {
+		normalized, err := normalizeVerbGrant(grant)
 		if err != nil {
-			return kubernetesConfig{}, nil, fmt.Errorf("resource %d: %w", i, err)
+			return kubernetesConfig{}, nil, fmt.Errorf("capability %d: %w", i, err)
 		}
-		key := normalized.Group + "/" + normalized.Version + "/" + normalized.Resource
-		if _, dup := seen[key]; dup {
-			return kubernetesConfig{}, nil, fmt.Errorf("duplicate resource %q", key)
+		if _, dup := seenVerb[normalized.Verb]; dup {
+			return kubernetesConfig{}, nil, fmt.Errorf("verb %q is granted more than once", normalized.Verb)
 		}
-		seen[key] = struct{}{}
-		resources[i] = normalized
+		seenVerb[normalized.Verb] = struct{}{}
+		grants[i] = normalized
 	}
-	sortKubernetesResources(resources)
+	sort.Slice(grants, func(i, j int) bool { return grants[i].Verb < grants[j].Verb })
 
 	// An explicit endpoint and token must be given together, or neither (in-cluster).
 	if (config.Endpoint != "") != !config.Token.IsZero() {
@@ -205,70 +214,82 @@ func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesR
 	if config.TimeoutMS < 0 || config.MaxResponseBytes < 0 {
 		return kubernetesConfig{}, nil, fmt.Errorf("timeout_ms and max_response_bytes must not be negative")
 	}
-	return config, resources, nil
+	return config, grants, nil
 }
 
-// normalizeResource validates and canonicalizes one allowlist entry.
-func normalizeResource(resource KubernetesResource) (KubernetesResource, error) {
-	resource.Group = strings.TrimSpace(resource.Group)
-	resource.Version = strings.TrimSpace(resource.Version)
-	if resource.Version == "" {
-		resource.Version = "v1"
+// normalizeVerbGrant validates one verb case and its resource rules. get is the
+// only verb the driver implements today; naming anything else is refused with a
+// clear message, since this is the discriminator a future operation slots into.
+func normalizeVerbGrant(grant KubernetesVerbGrant) (KubernetesVerbGrant, error) {
+	verb := strings.ToLower(strings.TrimSpace(grant.Verb))
+	switch verb {
+	case k8s.VerbGet:
+	case "":
+		return KubernetesVerbGrant{}, fmt.Errorf("verb is required")
+	default:
+		return KubernetesVerbGrant{}, fmt.Errorf("verb %q is not available; this driver is get-only for now", verb)
 	}
-	resource.Resource = strings.TrimSpace(resource.Resource)
-	if err := k8s.ValidateResourceIdentity(resource.Group, resource.Version, resource.Resource); err != nil {
-		return KubernetesResource{}, err
+	grant.Verb = verb
+	if len(grant.Resources) == 0 {
+		return KubernetesVerbGrant{}, fmt.Errorf("verb %q grants no resources", verb)
+	}
+	seen := make(map[string]struct{}, len(grant.Resources))
+	rules := make([]KubernetesResourceRule, len(grant.Resources))
+	for i, rule := range grant.Resources {
+		normalized, err := normalizeResourceRule(rule)
+		if err != nil {
+			return KubernetesVerbGrant{}, fmt.Errorf("resource %d: %w", i, err)
+		}
+		key := fmt.Sprintf("%s/%s/%s/%t", normalized.Group, normalized.Version, normalized.Resource, normalized.ClusterScoped)
+		if _, dup := seen[key]; dup {
+			return KubernetesVerbGrant{}, fmt.Errorf("duplicate resource rule %q (combine its namespaces instead)", normalized.Resource)
+		}
+		seen[key] = struct{}{}
+		rules[i] = normalized
+	}
+	sortResourceRules(rules)
+	grant.Resources = rules
+	return grant, nil
+}
+
+// normalizeResourceRule validates and canonicalizes one resource rule, allowing
+// group/resource wildcards ("*").
+func normalizeResourceRule(rule KubernetesResourceRule) (KubernetesResourceRule, error) {
+	rule.Group = strings.TrimSpace(rule.Group)
+	rule.Resource = strings.TrimSpace(rule.Resource)
+	rule.Version = strings.TrimSpace(rule.Version)
+	if rule.Resource == "" {
+		return KubernetesResourceRule{}, fmt.Errorf(`resource is required (use "*" for any)`)
+	}
+	if rule.Resource == "*" {
+		rule.Version = "" // a wildcard resource's version is guest-supplied
+	} else if rule.Version == "" {
+		rule.Version = "v1"
+	}
+	if err := k8s.ValidateResourceRule(rule.Group, rule.Version, rule.Resource); err != nil {
+		return KubernetesResourceRule{}, err
 	}
 
-	verbs, err := normalizeVerbs(resource.Verbs)
+	namespaces, err := normalizeNamespaces(rule.Namespaces, rule.ClusterScoped)
 	if err != nil {
-		return KubernetesResource{}, err
+		return KubernetesResourceRule{}, err
 	}
-	resource.Verbs = verbs
-
-	namespaces, err := normalizeNamespaces(resource.Namespaces, resource.ClusterScoped)
-	if err != nil {
-		return KubernetesResource{}, err
-	}
-	resource.Namespaces = namespaces
+	rule.Namespaces = namespaces
 
 	// A read-only driver reading Secret values would exfiltrate every credential
-	// in scope, so core Secrets may be granted for their metadata only (names and
-	// labels, never data). Remove this rail deliberately if a use case needs it.
-	if resource.Group == "" && resource.Resource == "secrets" && !resource.MetadataOnly {
-		return KubernetesResource{}, fmt.Errorf(`core "secrets" may only be granted with metadata_only: true (reading Secret data is refused)`)
+	// in scope, so a CONCRETE core Secrets rule must be metadata-only. A wildcard
+	// rule is held to the same floor at request time by the driver (it cannot know
+	// the concrete resource here), so it cannot be used to read Secret data either.
+	if rule.Group == "" && rule.Resource == "secrets" && !rule.MetadataOnly {
+		return KubernetesResourceRule{}, fmt.Errorf(`core "secrets" may only be granted with metadata_only: true (reading Secret data is refused)`)
 	}
 
-	flow, err := resource.FlowPolicy.Normalized()
+	flow, err := rule.FlowPolicy.Normalized()
 	if err != nil {
-		return KubernetesResource{}, err
+		return KubernetesResourceRule{}, err
 	}
-	resource.FlowPolicy = flow
-	return resource, nil
-}
-
-// normalizeVerbs canonicalizes the granted verbs, defaulting an empty list to
-// get. get is the only operation the driver implements today; naming anything
-// else is refused with a clear message, since this is the field a future
-// operation would be enabled through.
-func normalizeVerbs(verbs []string) ([]string, error) {
-	if len(verbs) == 0 {
-		return []string{k8s.VerbGet}, nil
-	}
-	seen := make(map[string]struct{}, len(verbs))
-	out := make([]string, 0, len(verbs))
-	for _, verb := range verbs {
-		verb = strings.ToLower(strings.TrimSpace(verb))
-		if verb != k8s.VerbGet {
-			return nil, fmt.Errorf("verb %q is not available; this driver is get-only for now", verb)
-		}
-		if _, dup := seen[verb]; dup {
-			continue
-		}
-		seen[verb] = struct{}{}
-		out = append(out, verb)
-	}
-	return out, nil
+	rule.FlowPolicy = flow
+	return rule, nil
 }
 
 // normalizeNamespaces validates the namespace allowlist and enforces the scope
@@ -336,37 +357,46 @@ func credentialLabel(name string, auditKey []byte, token string) string {
 
 func durationMS(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
 
-func sortKubernetesResources(resources []KubernetesResource) {
-	sort.Slice(resources, func(i, j int) bool {
-		if resources[i].Group != resources[j].Group {
-			return resources[i].Group < resources[j].Group
+func sortResourceRules(rules []KubernetesResourceRule) {
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].Group != rules[j].Group {
+			return rules[i].Group < rules[j].Group
 		}
-		if resources[i].Resource != resources[j].Resource {
-			return resources[i].Resource < resources[j].Resource
+		if rules[i].Resource != rules[j].Resource {
+			return rules[i].Resource < rules[j].Resource
 		}
-		return resources[i].Version < resources[j].Version
+		return rules[i].Version < rules[j].Version
 	})
 }
 
 // kubernetesDescription composes the published capability's tool doc: the
-// read-only, get-only, rate-limited posture and the allowed resources.
-func kubernetesDescription(resources []KubernetesResource) string {
+// read-only, rate-limited posture and, per verb, the resources it may read.
+func kubernetesDescription(grants []KubernetesVerbGrant) string {
 	var b strings.Builder
-	b.WriteString("Read one Kubernetes object by name (read-only; get only, no list; rate-limited; served from the API server cache). Set resource/group/version to match an allowed resource, plus namespace and name. Allowed resources:")
-	for _, resource := range resources {
-		fmt.Fprintf(&b, "\n- resource %q", resource.Resource)
-		if resource.Group != "" {
-			fmt.Fprintf(&b, " group %q", resource.Group)
-		}
-		scope := "namespaces " + strings.Join(resource.Namespaces, ",")
-		if resource.ClusterScoped {
-			scope = "cluster-scoped"
-		} else if len(resource.Namespaces) == 1 && resource.Namespaces[0] == "*" {
-			scope = "any namespace"
-		}
-		fmt.Fprintf(&b, " version %q — %s, %s", resource.Version, strings.Join(resource.Verbs, "/"), scope)
-		if resource.MetadataOnly {
-			b.WriteString(" (metadata only)")
+	b.WriteString("Read Kubernetes objects (read-only; rate-limited; served from the API server cache). Set resource/group/version to match an allowed resource, plus namespace and name.")
+	for _, grant := range grants {
+		fmt.Fprintf(&b, "\nVerb %q:", grant.Verb)
+		for _, rule := range grant.Resources {
+			name := rule.Resource
+			if name == "*" {
+				name = "* (any resource)"
+			}
+			fmt.Fprintf(&b, "\n- resource %s", name)
+			if rule.Group == "*" {
+				b.WriteString(" group * (any)")
+			} else if rule.Group != "" {
+				fmt.Fprintf(&b, " group %q", rule.Group)
+			}
+			scope := "namespaces " + strings.Join(rule.Namespaces, ",")
+			if rule.ClusterScoped {
+				scope = "cluster-scoped"
+			} else if len(rule.Namespaces) == 1 && rule.Namespaces[0] == "*" {
+				scope = "any namespace"
+			}
+			fmt.Fprintf(&b, " — %s", scope)
+			if rule.MetadataOnly {
+				b.WriteString(" (metadata only)")
+			}
 		}
 	}
 	return b.String()

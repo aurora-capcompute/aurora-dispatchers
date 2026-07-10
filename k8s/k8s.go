@@ -71,18 +71,19 @@ type Response struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-// Permission is one entry of a grant's allowlist: a resource type and the
-// namespaces it may be read in, plus its data-flow policy. It is host-authored
-// trusted policy — the path a request is built from comes from here, never from
-// the guest's raw strings.
+// Permission is one flattened (verb, resource-rule) grant: the verb it enables
+// and the resource it covers, plus scope and flow policy. It is host-authored
+// trusted policy. Group and Resource may be "*", a wildcard matching any: a
+// concrete rule pins the path's group/version/resource, while a wildcard rule
+// lets the guest name them (still strictly validated).
 type Permission struct {
+	// Verb is the operation this permission grants (get today).
+	Verb string
+	// Group is the API group, or "*" for any. Version pins a concrete resource's
+	// version; it is empty for a wildcard resource (the guest supplies it).
 	Group    string
 	Version  string
-	Resource string
-	// Verbs are the operations granted on this resource, keyed by verb name.
-	// Only "get" is currently implemented; the set is the forward-compatible
-	// allowlist a future operation (list, …) slots into.
-	Verbs map[string]bool
+	Resource string // "*" = any resource
 	// Namespaces are the allowed namespaces; "*" means any. The guest still names
 	// a concrete namespace on each get — the wildcard only removes the
 	// restriction on which one. Ignored when ClusterScoped.
@@ -90,22 +91,50 @@ type Permission struct {
 	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
 	// persistentvolumes). Its reads carry no namespace.
 	ClusterScoped bool
-	// MetadataOnly forces reads of this resource to return object metadata only —
-	// never the object body. Set it on resources whose payload is sensitive (a
-	// ConfigMap's data, and — by rule — a Secret's).
+	// MetadataOnly forces reads matched by this rule to return object metadata
+	// only — never the object body.
 	MetadataOnly    bool
 	RequireApproval bool
 	Labels          []string
 	Taints          []string
 }
 
-func (p Permission) allowsNamespace(ns string) bool {
+// matchesResource reports whether this permission covers a request's group and
+// resource, honoring "*" wildcards on either.
+func (p Permission) matchesResource(group, resource string) bool {
+	groupOK := p.Group == "*" || p.Group == group
+	resourceOK := p.Resource == "*" || p.Resource == resource
+	return groupOK && resourceOK
+}
+
+// authorizesNamespace reports whether a request's namespace is allowed: a
+// cluster-scoped rule takes none, a namespaced rule needs one it allows.
+func (p Permission) authorizesNamespace(ns string) bool {
+	if p.ClusterScoped {
+		return ns == ""
+	}
+	if ns == "" {
+		return false
+	}
 	for _, allowed := range p.Namespaces {
 		if allowed == "*" || allowed == ns {
 			return true
 		}
 	}
 	return false
+}
+
+// specificity ranks a matching permission so the most specific rule (concrete
+// resource, concrete group) wins when several cover the same request.
+func (p Permission) specificity() int {
+	score := 0
+	if p.Resource != "*" {
+		score += 2
+	}
+	if p.Group != "*" {
+		score++
+	}
+	return score
 }
 
 // Client issues bounded single-object GET requests to one API server, paced by a
@@ -286,12 +315,9 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err := validateIdentity(&request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	permission, err := h.match(request.Group, request.Version, request.Resource)
+	permission, err := h.authorize(verb, request)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
-	}
-	if !permission.Verbs[verb] {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("%s is not granted on %s", verb, resourceLabel(permission))), nil
 	}
 
 	// Sink guard: refuse before the read if the run has observed a label this
@@ -337,75 +363,90 @@ type prepared struct {
 	summary string // human-facing, for approval prompts
 }
 
-// prepare turns a validated request plus its matched permission into the GET to
-// perform. The path is built from the permission's own group/version/resource
-// (trusted config), with only the validated namespace/name from the guest, and
-// the read is always served from the API server's watch cache.
-func (h Handler) prepare(request Request, permission Permission) (prepared, error) {
-	namespace, err := h.resolveNamespace(request, permission)
-	if err != nil {
-		return prepared{}, err
+// authorize finds the allowlist entry that permits a request: the most specific
+// rule (concrete over wildcard) whose verb, resource, and namespace all admit
+// it. The denial names why — the resource is not granted, or the namespace is.
+func (h Handler) authorize(verb string, r Request) (Permission, error) {
+	best := Permission{}
+	bestScore := -1
+	resourceMatched := false
+	for _, p := range h.Resources {
+		if p.Verb != verb || !p.matchesResource(r.Group, r.Resource) {
+			continue
+		}
+		resourceMatched = true
+		if !p.authorizesNamespace(r.Namespace) {
+			continue
+		}
+		if score := p.specificity(); score > bestScore {
+			best, bestScore = p, score
+		}
 	}
+	if bestScore >= 0 {
+		return best, nil
+	}
+	target := r.Resource
+	if r.Group != "" {
+		target += "." + r.Group
+	}
+	switch {
+	case !resourceMatched:
+		return Permission{}, fmt.Errorf("%s of %q is not granted", verb, target)
+	case r.Namespace == "":
+		return Permission{}, fmt.Errorf("%s of %q requires an allowed namespace", verb, target)
+	default:
+		return Permission{}, fmt.Errorf("%s of %q in namespace %q is not granted", verb, target, r.Namespace)
+	}
+}
+
+// prepare turns a validated request plus its authorizing permission into the GET
+// to perform. A concrete rule pins group/version/resource; a wildcard rule uses
+// the guest's (strictly validated) values. The read is always served from the
+// API server's watch cache, and core Secrets are held metadata-only however they
+// were matched — the floor a wildcard rule cannot lower.
+func (h Handler) prepare(request Request, permission Permission) (prepared, error) {
 	if request.Name == "" {
 		return prepared{}, fmt.Errorf("get requires a name")
 	}
+	group := permission.Group
+	if group == "*" {
+		group = request.Group
+	}
+	resource := permission.Resource
+	if resource == "*" {
+		resource = request.Resource
+	}
+	version := permission.Version
+	if permission.Resource == "*" || permission.Group == "*" || version == "" {
+		// The identity is (partly) guest-chosen, so a concrete version cannot be
+		// pinned from config; take the guest's, defaulting to v1.
+		version = request.Version
+		if version == "" {
+			version = "v1"
+		}
+	}
+	namespace := ""
+	if !permission.ClusterScoped {
+		namespace = request.Namespace
+	}
+
+	metadataOnly := permission.MetadataOnly || (request.MetadataOnly != nil && *request.MetadataOnly)
+	// The Secret-data floor holds regardless of how the read was matched: a
+	// wildcard rule that forgot metadata_only cannot be used to read Secret bodies.
+	if group == "" && resource == "secrets" && !metadataOnly {
+		return prepared{}, fmt.Errorf(`core "secrets" may only be read metadata-only`)
+	}
+
 	query := url.Values{}
 	// Serve from the API server's watch cache, never a quorum read of etcd — the
 	// driver has no path that touches the datastore directly.
 	query.Set("resourceVersion", "0")
-	metadataOnly := permission.MetadataOnly || (request.MetadataOnly != nil && *request.MetadataOnly)
-
-	path := resourcePath(permission.Group, permission.Version, permission.Resource, namespace, request.Name)
 	return prepared{
-		path:    path,
+		path:    resourcePath(group, version, resource, namespace, request.Name),
 		query:   query,
 		accept:  acceptHeader(metadataOnly),
-		summary: summarize(permission, namespace, request.Name),
+		summary: summarize(group, resource, namespace, request.Name),
 	}, nil
-}
-
-// resolveNamespace determines and authorizes the namespace: a cluster-scoped
-// resource takes none; a namespaced get needs a concrete allowed namespace.
-func (h Handler) resolveNamespace(request Request, permission Permission) (string, error) {
-	if permission.ClusterScoped {
-		if request.Namespace != "" {
-			return "", fmt.Errorf("%s is cluster-scoped; do not pass a namespace", resourceLabel(permission))
-		}
-		return "", nil
-	}
-	if request.Namespace == "" {
-		return "", fmt.Errorf("get on %s requires a namespace", resourceLabel(permission))
-	}
-	if !permission.allowsNamespace(request.Namespace) {
-		return "", fmt.Errorf("namespace %q is not granted for %s", request.Namespace, resourceLabel(permission))
-	}
-	return request.Namespace, nil
-}
-
-// match finds the allowlist entry for a request's resource identity. Version may
-// be omitted when the resource is granted at exactly one version.
-func (h Handler) match(group, version, resource string) (Permission, error) {
-	var candidates []Permission
-	for _, permission := range h.Resources {
-		if permission.Group == group && permission.Resource == resource {
-			candidates = append(candidates, permission)
-		}
-	}
-	if len(candidates) == 0 {
-		return Permission{}, fmt.Errorf("resource %q (group %q) is not granted", resource, group)
-	}
-	if version == "" {
-		if len(candidates) == 1 {
-			return candidates[0], nil
-		}
-		return Permission{}, fmt.Errorf("resource %q is granted at multiple versions; specify one", resource)
-	}
-	for _, permission := range candidates {
-		if permission.Version == version {
-			return permission, nil
-		}
-	}
-	return Permission{}, fmt.Errorf("resource %q at version %q is not granted", resource, version)
 }
 
 func (h Handler) credentialLabels() []string {
@@ -534,15 +575,11 @@ func statusMessage(response Response, summary string) string {
 	return fmt.Sprintf("%s: server returned %d", summary, response.Status)
 }
 
-func resourceLabel(permission Permission) string {
-	if permission.Group == "" {
-		return permission.Resource
+func summarize(group, resource, namespace, name string) string {
+	target := resource
+	if group != "" {
+		target = resource + "." + group
 	}
-	return permission.Resource + "." + permission.Group
-}
-
-func summarize(permission Permission, namespace, name string) string {
-	target := resourceLabel(permission)
 	if namespace != "" {
 		target = namespace + "/" + target
 	}

@@ -74,14 +74,12 @@ func newTestHandler(srv *recordingServer, resources []Permission) Handler {
 	}
 }
 
-func getVerb() map[string]bool { return map[string]bool{"get": true} }
-
 func fixtureResources() []Permission {
 	return []Permission{
-		{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(), Namespaces: []string{"default", "kube-system"}, Labels: []string{"k8s"}},
-		{Group: "", Version: "v1", Resource: "nodes", Verbs: getVerb(), ClusterScoped: true},
-		{Group: "apps", Version: "v1", Resource: "deployments", Verbs: getVerb(), Namespaces: []string{"default"}},
-		{Group: "", Version: "v1", Resource: "configmaps", Verbs: getVerb(), Namespaces: []string{"default"}, MetadataOnly: true},
+		{Verb: "get", Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"default", "kube-system"}, Labels: []string{"k8s"}},
+		{Verb: "get", Group: "", Version: "v1", Resource: "nodes", ClusterScoped: true},
+		{Verb: "get", Group: "apps", Version: "v1", Resource: "deployments", Namespaces: []string{"default"}},
+		{Verb: "get", Group: "", Version: "v1", Resource: "configmaps", Namespaces: []string{"default"}, MetadataOnly: true},
 	}
 }
 
@@ -236,8 +234,8 @@ func TestAllowlistEnforcement(t *testing.T) {
 func TestVerbNotGrantedIsRefused(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	// A permission with no verbs grants nothing.
-	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: map[string]bool{}, Namespaces: []string{"default"}}}
+	// A permission for a different verb does not authorize a get.
+	resources := []Permission{{Verb: "watch", Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"default"}}}
 	h := newTestHandler(srv, resources)
 	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
 	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoDenied {
@@ -253,7 +251,7 @@ func TestVerbNotGrantedIsRefused(t *testing.T) {
 func TestWildcardNamespaceAllowsAnyNamespace(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(), Namespaces: []string{"*"}}}
+	resources := []Permission{{Verb: "get", Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"*"}}}
 	h := newTestHandler(srv, resources)
 
 	for _, ns := range []string{"default", "kube-system", "some-team-ns"} {
@@ -269,6 +267,62 @@ func TestWildcardNamespaceAllowsAnyNamespace(t *testing.T) {
 	// A get still requires a namespace even under the wildcard (get is one object).
 	if r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","name":"web-0"}`); r.Status() != sys.StatusFailed {
 		t.Fatalf("get without a namespace = %v, want failed", r.Status())
+	}
+}
+
+// A "*" resource wildcard authorizes a get of any resource the guest names; the
+// path is built from the guest's (validated) group/version/resource.
+func TestWildcardResourceMatchesAny(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	resources := []Permission{{Verb: "get", Group: "*", Resource: "*", Namespaces: []string{"default"}}}
+	h := newTestHandler(srv, resources)
+
+	dispatch(t, h, context.Background(), `{"operation":"get","group":"apps","version":"v1","resource":"replicasets","namespace":"default","name":"web"}`)
+	if _, path, _, _, _, _ := srv.snapshot(); path != "/apis/apps/v1/namespaces/default/replicasets/web" {
+		t.Fatalf("wildcard path = %q", path)
+	}
+	// A namespace outside the rule is still refused.
+	if r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"prod","name":"x"}`); r.Status() != sys.StatusFailed {
+		t.Fatalf("wildcard did not honor the namespace allowlist: %v", r.Status())
+	}
+}
+
+// The Secret-data floor holds even under a wildcard rule that forgot
+// metadata_only: a get of core secrets is refused unless metadata-only.
+func TestWildcardCannotReadSecretData(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	resources := []Permission{{Verb: "get", Group: "*", Resource: "*", Namespaces: []string{"default"}}}
+	h := newTestHandler(srv, resources)
+
+	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"secrets","namespace":"default","name":"db"}`)
+	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("wildcard secret data read = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
+	}
+	if _, _, _, _, _, hits := srv.snapshot(); hits != 0 {
+		t.Fatal("a wildcard secret-data read reached the API server")
+	}
+	// Metadata-only secret read through the wildcard is allowed.
+	r = dispatch(t, h, context.Background(), `{"operation":"get","resource":"secrets","namespace":"default","name":"db","metadata_only":true}`)
+	if r.Status() != sys.StatusResult {
+		t.Fatalf("metadata-only secret read = %v (%s)", r.Status(), r.Message())
+	}
+}
+
+// When a concrete rule and a wildcard rule both cover a request, the more
+// specific concrete rule wins (its metadata policy applies).
+func TestSpecificRulePreferredOverWildcard(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	resources := []Permission{
+		{Verb: "get", Group: "*", Resource: "*", Namespaces: []string{"default"}, MetadataOnly: true},
+		{Verb: "get", Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"default"}}, // full objects
+	}
+	h := newTestHandler(srv, resources)
+	dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
+	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json" {
+		t.Fatalf("concrete rule should win (full object); accept = %q", accept)
 	}
 }
 
@@ -304,7 +358,7 @@ func TestPathInjectionRejected(t *testing.T) {
 func TestFlowTaintBlocksRead(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(),
+	resources := []Permission{{Verb: "get", Group: "", Version: "v1", Resource: "pods",
 		Namespaces: []string{"default"}, Taints: []string{"untrusted_web"}}}
 	h := newTestHandler(srv, resources)
 
@@ -321,7 +375,7 @@ func TestFlowTaintBlocksRead(t *testing.T) {
 func TestApprovalGate(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(),
+	resources := []Permission{{Verb: "get", Group: "", Version: "v1", Resource: "pods",
 		Namespaces: []string{"default"}, RequireApproval: true}}
 	h := newTestHandler(srv, resources)
 	args := `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`
