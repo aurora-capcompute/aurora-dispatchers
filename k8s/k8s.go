@@ -1,20 +1,15 @@
-// Package k8s is a read-only, deliberately gentle Kubernetes capability driver.
-// A grant exposes exactly two operations — get one object, or list a bounded
-// page of a collection — against an author-declared allowlist of resource types.
-// There is no write path anywhere in this package: the client only ever builds
-// GET requests, so no manifest, guest, or bug can turn it into a mutation.
+// Package k8s is a read-only, deliberately minimal Kubernetes capability driver.
+// A grant exposes exactly one operation — get one object by name — against an
+// author-declared allowlist of (resource, namespace) pairs. There is no write
+// path anywhere in this package, and no list, pagination, selector, or
+// etcd-quorum read either: the client only ever builds a single-object GET
+// served from the API server's watch cache. That is the one Kubernetes read
+// that is provably light — O(1), cached, and byte-bounded — so no manifest,
+// guest, or bug can turn this driver into anything heavy on, or destructive to,
+// the cluster.
 //
-// Every request is shaped to be light on the API server:
-//   - reads are served from the API server's watch cache (resourceVersion=0),
-//     not a quorum read of etcd, unless a grant opts into strong reads;
-//   - a list always carries a bounded limit and a server-side timeout, so a
-//     guest cannot ask for an unbounded collection;
-//   - a grant may force metadata-only reads, so object payloads (a ConfigMap's
-//     data, say) never leave the API server at all;
-//   - the response body is byte-bounded;
-//   - a per-grant token-bucket rate limiter paces requests to a fixed
-//     requests-per-second ceiling, and a 429/503 Retry-After pushes the whole
-//     grant into a cooldown.
+// (list and its heavier relatives were intentionally removed for now; they can
+// return later as an additional operation without changing get's shape.)
 package k8s
 
 import (
@@ -32,29 +27,18 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Capability is the name a core.kubernetes grant publishes. The operation (get
-// or list) is the ADT discriminator inside the call args.
+// Capability is the name a core.kubernetes grant publishes. get is the only
+// operation (the ADT discriminator inside the call args).
 const Capability = "core.kubernetes"
 
 const (
-	// VerbGet reads one named object; VerbList reads a bounded page of a
-	// collection. These are the only verbs this driver knows.
-	VerbGet  = "get"
-	VerbList = "list"
+	// VerbGet reads one named object — the only verb this driver knows.
+	VerbGet = "get"
 
 	DefaultTimeout          = 10 * time.Second
 	DefaultMaxResponseBytes = 256 * 1024
-	DefaultListLimit        = 50
-	// DefaultMaxListLimit is the default per-resource page-size ceiling. It is
-	// intentionally small: list is the one read that can be heavy on the API
-	// server, so a grant must opt into a larger page (up to MaxListItemsCeiling)
-	// deliberately.
-	DefaultMaxListLimit = 100
-	// MaxListItemsCeiling is the absolute cap a grant's max_list_items may not
-	// exceed — a page larger than this is never issued, whatever a manifest asks.
-	MaxListItemsCeiling   = 500
-	DefaultRequestsPerSec = 5
-	DefaultBurst          = 5
+	DefaultRequestsPerSec   = 5
+	DefaultBurst            = 5
 
 	// maxRetryAfter caps how long a server-supplied Retry-After can park a grant,
 	// so a misconfigured or hostile endpoint cannot freeze it indefinitely.
@@ -63,62 +47,46 @@ const (
 	userAgent = "aurora-k8s-reader"
 )
 
-// Request is one read a program asks the host to perform. The operation is the
-// ADT discriminator; the resource identity plus namespace/name/selectors are the
+// Request is one read a program asks the host to perform: one object identified
+// by resource type, namespace, and name. The resource/namespace/name are the
 // guest-supplied fields, each validated and checked against the grant's
 // allowlist before any request is built.
 type Request struct {
-	Operation     string `json:"operation"`
-	Group         string `json:"group,omitempty"`
-	Version       string `json:"version,omitempty"`
-	Resource      string `json:"resource"`
-	Namespace     string `json:"namespace,omitempty"`
-	Name          string `json:"name,omitempty"`
-	LabelSelector string `json:"label_selector,omitempty"`
-	FieldSelector string `json:"field_selector,omitempty"`
-	Limit         int    `json:"limit,omitempty"`
-	Continue      string `json:"continue,omitempty"`
-	// MetadataOnly, when set true, forces this read to return only object
-	// metadata even if the grant would allow full objects. It can only tighten:
-	// a grant that forces metadata-only ignores a false here.
+	Operation string `json:"operation"`
+	Group     string `json:"group,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Resource  string `json:"resource"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name"`
+	// MetadataOnly, when set true, returns only object metadata (names, labels,
+	// timestamps) rather than the whole object. It can only tighten: a grant that
+	// forces metadata-only ignores a false here.
 	MetadataOnly *bool `json:"metadata_only,omitempty"`
 }
 
 // Response is what the program observes: the API server's HTTP status and the
-// bounded JSON body (an object for get, a list for list, or a Status object for
-// an error).
+// bounded JSON body (the object, or a Status object for an error).
 type Response struct {
 	Status int             `json:"status"`
 	Body   json.RawMessage `json:"body"`
 }
 
-// Permission is one entry of a grant's resource allowlist: a resource type, the
-// read verbs enabled on it, the namespaces reachable, and its data-flow policy.
-// It is host-authored trusted policy — the path a request is built from comes
-// from here, never from the guest's raw strings.
+// Permission is one entry of a grant's allowlist: a resource type and the
+// namespaces it may be read in, plus its data-flow policy. It is host-authored
+// trusted policy — the path a request is built from comes from here, never from
+// the guest's raw strings.
 type Permission struct {
-	Group         string
-	Version       string
-	Resource      string
-	Verbs         map[string]bool
-	Namespaces    []string // allowed namespaces; "*" means any; ignored when ClusterScoped
-	ClusterScoped bool     // the resource is not namespaced (nodes, namespaces, PVs)
-	// MetadataOnly forces every read of this resource (get and list) to return
-	// object metadata only. FullObjects opts a list into returning full objects —
-	// the heavier mode; by default a list returns metadata only, while a get
-	// (one object, always bounded) returns the full object. The two are mutually
-	// exclusive.
-	MetadataOnly bool
-	FullObjects  bool
-	// AllowPagination lets a list carry a continue token to page through a
-	// collection. Off by default: without it a guest gets at most one bounded
-	// page and cannot walk (or re-walk) the whole collection.
-	AllowPagination bool
-	// MaxListItems is the hard page-size ceiling for this resource's lists
-	// (clamped to MaxListItemsCeiling at build). A request's limit is clamped to
-	// it; 0 means the default.
-	MaxListItems    int
-	StrongRead      bool // read through to etcd instead of the watch cache
+	Group      string
+	Version    string
+	Resource   string
+	Namespaces []string // concrete allowed namespaces; ignored when ClusterScoped
+	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
+	// persistentvolumes). Its reads carry no namespace.
+	ClusterScoped bool
+	// MetadataOnly forces reads of this resource to return object metadata only —
+	// never the object body. Set it on resources whose payload is sensitive (a
+	// ConfigMap's data, and — by rule — a Secret's).
+	MetadataOnly    bool
 	RequireApproval bool
 	Labels          []string
 	Taints          []string
@@ -126,24 +94,15 @@ type Permission struct {
 
 func (p Permission) allowsNamespace(ns string) bool {
 	for _, allowed := range p.Namespaces {
-		if allowed == "*" || allowed == ns {
+		if allowed == ns {
 			return true
 		}
 	}
 	return false
 }
 
-func (p Permission) allowsAnyNamespace() bool {
-	for _, allowed := range p.Namespaces {
-		if allowed == "*" {
-			return true
-		}
-	}
-	return false
-}
-
-// Client issues bounded GET requests to one API server, paced by a rate limiter.
-// The zero value is unusable; build one with NewClient.
+// Client issues bounded single-object GET requests to one API server, paced by a
+// rate limiter. The zero value is unusable; build one with NewClient.
 type Client struct {
 	access   Access
 	http     *http.Client
@@ -194,12 +153,12 @@ func NewClient(a Access, opts Options) (*Client, error) {
 }
 
 // errResponseTooLarge signals the API server returned more than the byte bound;
-// the handler turns it into a hint to narrow the query rather than truncating
-// JSON into something unparseable.
+// the handler turns it into a hint rather than truncating JSON into something
+// unparseable.
 type errResponseTooLarge struct{ limit int64 }
 
 func (e errResponseTooLarge) Error() string {
-	return fmt.Sprintf("response exceeds %d bytes; narrow the query (a smaller limit, or metadata_only)", e.limit)
+	return fmt.Sprintf("response exceeds %d bytes; request metadata_only for a lighter read", e.limit)
 }
 
 // get performs one paced GET. It waits on the rate limiter, attaches the current
@@ -237,8 +196,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, accept 
 	defer response.Body.Close()
 
 	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusServiceUnavailable {
-		// Server push-back: park the whole grant for the requested cooldown (capped),
-		// so the driver actively backs off rather than only pacing its own tokens.
+		// Server push-back: park the whole grant for the requested cooldown (capped).
 		if d := retryAfter(response.Header); d > 0 {
 			if d > maxRetryAfter {
 				d = maxRetryAfter
@@ -304,7 +262,7 @@ type Handler struct {
 
 func (h Handler) Handles(name string) bool { return name == h.Name }
 
-// DispatchCall validates a read against the allowlist and flow policy, paces it,
+// DispatchCall validates a get against the allowlist and flow policy, paces it,
 // and stamps the result's provenance.
 func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if h.Client == nil {
@@ -314,8 +272,7 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
-	verb, err := operationVerb(request.Operation)
-	if err != nil {
+	if err := requireGet(request.Operation); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
 	if err := validateIdentity(&request); err != nil {
@@ -325,25 +282,22 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err != nil {
 		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
 	}
-	if !permission.Verbs[verb] {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("%s is not granted on %s", verb, resourceLabel(permission))), nil
-	}
 
 	// Sink guard: refuse before the read if the run has observed a label this
 	// resource forbids. (Reads have no egress, but a grant may still bar tainted
 	// data from steering which object is fetched.)
 	if blocked := sys.BlockedBy(sys.Taint(ctx), permission.Taints); len(blocked) > 0 {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"flow policy: this run has observed %v, which may not flow into a kubernetes %s", blocked, verb)), nil
+			"flow policy: this run has observed %v, which may not flow into a kubernetes get", blocked)), nil
 	}
 
-	prepared, err := h.prepare(verb, request, permission)
+	prepared, err := h.prepare(request, permission)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
 
 	if permission.RequireApproval && auth.Decision != sys.Approved {
-		return sys.Yield(fmt.Sprintf("Approve kubernetes %s %s", verb, prepared.summary)), nil
+		return sys.Yield(fmt.Sprintf("Approve kubernetes %s", prepared.summary)), nil
 	}
 
 	labels := append(append([]string(nil), permission.Labels...), h.credentialLabels()...)
@@ -361,7 +315,7 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 		// read happened, closing an error-channel launder.
 		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(labels...), nil
 	}
-	return classify(response, verb, prepared.summary).WithLabels(labels...), nil
+	return classify(response, prepared.summary).WithLabels(labels...), nil
 }
 
 // prepared is a request reduced to the concrete HTTP shape the client executes.
@@ -373,88 +327,35 @@ type prepared struct {
 }
 
 // prepare turns a validated request plus its matched permission into the GET to
-// perform, applying every gentleness bound. The path is built from the
-// permission's own group/version/resource (trusted config), with only the
-// validated namespace/name from the guest.
-func (h Handler) prepare(verb string, request Request, permission Permission) (prepared, error) {
-	namespace, err := h.resolveNamespace(verb, request, permission)
+// perform. The path is built from the permission's own group/version/resource
+// (trusted config), with only the validated namespace/name from the guest, and
+// the read is always served from the API server's watch cache.
+func (h Handler) prepare(request Request, permission Permission) (prepared, error) {
+	namespace, err := h.resolveNamespace(request, permission)
 	if err != nil {
 		return prepared{}, err
 	}
+	if request.Name == "" {
+		return prepared{}, fmt.Errorf("get requires a name")
+	}
 	query := url.Values{}
-	// Serve from the API server's watch cache unless the grant demands a strong
-	// (etcd quorum) read — the single biggest lever for being gentle on the
-	// cluster's datastore.
-	if !permission.StrongRead {
-		query.Set("resourceVersion", "0")
-	}
-	// Metadata-only is the gentle default for a list — object payloads (a
-	// ConfigMap's data, a Pod's whole spec) never leave the API server unless the
-	// grant opts into full objects. A get returns the full single object (already
-	// bounded) unless the grant or request restricts it. A request may always
-	// tighten to metadata-only, never loosen.
-	requestMeta := request.MetadataOnly != nil && *request.MetadataOnly
-	metadataOnly := permission.MetadataOnly || requestMeta
-	if verb == VerbList {
-		metadataOnly = metadataOnly || !permission.FullObjects
-	}
+	// Serve from the API server's watch cache, never a quorum read of etcd — the
+	// driver has no path that touches the datastore directly.
+	query.Set("resourceVersion", "0")
+	metadataOnly := permission.MetadataOnly || (request.MetadataOnly != nil && *request.MetadataOnly)
 
-	var name string
-	if verb == VerbGet {
-		if request.Name == "" {
-			return prepared{}, fmt.Errorf("get requires a name")
-		}
-		name = request.Name
-	} else {
-		// A list is always bounded and time-boxed on the server side. The page is
-		// clamped to the grant's ceiling, so a guest cannot ask for a large page.
-		ceiling := permission.MaxListItems
-		if ceiling <= 0 || ceiling > MaxListItemsCeiling {
-			ceiling = DefaultMaxListLimit
-		}
-		limit := request.Limit
-		if limit <= 0 {
-			limit = DefaultListLimit
-		}
-		if limit > ceiling {
-			limit = ceiling
-		}
-		query.Set("limit", strconv.Itoa(limit))
-		if seconds := int(h.Client.timeout / time.Second); seconds >= 1 {
-			query.Set("timeoutSeconds", strconv.Itoa(seconds))
-		}
-		if request.LabelSelector != "" {
-			query.Set("labelSelector", request.LabelSelector)
-		}
-		if request.FieldSelector != "" {
-			query.Set("fieldSelector", request.FieldSelector)
-		}
-		if request.Continue != "" {
-			// Paging can walk (or re-walk) a whole collection, so it is refused
-			// unless the grant explicitly enables it.
-			if !permission.AllowPagination {
-				return prepared{}, fmt.Errorf("pagination is not enabled for %s", resourceLabel(permission))
-			}
-			query.Set("continue", request.Continue)
-			// A continue token pages a prior list; its resourceVersion is pinned by
-			// the token, so resourceVersion must not also be sent.
-			query.Del("resourceVersion")
-		}
-	}
-
-	path := resourcePath(permission.Group, permission.Version, permission.Resource, namespace, name)
+	path := resourcePath(permission.Group, permission.Version, permission.Resource, namespace, request.Name)
 	return prepared{
 		path:    path,
 		query:   query,
-		accept:  acceptHeader(verb, metadataOnly),
-		summary: summarize(verb, permission, namespace, name),
+		accept:  acceptHeader(metadataOnly),
+		summary: summarize(permission, namespace, request.Name),
 	}, nil
 }
 
-// resolveNamespace determines and authorizes the namespace for a request: a
-// cluster-scoped resource takes none; a namespaced get needs an allowed one; a
-// namespaced list may omit it only when the grant allows every namespace.
-func (h Handler) resolveNamespace(verb string, request Request, permission Permission) (string, error) {
+// resolveNamespace determines and authorizes the namespace: a cluster-scoped
+// resource takes none; a namespaced get needs a concrete allowed namespace.
+func (h Handler) resolveNamespace(request Request, permission Permission) (string, error) {
 	if permission.ClusterScoped {
 		if request.Namespace != "" {
 			return "", fmt.Errorf("%s is cluster-scoped; do not pass a namespace", resourceLabel(permission))
@@ -462,13 +363,7 @@ func (h Handler) resolveNamespace(verb string, request Request, permission Permi
 		return "", nil
 	}
 	if request.Namespace == "" {
-		if verb == VerbGet {
-			return "", fmt.Errorf("get on %s requires a namespace", resourceLabel(permission))
-		}
-		if !permission.allowsAnyNamespace() {
-			return "", fmt.Errorf("list on %s requires a namespace (this grant does not allow all-namespace listing)", resourceLabel(permission))
-		}
-		return "", nil // all-namespaces list, still bounded by limit
+		return "", fmt.Errorf("get on %s requires a namespace", resourceLabel(permission))
 	}
 	if !permission.allowsNamespace(request.Namespace) {
 		return "", fmt.Errorf("namespace %q is not granted for %s", request.Namespace, resourceLabel(permission))
@@ -509,18 +404,16 @@ func (h Handler) credentialLabels() []string {
 	return []string{h.CredentialLabel}
 }
 
-// operationVerb maps the ADT operation to a read verb, rejecting anything else —
-// there is no write verb this driver will accept.
-func operationVerb(operation string) (string, error) {
+// requireGet accepts only the get operation — there is no other operation, and
+// no write verb, this driver will run.
+func requireGet(operation string) error {
 	switch operation {
 	case VerbGet:
-		return VerbGet, nil
-	case VerbList:
-		return VerbList, nil
+		return nil
 	case "":
-		return "", fmt.Errorf("operation is required")
+		return fmt.Errorf("operation is required")
 	default:
-		return "", fmt.Errorf("unknown operation %q (want get or list)", operation)
+		return fmt.Errorf("unknown operation %q (only get is supported)", operation)
 	}
 }
 
@@ -550,21 +443,6 @@ func validateIdentity(request *Request) error {
 	}
 	if request.Name != "" {
 		if err := validateName(request.Name); err != nil {
-			return err
-		}
-	}
-	if request.LabelSelector != "" {
-		if err := validateSelector("label_selector", request.LabelSelector); err != nil {
-			return err
-		}
-	}
-	if request.FieldSelector != "" {
-		if err := validateSelector("field_selector", request.FieldSelector); err != nil {
-			return err
-		}
-	}
-	if request.Continue != "" {
-		if err := validateContinue(request.Continue); err != nil {
 			return err
 		}
 	}
@@ -598,29 +476,24 @@ func resourcePath(group, version, resource, namespace, name string) string {
 	return b.String()
 }
 
-// acceptHeader chooses the response representation. Metadata-only reads return
-// PartialObjectMetadata(List) — names, labels, and timestamps but not the object
-// body — the lightest thing the API server can serialize.
-func acceptHeader(verb string, metadataOnly bool) string {
-	if !metadataOnly {
-		return "application/json"
+// acceptHeader chooses the response representation. A metadata-only read returns
+// PartialObjectMetadata — names, labels, and timestamps but not the object body.
+func acceptHeader(metadataOnly bool) string {
+	if metadataOnly {
+		return "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1"
 	}
-	kind := "PartialObjectMetadata"
-	if verb == VerbList {
-		kind = "PartialObjectMetadataList"
-	}
-	return "application/json;as=" + kind + ";g=meta.k8s.io;v=v1"
+	return "application/json"
 }
 
 // classify maps an API server HTTP status to a syscall result: 2xx returns the
 // body, and each error class maps to the errno a program branches on. The
 // (bounded) Status body is surfaced so the model sees the server's own message.
-func classify(response Response, verb, summary string) sys.SyscallResult {
+func classify(response Response, summary string) sys.SyscallResult {
 	switch {
 	case response.Status >= 200 && response.Status < 300:
 		result, err := json.Marshal(response)
 		if err != nil {
-			return sys.FailCode(sys.ErrnoInternal, fmt.Sprintf("encode %s result: %v", verb, err))
+			return sys.FailCode(sys.ErrnoInternal, fmt.Sprintf("encode get result: %v", err))
 		}
 		return sys.Result(result)
 	case response.Status == http.StatusNotFound:
@@ -655,13 +528,10 @@ func resourceLabel(permission Permission) string {
 	return permission.Resource + "." + permission.Group
 }
 
-func summarize(verb string, permission Permission, namespace, name string) string {
+func summarize(permission Permission, namespace, name string) string {
 	target := resourceLabel(permission)
 	if namespace != "" {
 		target = namespace + "/" + target
 	}
-	if name != "" {
-		target += "/" + name
-	}
-	return verb + " " + target
+	return "get " + target + "/" + name
 }

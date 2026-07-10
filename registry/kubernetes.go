@@ -15,46 +15,28 @@ import (
 )
 
 // KubernetesResource is one entry of a core.kubernetes grant's `capabilities`
-// allowlist: a resource type, the read verbs enabled on it (get and/or list —
-// there are no write verbs), the namespaces it reaches, and its data-flow policy.
-// It is the whole allowlist that constrains every read this grant can make.
+// allowlist: a resource type and the namespaces it may be read in, plus its
+// data-flow policy. It is the whole allowlist that constrains every read this
+// grant can make. There is only one operation — get one object by name — so a
+// resource that is granted is a resource the guest may get.
 type KubernetesResource struct {
-	// Verbs are the read verbs enabled: any of "get", "list". Empty grants both.
-	Verbs []string `json:"verbs,omitempty"`
 	// Group/Version/Resource identify the resource type; Group "" is the core
 	// group, Version defaults to v1.
 	Group    string `json:"group,omitempty"`
 	Version  string `json:"version,omitempty"`
 	Resource string `json:"resource"`
-	// Namespaces are the namespaces this resource may be read in; "*" means any
-	// (a list may then omit the namespace to read across all of them, still
-	// bounded by the page limit). Required for a namespaced resource, and must be
-	// empty for a cluster-scoped one.
+	// Namespaces are the concrete namespaces this resource may be read in.
+	// Required for a namespaced resource, and must be empty for a cluster-scoped
+	// one. (No wildcard: a namespace must be named explicitly.)
 	Namespaces []string `json:"namespaces,omitempty"`
 	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
 	// persistentvolumes). Its reads carry no namespace.
 	ClusterScoped bool `json:"cluster_scoped,omitempty"`
-	// MetadataOnly forces every read of this resource (get and list) to return
-	// only object metadata (names, labels, timestamps) — never the object body.
-	// Set it on resources whose payload is sensitive or heavy (a ConfigMap's
-	// data) to keep the values out of the guest entirely.
-	MetadataOnly bool `json:"metadata_only,omitempty"`
-	// FullObjects opts a list into returning full objects. By default a list
-	// returns metadata only (the gentle default — the API server serializes far
-	// less), while a get always returns the full single object. Mutually
-	// exclusive with MetadataOnly.
-	FullObjects bool `json:"full_objects,omitempty"`
-	// AllowPagination lets a list carry a continue token to page through a
-	// collection. Off by default: without it a guest gets at most one bounded
-	// page and cannot walk the whole collection.
-	AllowPagination bool `json:"allow_pagination,omitempty"`
-	// MaxListItems caps this resource's list page size (default 100, hard ceiling
-	// 500). Lower it to keep lists tiny during testing.
-	MaxListItems int `json:"max_list_items,omitempty"`
-	// StrongRead reads through to etcd (a quorum read) instead of the API
-	// server's watch cache. Off by default: cache reads are far lighter on the
-	// cluster, at the cost of possibly-slightly-stale data.
-	StrongRead      bool  `json:"strong_read,omitempty"`
+	// MetadataOnly forces every read of this resource to return only object
+	// metadata (names, labels, timestamps) — never the object body. Set it on
+	// resources whose payload is sensitive or heavy (a ConfigMap's data) to keep
+	// the values out of the guest entirely.
+	MetadataOnly    bool  `json:"metadata_only,omitempty"`
 	RequireApproval *bool `json:"require_approval,omitempty"`
 	FlowPolicy
 }
@@ -81,39 +63,16 @@ type kubernetesConfig struct {
 	Burst             int     `json:"burst,omitempty"`
 }
 
-// kubernetesOperations are the two read verbs, each with the guest-input schema
-// its args carry (minus the `operation` discriminator OperationBranch injects).
-var kubernetesOperations = map[string]struct {
-	schema      json.RawMessage
-	description string
-}{
-	k8s.VerbGet: {
-		schema:      json.RawMessage(`{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string","minLength":1},"namespace":{"type":"string"},"name":{"type":"string","minLength":1},"metadata_only":{"type":"boolean"}},"required":["resource","name"],"additionalProperties":false}`),
-		description: "get: read one object by name (namespace required for namespaced resources)",
-	},
-	k8s.VerbList: {
-		schema:      json.RawMessage(`{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string","minLength":1},"namespace":{"type":"string"},"label_selector":{"type":"string"},"field_selector":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500},"continue":{"type":"string"},"metadata_only":{"type":"boolean"}},"required":["resource"],"additionalProperties":false}`),
-		description: "list: read a bounded page of a collection (optional label_selector/field_selector to narrow, limit to size, continue to page)",
-	},
-}
+// getOperationSchema is the guest-input schema a get call carries (minus the
+// `operation` discriminator OperationBranch injects).
+var getOperationSchema = json.RawMessage(`{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string","minLength":1},"namespace":{"type":"string"},"name":{"type":"string","minLength":1},"metadata_only":{"type":"boolean"}},"required":["resource","name"],"additionalProperties":false}`)
 
 // KubernetesRegistration provides a read-only, rate-limited window onto a
-// Kubernetes API server. It publishes core.kubernetes with get and list
-// operations over an author-declared resource allowlist; there is no write path.
-//
-// The zero value is the safe default. The two fields are a deployment-wide
-// safety valve that no manifest can override — for a testing phase, set
-// DisableList to guarantee the driver is get-only cluster-wide (every grant that
-// enables list then fails to build), or MaxListItems to cap every list far below
-// what any grant asks. The distribution sets these from operator config/env.
-type KubernetesRegistration struct {
-	// DisableList refuses to build any grant that enables the list verb, so only
-	// single-object get reads — provably light — are possible.
-	DisableList bool
-	// MaxListItems, when > 0, caps every resource's list page size to at most
-	// this, regardless of the grant's own max_list_items.
-	MaxListItems int
-}
+// Kubernetes API server. It publishes core.kubernetes with a single operation —
+// get one object by name — over an author-declared resource allowlist. There is
+// no write path, and no list, selector, pagination, or etcd-quorum read: only a
+// single-object read served from the API server's watch cache.
+type KubernetesRegistration struct{}
 
 func (KubernetesRegistration) Matches(syscall string) bool { return syscall == k8s.Capability }
 
@@ -126,7 +85,7 @@ func (KubernetesRegistration) Normalize(_ string, raw json.RawMessage) (json.Raw
 	return json.Marshal(config)
 }
 
-func (r KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
+func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
 	config, resources, err := parseKubernetesConfig(raw)
 	if err != nil {
 		return err
@@ -146,32 +105,14 @@ func (r KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage
 	}
 
 	permissions := make([]k8s.Permission, 0, len(resources))
-	verbsGranted := map[string]bool{}
 	for _, resource := range resources {
-		verbs := map[string]bool{}
-		for _, verb := range resource.Verbs {
-			// Deployment-wide safety valve: refuse to build a list-enabled grant
-			// when the operator has disabled list, so no manifest can bring list
-			// back. The reconciliation guard requires the published set to match the
-			// grant, so this fails loud rather than silently dropping the verb.
-			if verb == k8s.VerbList && r.DisableList {
-				return fmt.Errorf("list is disabled for this deployment; grant only get on %s", resourceDisplayName(resource))
-			}
-			verbs[verb] = true
-			verbsGranted[verb] = true
-		}
 		permissions = append(permissions, k8s.Permission{
 			Group:           resource.Group,
 			Version:         resource.Version,
 			Resource:        resource.Resource,
-			Verbs:           verbs,
 			Namespaces:      resource.Namespaces,
 			ClusterScoped:   resource.ClusterScoped,
 			MetadataOnly:    resource.MetadataOnly,
-			FullObjects:     resource.FullObjects,
-			AllowPagination: resource.AllowPagination,
-			MaxListItems:    r.effectiveListCap(resource.MaxListItems),
-			StrongRead:      resource.StrongRead,
 			RequireApproval: resource.RequireApproval != nil && *resource.RequireApproval,
 			Labels:          resource.Labels,
 			Taints:          resource.Taints,
@@ -185,28 +126,21 @@ func (r KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage
 		Resources:       permissions,
 	})
 
-	branches := make([]json.RawMessage, 0, 2)
-	for _, verb := range []string{k8s.VerbGet, k8s.VerbList} {
-		if !verbsGranted[verb] {
-			continue
-		}
-		branch, err := OperationBranch(verb, kubernetesOperations[verb].schema)
-		if err != nil {
-			return err
-		}
-		branches = append(branches, branch)
+	branch, err := OperationBranch(k8s.VerbGet, getOperationSchema)
+	if err != nil {
+		return err
 	}
 	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name:        k8s.Capability,
-		Description: kubernetesDescription(resources, verbsGranted),
-		InputSchema: OneOfSchema(branches),
+		Description: kubernetesDescription(resources),
+		InputSchema: OneOfSchema([]json.RawMessage{branch}),
 	})
 	return nil
 }
 
 // parseKubernetesConfig validates and canonicalizes a core.kubernetes grant's
 // config — the single parse Normalize and Configure share. It rejects unknown
-// fields, requires at least one resource, and normalizes each resource's verbs,
+// fields, requires at least one resource, and normalizes each resource's
 // version, namespaces, and flow policy.
 func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesResource, error) {
 	var config kubernetesConfig
@@ -274,27 +208,11 @@ func normalizeResource(resource KubernetesResource) (KubernetesResource, error) 
 		return KubernetesResource{}, err
 	}
 
-	verbs, err := normalizeVerbs(resource.Verbs)
-	if err != nil {
-		return KubernetesResource{}, err
-	}
-	resource.Verbs = verbs
-
-	namespaces, err := normalizeNamespaces(resource.Namespaces, resource.ClusterScoped, verbs)
+	namespaces, err := normalizeNamespaces(resource.Namespaces, resource.ClusterScoped)
 	if err != nil {
 		return KubernetesResource{}, err
 	}
 	resource.Namespaces = namespaces
-
-	if resource.MetadataOnly && resource.FullObjects {
-		return KubernetesResource{}, fmt.Errorf("metadata_only and full_objects are mutually exclusive")
-	}
-	if resource.MaxListItems < 0 {
-		return KubernetesResource{}, fmt.Errorf("max_list_items must not be negative")
-	}
-	if resource.MaxListItems > k8s.MaxListItemsCeiling {
-		return KubernetesResource{}, fmt.Errorf("max_list_items %d exceeds the ceiling of %d", resource.MaxListItems, k8s.MaxListItemsCeiling)
-	}
 
 	// A read-only driver reading Secret values would exfiltrate every credential
 	// in scope, so core Secrets may be granted for their metadata only (names and
@@ -311,35 +229,10 @@ func normalizeResource(resource KubernetesResource) (KubernetesResource, error) 
 	return resource, nil
 }
 
-// normalizeVerbs canonicalizes the read verbs, defaulting an empty list to both
-// get and list, and rejecting anything that is not a read.
-func normalizeVerbs(verbs []string) ([]string, error) {
-	if len(verbs) == 0 {
-		return []string{k8s.VerbGet, k8s.VerbList}, nil
-	}
-	seen := make(map[string]struct{}, len(verbs))
-	out := make([]string, 0, len(verbs))
-	for _, verb := range verbs {
-		verb = strings.ToLower(strings.TrimSpace(verb))
-		switch verb {
-		case k8s.VerbGet, k8s.VerbList:
-		default:
-			return nil, fmt.Errorf("verb %q is not a read verb (only get and list are supported)", verb)
-		}
-		if _, dup := seen[verb]; dup {
-			continue
-		}
-		seen[verb] = struct{}{}
-		out = append(out, verb)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-// normalizeNamespaces validates the namespace allowlist and enforces the
-// scope invariant: a cluster-scoped resource takes none, a namespaced one that
-// enables get needs at least one (a bare "*" is enough).
-func normalizeNamespaces(namespaces []string, clusterScoped bool, verbs []string) ([]string, error) {
+// normalizeNamespaces validates the namespace allowlist and enforces the scope
+// invariant: a cluster-scoped resource takes none, a namespaced one needs at
+// least one concrete namespace (no wildcard).
+func normalizeNamespaces(namespaces []string, clusterScoped bool) ([]string, error) {
 	if clusterScoped {
 		if len(namespaces) > 0 {
 			return nil, fmt.Errorf("a cluster-scoped resource must not list namespaces")
@@ -350,10 +243,8 @@ func normalizeNamespaces(namespaces []string, clusterScoped bool, verbs []string
 	out := make([]string, 0, len(namespaces))
 	for _, namespace := range namespaces {
 		namespace = strings.TrimSpace(namespace)
-		if namespace != "*" {
-			if err := k8s.ValidateNamespaceName(namespace); err != nil {
-				return nil, err
-			}
+		if err := k8s.ValidateNamespaceName(namespace); err != nil {
+			return nil, err
 		}
 		if _, dup := seen[namespace]; dup {
 			continue
@@ -362,7 +253,7 @@ func normalizeNamespaces(namespaces []string, clusterScoped bool, verbs []string
 		out = append(out, namespace)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("a namespaced resource must grant at least one namespace (or \"*\")")
+		return nil, fmt.Errorf("a namespaced resource must grant at least one namespace")
 	}
 	sort.Strings(out)
 	return out, nil
@@ -401,30 +292,6 @@ func credentialLabel(name string, auditKey []byte, token string) string {
 
 func durationMS(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
 
-// effectiveListCap folds a grant's max_list_items together with the
-// deployment-wide cap and the absolute ceiling into the one concrete page-size
-// bound the driver enforces — never larger than any of them.
-func (r KubernetesRegistration) effectiveListCap(grantCap int) int {
-	cap := grantCap
-	if cap <= 0 {
-		cap = k8s.DefaultMaxListLimit
-	}
-	if r.MaxListItems > 0 && r.MaxListItems < cap {
-		cap = r.MaxListItems
-	}
-	if cap > k8s.MaxListItemsCeiling {
-		cap = k8s.MaxListItemsCeiling
-	}
-	return cap
-}
-
-func resourceDisplayName(r KubernetesResource) string {
-	if r.Group == "" {
-		return r.Resource
-	}
-	return r.Resource + "." + r.Group
-}
-
 func sortKubernetesResources(resources []KubernetesResource) {
 	sort.Slice(resources, func(i, j int) bool {
 		if resources[i].Group != resources[j].Group {
@@ -438,16 +305,10 @@ func sortKubernetesResources(resources []KubernetesResource) {
 }
 
 // kubernetesDescription composes the published capability's tool doc: the
-// read-only, rate-limited posture and the allowed resources.
-func kubernetesDescription(resources []KubernetesResource, verbsGranted map[string]bool) string {
+// read-only, get-only, rate-limited posture and the allowed resources.
+func kubernetesDescription(resources []KubernetesResource) string {
 	var b strings.Builder
-	b.WriteString("Read Kubernetes objects (read-only, rate-limited, served from the API server cache). Choose an operation:")
-	for _, verb := range []string{k8s.VerbGet, k8s.VerbList} {
-		if verbsGranted[verb] {
-			fmt.Fprintf(&b, "\n- %s", kubernetesOperations[verb].description)
-		}
-	}
-	b.WriteString("\nAllowed resources (set resource/group/version to match one):")
+	b.WriteString("Read one Kubernetes object by name (read-only; get only, no list; rate-limited; served from the API server cache). Set resource/group/version to match an allowed resource, plus namespace and name. Allowed resources:")
 	for _, resource := range resources {
 		fmt.Fprintf(&b, "\n- resource %q", resource.Resource)
 		if resource.Group != "" {
@@ -457,12 +318,9 @@ func kubernetesDescription(resources []KubernetesResource, verbsGranted map[stri
 		if resource.ClusterScoped {
 			scope = "cluster-scoped"
 		}
-		fmt.Fprintf(&b, " version %q — %s, %s", resource.Version, strings.Join(resource.Verbs, "/"), scope)
-		switch {
-		case resource.MetadataOnly:
+		fmt.Fprintf(&b, " version %q — %s", resource.Version, scope)
+		if resource.MetadataOnly {
 			b.WriteString(" (metadata only)")
-		case !resource.FullObjects:
-			b.WriteString(" (list returns metadata only)")
 		}
 	}
 	return b.String()

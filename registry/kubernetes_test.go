@@ -12,8 +12,8 @@ import (
 
 func k8sRegistry() *registry.Registry { return registry.New(registry.KubernetesRegistration{}) }
 
-// Normalize fills defaults (both read verbs, version v1) and canonicalizes
-// namespaces, while preserving a token as a reference (never a resolved value).
+// Normalize fills defaults (version v1) and canonicalizes namespaces, while
+// preserving a token as a reference (never a resolved value).
 func TestKubernetesNormalizeDefaults(t *testing.T) {
 	raw := json.RawMessage(`{"endpoint":"https://api.test:6443","token":{"secret":"K8S_TOKEN"},"capabilities":[{"resource":"pods","namespaces":["kube-system","default"]}]}`)
 	out, err := k8sRegistry().Normalize(k8s.Capability, raw)
@@ -37,9 +37,6 @@ func TestKubernetesNormalizeDefaults(t *testing.T) {
 	if resource.Version != "v1" {
 		t.Fatalf("version default = %q, want v1", resource.Version)
 	}
-	if strings.Join(resource.Verbs, ",") != "get,list" {
-		t.Fatalf("verbs default = %v, want get,list", resource.Verbs)
-	}
 	if strings.Join(resource.Namespaces, ",") != "default,kube-system" {
 		t.Fatalf("namespaces not sorted/canonical: %v", resource.Namespaces)
 	}
@@ -53,15 +50,15 @@ func TestKubernetesConfigErrors(t *testing.T) {
 		"http endpoint":            `{"endpoint":"http://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"]}]}`,
 		"namespaced without ns":    `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods"}]}`,
 		"cluster-scoped with ns":   `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"nodes","cluster_scoped":true,"namespaces":["default"]}]}`,
-		"write verb":               `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["create"]}]}`,
-		"delete verb":              `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["delete"]}]}`,
+		"namespace wildcard":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["*"]}]}`,
 		"secrets without metadata": `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"secrets","namespaces":["default"]}]}`,
 		"duplicate resource":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"]},{"resource":"pods","namespaces":["default"]}]}`,
 		"bad resource name":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"Pods","namespaces":["default"]}]}`,
 		"negative rate":            `{"endpoint":"https://api.test","token":"t","requests_per_second":-1,"capabilities":[{"resource":"pods","namespaces":["default"]}]}`,
 		"unknown field":            `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"]}],"bogus":1}`,
-		"metadata and full":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"metadata_only":true,"full_objects":true}]}`,
-		"max_list_items too big":   `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"max_list_items":100000}]}`,
+		// list, verbs, pagination, etc. were removed: naming them is an unknown field.
+		"verbs field removed":  `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["list"]}]}`,
+		"full_objects removed": `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"full_objects":true}]}`,
 	}
 	reg := k8sRegistry()
 	for name, config := range cases {
@@ -82,10 +79,10 @@ func TestKubernetesSecretsMetadataOnlyAccepted(t *testing.T) {
 }
 
 // Build with an explicit endpoint+token publishes one capability named for the
-// syscall, with a get/list oneOf schema and a handler that routes it — no live
-// cluster required.
+// syscall, with a get-only schema and a handler that routes it — no live cluster
+// required, and no list operation exists.
 func TestKubernetesBuildPublishesCapability(t *testing.T) {
-	config := json.RawMessage(`{"endpoint":"https://api.test:6443","token":{"secret":"K8S_TOKEN"},"capabilities":[{"resource":"pods","namespaces":["default"]},{"resource":"nodes","cluster_scoped":true,"verbs":["list"]}]}`)
+	config := json.RawMessage(`{"endpoint":"https://api.test:6443","token":{"secret":"K8S_TOKEN"},"capabilities":[{"resource":"pods","namespaces":["default"]},{"resource":"nodes","cluster_scoped":true}]}`)
 	services := registry.Services{Secrets: mapResolver{"K8S_TOKEN": "tok-abc"}}
 	built, err := k8sRegistry().Build(context.Background(),
 		[]registry.Entry{{Syscall: k8s.Capability, Config: config}}, services)
@@ -96,11 +93,14 @@ func TestKubernetesBuildPublishesCapability(t *testing.T) {
 		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities, k8s.Capability)
 	}
 	schema := string(built.Capabilities[0].InputSchema)
-	if !strings.Contains(schema, "oneOf") || !strings.Contains(schema, `"const":"get"`) || !strings.Contains(schema, `"const":"list"`) {
-		t.Fatalf("schema is not a get/list oneOf: %s", schema)
+	if !strings.Contains(schema, `"const":"get"`) {
+		t.Fatalf("schema lacks the get operation: %s", schema)
 	}
-	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "pods") || !strings.Contains(desc, "read-only") {
-		t.Fatalf("description missing resources or read-only note: %s", desc)
+	if strings.Contains(schema, `"const":"list"`) {
+		t.Fatalf("schema published a list operation, which was removed: %s", schema)
+	}
+	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "pods") || !strings.Contains(desc, "get only") {
+		t.Fatalf("description missing resources or get-only note: %s", desc)
 	}
 	if len(built.Handlers) != 1 || !built.Handlers[0].Handles(k8s.Capability) {
 		t.Fatal("handler must route by the capability name core.kubernetes")
@@ -115,44 +115,5 @@ func TestKubernetesBuildFailsClosedOnMissingSecret(t *testing.T) {
 		[]registry.Entry{{Syscall: k8s.Capability, Config: config}}, registry.Services{Secrets: mapResolver{}})
 	if err == nil {
 		t.Fatal("build succeeded with an unresolved token secret")
-	}
-}
-
-// The deployment-wide DisableList switch refuses any list-enabled grant, so the
-// driver is get-only cluster-wide regardless of what a manifest asks — the
-// testing-phase guarantee that no (potentially heavy) list can be issued.
-func TestKubernetesDisableListSwitch(t *testing.T) {
-	reg := registry.New(registry.KubernetesRegistration{DisableList: true})
-	listGrant := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["get","list"]}]}`)
-	if _, err := reg.Build(context.Background(),
-		[]registry.Entry{{Syscall: k8s.Capability, Config: listGrant}}, registry.Services{}); err == nil {
-		t.Fatal("a list-enabled grant built despite DisableList")
-	}
-	// Get-only still builds.
-	getGrant := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["get"]}]}`)
-	built, err := reg.Build(context.Background(),
-		[]registry.Entry{{Syscall: k8s.Capability, Config: getGrant}}, registry.Services{})
-	if err != nil {
-		t.Fatalf("get-only grant rejected under DisableList: %v", err)
-	}
-	if schema := string(built.Capabilities[0].InputSchema); strings.Contains(schema, `"const":"list"`) {
-		t.Fatalf("get-only grant published a list branch: %s", schema)
-	}
-}
-
-// A grant limited to list publishes only the list branch — a get is not offered.
-func TestKubernetesListOnlyGrant(t *testing.T) {
-	config := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"events","namespaces":["default"],"verbs":["list"]}]}`)
-	built, err := k8sRegistry().Build(context.Background(),
-		[]registry.Entry{{Syscall: k8s.Capability, Config: config}}, registry.Services{})
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	schema := string(built.Capabilities[0].InputSchema)
-	if strings.Contains(schema, `"const":"get"`) {
-		t.Fatalf("a list-only grant must not publish the get branch: %s", schema)
-	}
-	if !strings.Contains(schema, `"const":"list"`) {
-		t.Fatalf("list branch missing: %s", schema)
 	}
 }

@@ -31,7 +31,7 @@ type recordingServer struct {
 }
 
 func newRecordingServer() *recordingServer {
-	rec := &recordingServer{status: 200, body: `{"kind":"PodList","apiVersion":"v1","items":[]}`}
+	rec := &recordingServer{status: 200, body: `{"kind":"Pod","metadata":{"name":"web-0"}}`}
 	rec.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.mu.Lock()
 		rec.method = r.Method
@@ -76,18 +76,10 @@ func newTestHandler(srv *recordingServer, resources []Permission) Handler {
 
 func fixtureResources() []Permission {
 	return []Permission{
-		// Default posture: get+list, list returns metadata only, no pagination.
-		{Group: "", Version: "v1", Resource: "pods", Verbs: map[string]bool{"get": true, "list": true},
-			Namespaces: []string{"default", "kube-system"}, Labels: []string{"k8s"}},
-		// FullObjects: list returns whole objects (the heavier opt-in).
-		{Group: "", Version: "v1", Resource: "nodes", Verbs: map[string]bool{"get": true, "list": true},
-			ClusterScoped: true, FullObjects: true},
-		// Pagination enabled so a continue token is accepted.
-		{Group: "apps", Version: "v1", Resource: "deployments", Verbs: map[string]bool{"get": true, "list": true},
-			Namespaces: []string{"*"}, AllowPagination: true},
-		// MetadataOnly: both get and list return metadata; list-only.
-		{Group: "", Version: "v1", Resource: "configmaps", Verbs: map[string]bool{"list": true},
-			Namespaces: []string{"default"}, MetadataOnly: true},
+		{Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"default", "kube-system"}, Labels: []string{"k8s"}},
+		{Group: "", Version: "v1", Resource: "nodes", ClusterScoped: true},
+		{Group: "apps", Version: "v1", Resource: "deployments", Namespaces: []string{"default"}},
+		{Group: "", Version: "v1", Resource: "configmaps", Namespaces: []string{"default"}, MetadataOnly: true},
 	}
 }
 
@@ -100,9 +92,8 @@ func dispatch(t *testing.T, h Handler, ctx context.Context, args string) sys.Sys
 	return res
 }
 
-// Every operation the driver performs is a GET — the read-only guarantee. There
-// is no code path that issues any other method, so the fake server must only
-// ever see GET regardless of the operation.
+// Every operation the driver performs is a single-object GET — there is no other
+// verb or method in the code, so the fake server must only ever see GET.
 func TestOnlyEverIssuesGET(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
@@ -111,9 +102,8 @@ func TestOnlyEverIssuesGET(t *testing.T) {
 
 	calls := []string{
 		`{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`,
-		`{"operation":"list","resource":"pods","namespace":"default"}`,
 		`{"operation":"get","resource":"nodes","name":"node-1"}`,
-		`{"operation":"list","group":"apps","resource":"deployments","namespace":"default"}`,
+		`{"operation":"get","group":"apps","resource":"deployments","namespace":"default","name":"web"}`,
 	}
 	for _, args := range calls {
 		if r := dispatch(t, h, ctx, args); r.Status() != sys.StatusResult {
@@ -125,10 +115,27 @@ func TestOnlyEverIssuesGET(t *testing.T) {
 	}
 }
 
+// list (and every other non-get operation) is not accepted — the code has no
+// path for it.
+func TestListIsNotAnOperation(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	h := newTestHandler(srv, fixtureResources())
+	for _, op := range []string{"list", "watch", "create", "delete"} {
+		args := `{"operation":"` + op + `","resource":"pods","namespace":"default"}`
+		r := dispatch(t, h, context.Background(), args)
+		if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+			t.Fatalf("operation %q => %v/%v, want failed/invalid_args", op, r.Status(), r.Errno())
+		}
+		if _, _, _, _, _, hits := srv.snapshot(); hits != 0 {
+			t.Fatalf("operation %q reached the API server", op)
+		}
+	}
+}
+
 func TestGetPathAndCacheRead(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	srv.body = `{"kind":"Pod","metadata":{"name":"web-0"}}`
 	h := newTestHandler(srv, fixtureResources())
 
 	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
@@ -139,8 +146,8 @@ func TestGetPathAndCacheRead(t *testing.T) {
 	if path != "/api/v1/namespaces/default/pods/web-0" {
 		t.Fatalf("path = %q", path)
 	}
-	if !strings.Contains(query, "resourceVersion=0") {
-		t.Fatalf("query %q lacks resourceVersion=0 (cache read)", query)
+	if query != "resourceVersion=0" {
+		t.Fatalf("query = %q, want exactly resourceVersion=0 (cache read, nothing else)", query)
 	}
 	if auth != "Bearer test-token" {
 		t.Fatalf("auth = %q, want the injected bearer token", auth)
@@ -167,127 +174,29 @@ func TestNamedGroupAndClusterScopedPaths(t *testing.T) {
 	}
 }
 
-func TestListBoundsAndSelectors(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	h := newTestHandler(srv, fixtureResources())
-	ctx := context.Background()
-
-	// No limit given => the default page size; a server-side timeout is set.
-	dispatch(t, h, ctx, `{"operation":"list","resource":"pods","namespace":"default"}`)
-	_, _, query, _, _, _ := srv.snapshot()
-	if !strings.Contains(query, "limit=50") {
-		t.Fatalf("default list query %q lacks limit=50", query)
-	}
-	if !strings.Contains(query, "timeoutSeconds=") {
-		t.Fatalf("list query %q lacks a server-side timeout", query)
-	}
-
-	// An over-max limit is clamped to the resource's ceiling — a guest cannot ask
-	// for more than the (small, default) page size.
-	dispatch(t, h, ctx, `{"operation":"list","resource":"pods","namespace":"default","limit":100000}`)
-	if _, _, query, _, _, _ := srv.snapshot(); !strings.Contains(query, "limit=100") {
-		t.Fatalf("over-max limit not clamped to the default ceiling: %q", query)
-	}
-
-	// Selectors pass through url-encoded.
-	dispatch(t, h, ctx, `{"operation":"list","resource":"pods","namespace":"default","label_selector":"app=web","field_selector":"status.phase=Running"}`)
-	_, _, query, _, _, _ = srv.snapshot()
-	if !strings.Contains(query, "labelSelector=app%3Dweb") || !strings.Contains(query, "fieldSelector=status.phase%3DRunning") {
-		t.Fatalf("selectors not encoded into query: %q", query)
-	}
-}
-
-// Pagination is refused unless the grant enables it — a guest cannot walk a
-// whole collection page by page.
-func TestPaginationRefusedByDefault(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	h := newTestHandler(srv, fixtureResources())
-	r := dispatch(t, h, context.Background(), `{"operation":"list","resource":"pods","namespace":"default","continue":"eyJ2IjoxfQ"}`)
-	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("continue on a non-paginating grant = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
-	}
-	if _, _, _, _, _, hits := srv.snapshot(); hits != 0 {
-		t.Fatal("a refused paginating list reached the API server")
-	}
-}
-
-// When a grant enables pagination, a continue token is sent and does not also
-// pin resourceVersion=0 (the token carries its own).
-func TestContinueWhenPaginationEnabled(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	h := newTestHandler(srv, fixtureResources())
-	dispatch(t, h, context.Background(), `{"operation":"list","group":"apps","resource":"deployments","namespace":"default","continue":"eyJ2IjoxfQ"}`)
-	_, _, query, _, _, _ := srv.snapshot()
-	if strings.Contains(query, "resourceVersion=0") {
-		t.Fatalf("continue paging must not also pin resourceVersion=0: %q", query)
-	}
-	if !strings.Contains(query, "continue=eyJ2IjoxfQ") {
-		t.Fatalf("continue token missing: %q", query)
-	}
-}
-
 func TestMetadataOnlyAcceptHeader(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
 	h := newTestHandler(srv, fixtureResources())
 	ctx := context.Background()
 
-	// A plain list defaults to metadata-only — object payloads never leave the
-	// API server unless the grant opts into full objects.
-	dispatch(t, h, ctx, `{"operation":"list","resource":"pods","namespace":"default"}`)
-	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1" {
-		t.Fatalf("default list accept = %q, want metadata-list", accept)
-	}
-
-	// A full-objects grant returns whole objects.
-	dispatch(t, h, ctx, `{"operation":"list","resource":"nodes"}`)
-	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json" {
-		t.Fatalf("full-objects list accept = %q, want application/json", accept)
-	}
-
-	// A MetadataOnly grant is metadata for list too.
-	dispatch(t, h, ctx, `{"operation":"list","resource":"configmaps","namespace":"default"}`)
-	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1" {
-		t.Fatalf("configmap list accept = %q, want metadata-list", accept)
-	}
-
-	// A get returns the full object by default...
+	// A get returns the full object by default.
 	dispatch(t, h, ctx, `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
 	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json" {
 		t.Fatalf("default get accept = %q, want full object", accept)
 	}
-	// ...but a request may tighten it to metadata-only.
+
+	// The grant forces metadata-only on configmaps: the object body never leaves
+	// the API server.
+	dispatch(t, h, ctx, `{"operation":"get","resource":"configmaps","namespace":"default","name":"cfg"}`)
+	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1" {
+		t.Fatalf("configmap get accept = %q, want metadata", accept)
+	}
+
+	// A request may tighten any get to metadata-only.
 	dispatch(t, h, ctx, `{"operation":"get","resource":"pods","namespace":"default","name":"web-0","metadata_only":true}`)
 	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1" {
 		t.Fatalf("metadata-only get accept = %q", accept)
-	}
-}
-
-// A grant's max_list_items caps the page below the default.
-func TestPerResourceListCap(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	resources := []Permission{{Group: "", Version: "v1", Resource: "events",
-		Verbs: map[string]bool{"list": true}, Namespaces: []string{"default"}, MaxListItems: 5}}
-	h := newTestHandler(srv, resources)
-	dispatch(t, h, context.Background(), `{"operation":"list","resource":"events","namespace":"default","limit":100}`)
-	if _, _, query, _, _, _ := srv.snapshot(); !strings.Contains(query, "limit=5") {
-		t.Fatalf("per-resource cap not applied: %q", query)
-	}
-}
-
-// The AllNamespaceList fixture uses deployments, which now enables pagination —
-// keep the all-namespace list metadata default intact.
-func TestFullObjectsClusterList(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	h := newTestHandler(srv, fixtureResources())
-	dispatch(t, h, context.Background(), `{"operation":"list","resource":"nodes"}`)
-	if _, path, _, _, _, _ := srv.snapshot(); path != "/api/v1/nodes" {
-		t.Fatalf("cluster-scoped list path = %q", path)
 	}
 }
 
@@ -302,11 +211,9 @@ func TestAllowlistEnforcement(t *testing.T) {
 		args string
 	}{
 		{"ungranted resource", `{"operation":"get","resource":"secrets","namespace":"default","name":"db"}`},
-		{"ungranted verb", `{"operation":"get","resource":"configmaps","namespace":"default","name":"cfg"}`},
 		{"ungranted namespace", `{"operation":"get","resource":"pods","namespace":"prod","name":"web-0"}`},
 		{"namespace on cluster-scoped", `{"operation":"get","resource":"nodes","namespace":"default","name":"node-1"}`},
 		{"namespaced get without namespace", `{"operation":"get","resource":"pods","name":"web-0"}`},
-		{"all-namespace list without wildcard grant", `{"operation":"list","resource":"pods"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -322,24 +229,8 @@ func TestAllowlistEnforcement(t *testing.T) {
 	}
 }
 
-// A wildcard-namespace grant may list across all namespaces (no namespace in the
-// path), still bounded by the page limit.
-func TestAllNamespaceListWhenWildcarded(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	h := newTestHandler(srv, fixtureResources())
-	dispatch(t, h, context.Background(), `{"operation":"list","group":"apps","resource":"deployments"}`)
-	_, path, query, _, _, _ := srv.snapshot()
-	if path != "/apis/apps/v1/deployments" {
-		t.Fatalf("all-namespace list path = %q", path)
-	}
-	if !strings.Contains(query, "limit=") {
-		t.Fatalf("all-namespace list is unbounded: %q", query)
-	}
-}
-
-// Guest-supplied identity fields that could inject a path or query are refused
-// before any request is built.
+// Guest-supplied identity fields that could inject a path are refused before any
+// request is built.
 func TestPathInjectionRejected(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
@@ -350,7 +241,7 @@ func TestPathInjectionRejected(t *testing.T) {
 		`{"operation":"get","resource":"pods","namespace":"default","name":"../../secrets/db"}`,
 		`{"operation":"get","resource":"pods","namespace":"default/../kube-system","name":"web-0"}`,
 		`{"operation":"get","resource":"pods","namespace":"default","name":"web-0?watch=true"}`,
-		`{"operation":"list","resource":"po ds","namespace":"default"}`,
+		`{"operation":"get","resource":"po ds","namespace":"default","name":"x"}`,
 		`{"operation":"get","resource":"pods","namespace":"DEFAULT","name":"web"}`,
 	}
 	for _, args := range injections {
@@ -371,7 +262,7 @@ func TestFlowTaintBlocksRead(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
 	resources := []Permission{{Group: "", Version: "v1", Resource: "pods",
-		Verbs: map[string]bool{"get": true}, Namespaces: []string{"default"}, Taints: []string{"untrusted_web"}}}
+		Namespaces: []string{"default"}, Taints: []string{"untrusted_web"}}}
 	h := newTestHandler(srv, resources)
 
 	tainted := sys.WithTaint(context.Background(), []string{"untrusted_web"})
@@ -388,18 +279,16 @@ func TestApprovalGate(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
 	resources := []Permission{{Group: "", Version: "v1", Resource: "pods",
-		Verbs: map[string]bool{"get": true}, Namespaces: []string{"default"}, RequireApproval: true}}
+		Namespaces: []string{"default"}, RequireApproval: true}}
 	h := newTestHandler(srv, resources)
 	args := `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`
 
-	// Unapproved yields for sign-off and does not touch the API server.
 	if r := dispatch(t, h, context.Background(), args); r.Status() != sys.StatusYield {
 		t.Fatalf("unapproved = %v, want yield", r.Status())
 	}
 	if _, _, _, _, _, hits := srv.snapshot(); hits != 0 {
 		t.Fatal("an unapproved read reached the API server")
 	}
-	// Approved proceeds.
 	res, err := h.DispatchCall(context.Background(),
 		sys.Syscall{Abi: sys.ABIVersion, Name: Capability, Args: json.RawMessage(args)},
 		sys.Authorization{Decision: sys.Approved})
@@ -445,7 +334,6 @@ func TestRetryAfterParksTheGrant(t *testing.T) {
 	srv.body = `{"kind":"Status","message":"slow down"}`
 	srv.retryAfter = "7"
 	h := newTestHandler(srv, fixtureResources())
-	// Drive the limiter on a virtual clock so we can observe the cooldown.
 	_, clk := driveLimiterOnFakeClock(h.Client.limiter)
 
 	args := `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`
@@ -467,21 +355,20 @@ func driveLimiterOnFakeClock(l *rateLimiter) (*rateLimiter, *fakeClock) {
 	return l, clk
 }
 
-// A body over the byte bound is refused (with a narrow-the-query hint) rather
-// than truncated into unparseable JSON.
+// A body over the byte bound is refused (with a metadata_only hint) rather than
+// truncated into unparseable JSON.
 func TestOversizedResponseRefused(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	big := `{"kind":"PodList","items":["` + strings.Repeat("x", 2048) + `"]}`
-	srv.body = big
+	srv.body = `{"kind":"Pod","data":"` + strings.Repeat("x", 2048) + `"}`
 	h := newTestHandler(srv, fixtureResources())
 	h.Client.maxBytes = 512
 
-	r := dispatch(t, h, context.Background(), `{"operation":"list","resource":"pods","namespace":"default"}`)
+	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
 	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
 		t.Fatalf("oversized => %v/%v, want failed/invalid_args", r.Status(), r.Errno())
 	}
-	if !strings.Contains(r.Message(), "narrow the query") {
+	if !strings.Contains(r.Message(), "metadata_only") {
 		t.Fatalf("oversized message unhelpful: %q", r.Message())
 	}
 }
@@ -491,7 +378,6 @@ func TestOversizedResponseRefused(t *testing.T) {
 func TestResultLabels(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	srv.body = `{"kind":"Pod","metadata":{"name":"web-0"}}`
 	h := newTestHandler(srv, fixtureResources())
 
 	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
