@@ -76,10 +76,13 @@ type Response struct {
 // trusted policy — the path a request is built from comes from here, never from
 // the guest's raw strings.
 type Permission struct {
-	Group      string
-	Version    string
-	Resource   string
-	Namespaces []string // concrete allowed namespaces; ignored when ClusterScoped
+	Group    string
+	Version  string
+	Resource string
+	// Namespaces are the allowed namespaces; "*" means any. The guest still names
+	// a concrete namespace on each get — the wildcard only removes the
+	// restriction on which one. Ignored when ClusterScoped.
+	Namespaces []string
 	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
 	// persistentvolumes). Its reads carry no namespace.
 	ClusterScoped bool
@@ -94,7 +97,7 @@ type Permission struct {
 
 func (p Permission) allowsNamespace(ns string) bool {
 	for _, allowed := range p.Namespaces {
-		if allowed == ns {
+		if allowed == "*" || allowed == ns {
 			return true
 		}
 	}

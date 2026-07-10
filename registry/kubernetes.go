@@ -25,9 +25,10 @@ type KubernetesResource struct {
 	Group    string `json:"group,omitempty"`
 	Version  string `json:"version,omitempty"`
 	Resource string `json:"resource"`
-	// Namespaces are the concrete namespaces this resource may be read in.
-	// Required for a namespaced resource, and must be empty for a cluster-scoped
-	// one. (No wildcard: a namespace must be named explicitly.)
+	// Namespaces are the namespaces this resource may be read in; "*" means any
+	// (the guest still names a concrete namespace per get — the wildcard only
+	// removes the restriction on which). Required for a namespaced resource, and
+	// must be empty for a cluster-scoped one.
 	Namespaces []string `json:"namespaces,omitempty"`
 	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
 	// persistentvolumes). Its reads carry no namespace.
@@ -231,7 +232,7 @@ func normalizeResource(resource KubernetesResource) (KubernetesResource, error) 
 
 // normalizeNamespaces validates the namespace allowlist and enforces the scope
 // invariant: a cluster-scoped resource takes none, a namespaced one needs at
-// least one concrete namespace (no wildcard).
+// least one namespace ("*" — any — is enough).
 func normalizeNamespaces(namespaces []string, clusterScoped bool) ([]string, error) {
 	if clusterScoped {
 		if len(namespaces) > 0 {
@@ -243,8 +244,10 @@ func normalizeNamespaces(namespaces []string, clusterScoped bool) ([]string, err
 	out := make([]string, 0, len(namespaces))
 	for _, namespace := range namespaces {
 		namespace = strings.TrimSpace(namespace)
-		if err := k8s.ValidateNamespaceName(namespace); err != nil {
-			return nil, err
+		if namespace != "*" {
+			if err := k8s.ValidateNamespaceName(namespace); err != nil {
+				return nil, err
+			}
 		}
 		if _, dup := seen[namespace]; dup {
 			continue
@@ -253,7 +256,7 @@ func normalizeNamespaces(namespaces []string, clusterScoped bool) ([]string, err
 		out = append(out, namespace)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("a namespaced resource must grant at least one namespace")
+		return nil, fmt.Errorf("a namespaced resource must grant at least one namespace (or \"*\")")
 	}
 	sort.Strings(out)
 	return out, nil
@@ -317,6 +320,8 @@ func kubernetesDescription(resources []KubernetesResource) string {
 		scope := "namespaces " + strings.Join(resource.Namespaces, ",")
 		if resource.ClusterScoped {
 			scope = "cluster-scoped"
+		} else if len(resource.Namespaces) == 1 && resource.Namespaces[0] == "*" {
+			scope = "any namespace"
 		}
 		fmt.Fprintf(&b, " version %q — %s", resource.Version, scope)
 		if resource.MetadataOnly {

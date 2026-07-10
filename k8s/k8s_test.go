@@ -229,6 +229,30 @@ func TestAllowlistEnforcement(t *testing.T) {
 	}
 }
 
+// A "*" namespace grant authorizes a get in any namespace the guest names — a
+// single object, in whichever namespace, still from cache.
+func TestWildcardNamespaceAllowsAnyNamespace(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"*"}}}
+	h := newTestHandler(srv, resources)
+
+	for _, ns := range []string{"default", "kube-system", "some-team-ns"} {
+		r := dispatch(t, h, context.Background(),
+			`{"operation":"get","resource":"pods","namespace":"`+ns+`","name":"web-0"}`)
+		if r.Status() != sys.StatusResult {
+			t.Fatalf("get in %q = %v (%s)", ns, r.Status(), r.Message())
+		}
+		if _, path, _, _, _, _ := srv.snapshot(); path != "/api/v1/namespaces/"+ns+"/pods/web-0" {
+			t.Fatalf("path = %q for namespace %q", path, ns)
+		}
+	}
+	// A get still requires a namespace even under the wildcard (get is one object).
+	if r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","name":"web-0"}`); r.Status() != sys.StatusFailed {
+		t.Fatalf("get without a namespace = %v, want failed", r.Status())
+	}
+}
+
 // Guest-supplied identity fields that could inject a path are refused before any
 // request is built.
 func TestPathInjectionRejected(t *testing.T) {

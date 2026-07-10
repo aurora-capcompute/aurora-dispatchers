@@ -50,7 +50,6 @@ func TestKubernetesConfigErrors(t *testing.T) {
 		"http endpoint":            `{"endpoint":"http://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"]}]}`,
 		"namespaced without ns":    `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods"}]}`,
 		"cluster-scoped with ns":   `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"nodes","cluster_scoped":true,"namespaces":["default"]}]}`,
-		"namespace wildcard":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["*"]}]}`,
 		"secrets without metadata": `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"secrets","namespaces":["default"]}]}`,
 		"duplicate resource":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"]},{"resource":"pods","namespaces":["default"]}]}`,
 		"bad resource name":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"Pods","namespaces":["default"]}]}`,
@@ -67,6 +66,20 @@ func TestKubernetesConfigErrors(t *testing.T) {
 				t.Fatalf("%s: accepted, want an error", name)
 			}
 		})
+	}
+}
+
+// The "*" namespace wildcard is accepted: a get may then be authorized in any
+// namespace the guest names (still one object at a time).
+func TestKubernetesNamespaceWildcardAccepted(t *testing.T) {
+	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["*"]}]}`)
+	built, err := k8sRegistry().Build(context.Background(),
+		[]registry.Entry{{Syscall: k8s.Capability, Config: raw}}, registry.Services{})
+	if err != nil {
+		t.Fatalf("wildcard namespace rejected: %v", err)
+	}
+	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "any namespace") {
+		t.Fatalf("description should note any-namespace scope: %s", desc)
 	}
 }
 
