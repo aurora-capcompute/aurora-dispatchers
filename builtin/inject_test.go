@@ -108,6 +108,47 @@ func TestInjectHostWinsRegardlessOfGuestHeaderCasing(t *testing.T) {
 	}
 }
 
+// A host-held credential must never ride a plaintext request: if the guest
+// aims the bound host over http, the call is refused rather than downgrading
+// the credential onto a wire a network observer reads.
+func TestInjectRefusesPlaintextHTTP(t *testing.T) {
+	client := &recordingClient{response: internet.Response{Status: 200}}
+	handler := injectingHandler(client)
+
+	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "http://onyx.example.com/v1/data"), sys.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoDenied {
+		t.Fatalf("result = %#v, want failed/denied for a plaintext credential request", result)
+	}
+	if client.seen.URL != "" {
+		t.Fatal("SECURITY: a plaintext credential request reached the network")
+	}
+}
+
+// Loopback is the sole plaintext exemption: a credential bound to localhost may
+// ride http, since there is no wire to sniff.
+func TestInjectAllowsLoopbackHTTP(t *testing.T) {
+	client := &recordingClient{response: internet.Response{Status: 200}}
+	handler := builtin.InternetHandler{
+		Name:    "core.internet",
+		Methods: map[string]builtin.InternetMethodPolicy{"*": {}},
+		Client:  client,
+		Injections: []builtin.CredentialInjection{{
+			Methods: []string{"*"},
+			Host:    "localhost:8080",
+			Headers: map[string]string{"Authorization": "Bearer dev"},
+		}},
+	}
+	if _, err := handler.DispatchCall(context.Background(), internetCall("GET", "http://localhost:8080/v1/data"), sys.Authorization{}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if got := client.seen.Headers["Authorization"]; got != "Bearer dev" {
+		t.Fatalf("loopback http should still attach the credential; Authorization=%q", got)
+	}
+}
+
 // An injection bound to onyx must not attach to any other host, even one the
 // grant otherwise allows — the credential is scoped to its origin.
 func TestInjectScopedToHost(t *testing.T) {

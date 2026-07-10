@@ -126,9 +126,18 @@ func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 	// guest header of the same name, so the guest can neither read nor override
 	// it; the value is never in the call args, so it never reaches the journaled
 	// intent. The returned labels name the credential (not its value) for audit.
-	credentialLabels := h.inject(&request, method)
+	credentialLabels, binding, err := h.inject(&request, method)
+	if err != nil {
+		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
+	}
+	reqCtx := ctx
+	if len(binding.headers) > 0 {
+		// Bind the credential to this request's origin so the client drops it on
+		// any redirect that leaves that origin.
+		reqCtx = internet.WithInjectedCredential(ctx, binding.origin, binding.headers)
+	}
 
-	response, err := h.Client.Do(ctx, request)
+	response, err := h.Client.Do(reqCtx, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
@@ -148,18 +157,35 @@ func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 // inject attaches matching credential headers to the request (host wins over a
 // guest-supplied header) and returns the provenance labels to stamp on the
 // result. The injected values are host-held and never echoed to the guest.
-func (h InternetHandler) inject(request *internet.Request, method string) []string {
+// credentialBinding is the origin a request's injected credential is bound to,
+// plus the header names carrying it — handed to the internet client so a
+// redirect leaving the origin drops them before they reach another host.
+type credentialBinding struct {
+	origin  string
+	headers []string
+}
+
+func (h InternetHandler) inject(request *internet.Request, method string) ([]string, credentialBinding, error) {
 	if len(h.Injections) == 0 {
-		return nil
+		return nil, credentialBinding{}, nil
 	}
-	host := requestHost(request.URL)
-	if host == "" {
-		return nil
+	parsed, err := url.Parse(strings.TrimSpace(request.URL))
+	if err != nil || parsed.Host == "" {
+		return nil, credentialBinding{}, nil
 	}
+	host := strings.ToLower(parsed.Host)
 	var labels []string
+	var injected []string
 	for _, rule := range h.Injections {
 		if !rule.applies(method, host) {
 			continue
+		}
+		// A host-held credential rides only TLS (loopback exempt). The manifest
+		// gate proved the declared origin is https; re-assert it against the
+		// actual request scheme so an http:// request to the bound host cannot
+		// downgrade the credential onto a plaintext wire a network observer reads.
+		if !strings.EqualFold(parsed.Scheme, "https") && !internet.LoopbackHost(host) {
+			return nil, credentialBinding{}, fmt.Errorf("refusing to attach a host-held credential to a non-https request to %s", host)
 		}
 		if request.Headers == nil {
 			request.Headers = make(map[string]string, len(rule.Headers))
@@ -176,18 +202,15 @@ func (h InternetHandler) inject(request *internet.Request, method string) []stri
 				}
 			}
 			request.Headers[name] = value
+			injected = append(injected, name)
 		}
 		labels = append(labels, rule.Labels...)
 	}
-	return labels
-}
-
-func requestHost(rawURL string) string {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed.Host == "" {
-		return ""
+	binding := credentialBinding{}
+	if len(injected) > 0 {
+		binding = credentialBinding{origin: internet.OriginOf(parsed), headers: injected}
 	}
-	return strings.ToLower(parsed.Host)
+	return labels, binding, nil
 }
 
 // methodPolicy merges the wildcard ("*") policy with the request method's own —

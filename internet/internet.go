@@ -25,7 +25,62 @@ const (
 	DefaultTimeout          = 10 * time.Second
 	DefaultMaxResponseBytes = 64 * 1024
 	DefaultMaxRequestBytes  = 1 << 20
+	// DefaultMaxRedirects caps the redirect chain. A custom CheckRedirect
+	// replaces net/http's built-in 10-hop ceiling, so the count must be
+	// re-imposed here or a hostile server can loop the client until timeout.
+	DefaultMaxRedirects = 10
 )
+
+// cgnatBlock is RFC 6598 carrier-grade NAT (100.64.0.0/10). net.IP.IsPrivate
+// does not cover it, yet some clouds route internal/metadata-adjacent services
+// there, so the SSRF guard must treat it as non-public.
+var cgnatBlock = func() *net.IPNet {
+	_, block, _ := net.ParseCIDR("100.64.0.0/10")
+	return block
+}()
+
+// injectedCredential records a host-held credential attached to a request and
+// the origin (scheme://host) it is bound to, threaded through the request
+// context so the redirect handler can drop it the instant a hop leaves that
+// origin — Go's stdlib strips only Authorization/Cookie across hosts, never a
+// custom credential header.
+type injectedCredential struct {
+	origin  string
+	headers []string
+}
+
+type injectedCredentialKey struct{}
+
+// WithInjectedCredential marks ctx with a host-held credential bound to origin
+// (lowercased scheme://host[:port]) and the header names carrying it. The
+// internet client strips those headers on any redirect that leaves the origin.
+func WithInjectedCredential(ctx context.Context, origin string, headers []string) context.Context {
+	return context.WithValue(ctx, injectedCredentialKey{}, injectedCredential{origin: strings.ToLower(origin), headers: headers})
+}
+
+func injectedCredentialFrom(ctx context.Context) (injectedCredential, bool) {
+	v, ok := ctx.Value(injectedCredentialKey{}).(injectedCredential)
+	return v, ok
+}
+
+// OriginOf renders a URL's lowercased scheme://host[:port] — the identity a
+// host-held credential is bound to.
+func OriginOf(u *url.URL) string { return strings.ToLower(u.Scheme + "://" + u.Host) }
+
+// LoopbackHost reports whether host (optionally host:port) is loopback, where
+// plain HTTP carries no wire to sniff — the sole exception to the TLS
+// requirement for credential injection.
+func LoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 // AnyMethod is the method wildcard in a policy rule: it matches every HTTP
 // method against the rule's origin.
@@ -221,7 +276,7 @@ func NewConfiguredClient(policy Policy, timeout time.Duration, maxResponseBytes,
 			if client.AllowPrivateNetwork {
 				return nil
 			}
-			return guardDialAddress(address)
+			return GuardDialAddress(address)
 		},
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -229,7 +284,20 @@ func NewConfiguredClient(policy Policy, timeout time.Duration, maxResponseBytes,
 	client.HTTPClient = &http.Client{
 		Timeout:   client.Timeout,
 		Transport: transport,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= DefaultMaxRedirects {
+				return fmt.Errorf("stopped after %d redirects", DefaultMaxRedirects)
+			}
+			// A host-held credential is bound to the origin it was injected for.
+			// The moment a redirect leaves that origin (a different host, or a
+			// downgrade to http), drop every injected header — otherwise the hop
+			// exfiltrates a custom credential header (X-Api-Key, Private-Token, …)
+			// to another allowlisted host, which Go's stdlib does not prevent.
+			if cred, ok := injectedCredentialFrom(req.Context()); ok && OriginOf(req.URL) != cred.origin {
+				for _, name := range cred.headers {
+					req.Header.Del(name)
+				}
+			}
 			// Re-check every redirect hop against the policy.
 			return client.Policy.Check(req.Method, req.URL)
 		},
@@ -237,12 +305,12 @@ func NewConfiguredClient(policy Policy, timeout time.Duration, maxResponseBytes,
 	return client
 }
 
-// guardDialAddress refuses a connection whose resolved address is not a public
+// GuardDialAddress refuses a connection whose resolved address is not a public
 // unicast IP — loopback, RFC 1918 / ULA private, link-local (incl. the
 // 169.254.169.254 metadata endpoint), unspecified, or multicast. `address` is
 // the post-resolution host:port net.Dialer.Control receives, so this holds even
 // when a public-looking name resolves to an internal address.
-func guardDialAddress(address string) error {
+func GuardDialAddress(address string) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("blocked: unparseable dial address %q", address)
@@ -266,6 +334,9 @@ func isPublicIP(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
+		return false
+	}
+	if cgnatBlock != nil && cgnatBlock.Contains(ip) {
 		return false
 	}
 	return true

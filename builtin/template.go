@@ -110,7 +110,16 @@ func (h TemplateHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	response, err := h.Client.Do(ctx, request)
+	reqCtx := ctx
+	if len(operation.Headers) > 0 {
+		// The operation's host-held headers are bound to its fixed BaseURL origin;
+		// bind them so a redirect off that origin drops them rather than carrying
+		// this operation's credential to another operation's (or an attacker's) host.
+		if u, perr := url.Parse(operation.BaseURL); perr == nil && u.Host != "" {
+			reqCtx = internet.WithInjectedCredential(ctx, internet.OriginOf(u), credentialHeaderNames(operation.Headers))
+		}
+	}
+	response, err := h.Client.Do(reqCtx, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
@@ -122,6 +131,19 @@ func (h TemplateHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 		return result, err
 	}
 	return result.WithLabels(append(append([]string(nil), operation.Labels...), operation.CredentialLabels...)...), nil
+}
+
+// credentialHeaderNames returns the host-held header names bound to an
+// operation's origin, for redirect-time stripping.
+func credentialHeaderNames(headers map[string]string) []string {
+	if len(headers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	return names
 }
 
 // render assembles the concrete request from the operation's fixed template and

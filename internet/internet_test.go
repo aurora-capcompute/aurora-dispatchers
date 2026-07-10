@@ -5,7 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
@@ -175,6 +177,102 @@ func TestRequestBodyIsByteLimited(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "request body exceeds") {
 		t.Fatalf("error = %v, want request-body-exceeds", err)
 	}
+}
+
+// A host-held credential bound to one origin must not ride a redirect to a
+// different origin — even one the policy allowlists — because Go's stdlib
+// strips only Authorization/Cookie, forwarding a custom header (X-Api-Key) that
+// would otherwise reach an attacker-controlled host.
+func TestInjectedCredentialStrippedOnCrossOriginRedirect(t *testing.T) {
+	var targetSaw string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetSaw = r.Header.Get("X-Api-Key")
+		_, _ = w.Write([]byte("done"))
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	// Both origins allowlisted — the exfil precondition (the redirect passes the
+	// policy re-check), so only header stripping stands between the credential
+	// and the other host.
+	client := loopbackClient(mustPolicy(t, "GET:"+source.URL+",GET:"+target.URL))
+	ctx := internet.WithInjectedCredential(context.Background(), internet.OriginOf(mustURL(t, source.URL)), []string{"X-Api-Key"})
+	if _, err := client.Do(ctx, internet.Request{Method: "GET", URL: source.URL, Headers: map[string]string{"X-Api-Key": "SECRET"}}); err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if targetSaw != "" {
+		t.Fatalf("cross-origin redirect leaked the credential: target saw X-Api-Key=%q", targetSaw)
+	}
+}
+
+// A same-origin redirect (path change on the bound host) keeps the credential —
+// stripping is scoped to origin changes, not every hop.
+func TestInjectedCredentialSurvivesSameOriginRedirect(t *testing.T) {
+	var saw string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/b" {
+			http.Redirect(w, r, "/b", http.StatusFound)
+			return
+		}
+		saw = r.Header.Get("X-Api-Key")
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
+	ctx := internet.WithInjectedCredential(context.Background(), internet.OriginOf(mustURL(t, server.URL)), []string{"X-Api-Key"})
+	if _, err := client.Do(ctx, internet.Request{Method: "GET", URL: server.URL + "/a", Headers: map[string]string{"X-Api-Key": "SECRET"}}); err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if saw != "SECRET" {
+		t.Fatalf("same-origin redirect dropped the credential: saw %q", saw)
+	}
+}
+
+// A custom CheckRedirect disables net/http's built-in 10-hop ceiling, so the
+// client must re-impose one or a hostile server loops it until timeout.
+func TestRedirectCountIsCapped(t *testing.T) {
+	var hops int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hops, 1)
+		http.Redirect(w, r, r.URL.String(), http.StatusFound)
+	}))
+	defer server.Close()
+
+	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
+	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
+	if err == nil || !strings.Contains(err.Error(), "stopped after") {
+		t.Fatalf("error = %v, want the redirect cap", err)
+	}
+	if got := atomic.LoadInt32(&hops); got > internet.DefaultMaxRedirects+1 {
+		t.Fatalf("server hit %d times, want capped near %d", got, internet.DefaultMaxRedirects)
+	}
+}
+
+// RFC 6598 carrier-grade NAT (100.64.0.0/10) is not covered by net.IP.IsPrivate
+// but clouds route internal services there — the dial guard must block it.
+func TestGuardDialAddressBlocksCGNAT(t *testing.T) {
+	if err := internet.GuardDialAddress("100.64.0.1:443"); err == nil {
+		t.Fatal("100.64.0.0/10 (CGNAT) should be refused as non-public")
+	}
+	if err := internet.GuardDialAddress("100.127.255.255:443"); err == nil {
+		t.Fatal("100.127.255.255 (top of CGNAT) should be refused")
+	}
+	if err := internet.GuardDialAddress("8.8.8.8:443"); err != nil {
+		t.Fatalf("a public IP must still dial: %v", err)
+	}
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url %q: %v", raw, err)
+	}
+	return u
 }
 
 func mustPolicy(t *testing.T, raw string) internet.Policy {
