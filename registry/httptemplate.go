@@ -206,7 +206,7 @@ func templateOrigin(raw string) (string, error) {
 	if rule.AnyHost {
 		return "", fmt.Errorf("origin must be a specific host, not %q", "*")
 	}
-	if rule.Scheme == "http" && !isLoopbackHost(rule.Host) {
+	if rule.Scheme == "http" && !internet.LoopbackHost(rule.Host) {
 		return "", fmt.Errorf("origin must be https (host %q is plain http)", rule.Host)
 	}
 	return rule.Scheme + "://" + rule.Host, nil

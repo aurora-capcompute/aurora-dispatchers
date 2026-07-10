@@ -280,6 +280,10 @@ func NewConfiguredClient(policy Policy, timeout time.Duration, maxResponseBytes,
 		},
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Bound response header size explicitly — Go's default is 10 MiB — so a
+	// hostile server cannot make the client buffer oversized headers. The body is
+	// separately bounded by readBounded.
+	transport.MaxResponseHeaderBytes = 1 << 20 // 1 MiB
 	transport.DialContext = dialer.DialContext
 	client.HTTPClient = &http.Client{
 		Timeout:   client.Timeout,

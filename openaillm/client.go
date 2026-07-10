@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"syscall"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -106,15 +107,22 @@ func guardedTransport(baseURL string, timeout time.Duration) http.RoundTripper {
 		allowLocal = internet.LoopbackHost(u.Host)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	dialer := &net.Dialer{Timeout: timeout}
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		if !allowLocal {
-			if err := internet.GuardDialAddress(address); err != nil {
-				return nil, err
+	// Guard at Control, not DialContext: Control runs AFTER DNS resolution with
+	// the concrete IP:port, which is exactly what GuardDialAddress checks (and is
+	// where the rebinding defense lives). Guarding DialContext instead would hand
+	// GuardDialAddress the unresolved hostname — which it rejects as "not an IP",
+	// breaking every hostname base_url — and would run before resolution, so a
+	// rebound name would never be checked. This mirrors the internet client.
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			if allowLocal {
+				return nil
 			}
-		}
-		return dialer.DialContext(ctx, network, address)
+			return internet.GuardDialAddress(address)
+		},
 	}
+	transport.DialContext = dialer.DialContext
 	return &boundedRoundTripper{next: transport}
 }
 

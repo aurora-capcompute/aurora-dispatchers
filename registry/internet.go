@@ -196,7 +196,7 @@ func validateInjection(domain string, headers map[string]HeaderInjection) error 
 	if origin.AnyHost {
 		return fmt.Errorf(`inject_headers cannot be used with domain "*": a credential must be bound to a specific host`)
 	}
-	if origin.Scheme == "http" && !isLoopbackHost(origin.Host) {
+	if origin.Scheme == "http" && !internet.LoopbackHost(origin.Host) {
 		return fmt.Errorf("a credential-injecting permission must use https (host %q is plain http)", origin.Host)
 	}
 	for name, injection := range headers {

@@ -124,7 +124,12 @@ func (h TemplateHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(operation.CredentialLabels...), nil
+		// A failed attempt still carries the operation's source labels (plus its
+		// credential provenance): the error is derived from a request to a labeled
+		// origin, so taint the run as if the read happened rather than let a failed
+		// call's message reach a forbidding sink untainted.
+		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(
+			append(append([]string(nil), operation.Labels...), operation.CredentialLabels...)...), nil
 	}
 	result, err := marshalResult(response)
 	if err != nil {

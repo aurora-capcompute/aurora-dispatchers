@@ -6,10 +6,52 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
+
+// Regression: the SSRF guard must run AFTER DNS resolution (on the resolved IP),
+// not on the unresolved hostname. Guarding the hostname rejected every hostname
+// base_url as "not an IP", breaking the driver out of the box. Here a
+// non-loopback base_url arms the guard, and a request via a hostname (localhost)
+// that resolves to the loopback test server must be blocked as "non-public"
+// (post-resolution) — never with the pre-fix "did not resolve to an IP".
+func TestGuardedTransportGuardsResolvedIPNotHostname(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+
+	client := &http.Client{Transport: guardedTransport("https://api.example.com/v1", 5*time.Second)}
+	target := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+	_, err := client.Get(target)
+	if err == nil {
+		t.Fatal("expected the loopback dial to be blocked by the SSRF guard")
+	}
+	if strings.Contains(err.Error(), "did not resolve to an IP") {
+		t.Fatalf("REGRESSION: guard ran on the unresolved hostname (the pre-fix bug): %v", err)
+	}
+	if !strings.Contains(err.Error(), "non-public") {
+		t.Fatalf("expected a post-resolution non-public block, got: %v", err)
+	}
+}
+
+// A loopback base_url (local dev) opts out of the guard, so the dial to the
+// loopback provider succeeds — the driver must work against a local endpoint.
+func TestGuardedTransportAllowsLoopbackBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &http.Client{Transport: guardedTransport(server.URL, 5*time.Second)}
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("a loopback base_url must permit the dial: %v", err)
+	}
+	_ = resp.Body.Close()
+}
 
 func TestSDKClientUsesCompatibleEndpointsAndHeaders(t *testing.T) {
 	var requests int

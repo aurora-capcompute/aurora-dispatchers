@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"strings"
 )
 
@@ -109,19 +108,4 @@ func CredentialFingerprint(auditKey []byte, value string) string {
 	_, _ = mac.Write([]byte("aurora/credential\x00"))
 	_, _ = mac.Write([]byte(value))
 	return hex.EncodeToString(mac.Sum(nil))[:12]
-}
-
-// isLoopbackHost reports whether host (optionally host:port) is loopback, where
-// plain HTTP carries no wire to sniff — the sole exception to the TLS
-// requirement for credential injection.
-func isLoopbackHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

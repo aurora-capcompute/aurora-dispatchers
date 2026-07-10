@@ -347,7 +347,13 @@ func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult,
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	// Return keys relative to the grant's subtree — the guest's view.
+	// NOTE (DIFC): unlike get/search, list returns key NAMES without the stored
+	// values' provenance labels (only this op's own Labels are stamped by the
+	// caller). Key names are thus a low-bandwidth channel that does not carry
+	// value taint — an adversarial guest could encode data in a key name while
+	// tainted and read it back untainted via list elsewhere. Closing this fully
+	// needs Store.List to return per-key labels (a cross-repo interface change);
+	// value confidentiality is unaffected (values re-emerge tainted via get/search).
 	relative := make([]string, 0, len(keys))
 	for _, key := range keys {
 		if h.Subtree != "" {

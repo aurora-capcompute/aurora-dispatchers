@@ -142,8 +142,15 @@ func (h InternetHandler) DispatchCall(ctx context.Context, call sys.Syscall, aut
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		// A failed attempt still records which credential it carried.
-		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(credentialLabels...), nil
+		// A failed attempt still carries the operation's source labels AND its
+		// credential provenance: the error text is derived from the request to a
+		// labeled source (e.g. a redirect target host echoed by the allowlist
+		// check), so taint the run as if the read happened. Conservative — an
+		// attempted read of a labeled source taints, closing an error-channel
+		// launder where a failed fetch's message flows to a forbidding sink
+		// untainted.
+		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(
+			append(append([]string(nil), policy.Labels...), credentialLabels...)...), nil
 	}
 	result, err := marshalResult(response)
 	if err != nil {
