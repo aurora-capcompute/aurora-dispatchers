@@ -79,6 +79,10 @@ type Permission struct {
 	Group    string
 	Version  string
 	Resource string
+	// Verbs are the operations granted on this resource, keyed by verb name.
+	// Only "get" is currently implemented; the set is the forward-compatible
+	// allowlist a future operation (list, …) slots into.
+	Verbs map[string]bool
 	// Namespaces are the allowed namespaces; "*" means any. The guest still names
 	// a concrete namespace on each get — the wildcard only removes the
 	// restriction on which one. Ignored when ClusterScoped.
@@ -275,7 +279,8 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
-	if err := requireGet(request.Operation); err != nil {
+	verb, err := operationVerb(request.Operation)
+	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
 	if err := validateIdentity(&request); err != nil {
@@ -284,6 +289,9 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	permission, err := h.match(request.Group, request.Version, request.Resource)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
+	}
+	if !permission.Verbs[verb] {
+		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("%s is not granted on %s", verb, resourceLabel(permission))), nil
 	}
 
 	// Sink guard: refuse before the read if the run has observed a label this
@@ -407,16 +415,18 @@ func (h Handler) credentialLabels() []string {
 	return []string{h.CredentialLabel}
 }
 
-// requireGet accepts only the get operation — there is no other operation, and
-// no write verb, this driver will run.
-func requireGet(operation string) error {
+// operationVerb maps the call's operation discriminator to a verb. get is the
+// only operation this driver implements; the switch is where a future operation
+// (list, …) is admitted, at which point the per-resource Verbs allowlist already
+// gates it.
+func operationVerb(operation string) (string, error) {
 	switch operation {
 	case VerbGet:
-		return nil
+		return VerbGet, nil
 	case "":
-		return fmt.Errorf("operation is required")
+		return "", fmt.Errorf("operation is required")
 	default:
-		return fmt.Errorf("unknown operation %q (only get is supported)", operation)
+		return "", fmt.Errorf("unknown operation %q (only get is supported)", operation)
 	}
 }
 

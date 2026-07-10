@@ -74,12 +74,14 @@ func newTestHandler(srv *recordingServer, resources []Permission) Handler {
 	}
 }
 
+func getVerb() map[string]bool { return map[string]bool{"get": true} }
+
 func fixtureResources() []Permission {
 	return []Permission{
-		{Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"default", "kube-system"}, Labels: []string{"k8s"}},
-		{Group: "", Version: "v1", Resource: "nodes", ClusterScoped: true},
-		{Group: "apps", Version: "v1", Resource: "deployments", Namespaces: []string{"default"}},
-		{Group: "", Version: "v1", Resource: "configmaps", Namespaces: []string{"default"}, MetadataOnly: true},
+		{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(), Namespaces: []string{"default", "kube-system"}, Labels: []string{"k8s"}},
+		{Group: "", Version: "v1", Resource: "nodes", Verbs: getVerb(), ClusterScoped: true},
+		{Group: "apps", Version: "v1", Resource: "deployments", Verbs: getVerb(), Namespaces: []string{"default"}},
+		{Group: "", Version: "v1", Resource: "configmaps", Verbs: getVerb(), Namespaces: []string{"default"}, MetadataOnly: true},
 	}
 }
 
@@ -229,12 +231,29 @@ func TestAllowlistEnforcement(t *testing.T) {
 	}
 }
 
+// A resource whose grant does not include the verb is refused — the per-resource
+// verb allowlist gates the operation (the hook a future operation slots into).
+func TestVerbNotGrantedIsRefused(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	// A permission with no verbs grants nothing.
+	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: map[string]bool{}, Namespaces: []string{"default"}}}
+	h := newTestHandler(srv, resources)
+	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
+	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoDenied {
+		t.Fatalf("ungranted verb = %v/%v, want failed/denied", r.Status(), r.Errno())
+	}
+	if _, _, _, _, _, hits := srv.snapshot(); hits != 0 {
+		t.Fatal("a verb-denied read reached the API server")
+	}
+}
+
 // A "*" namespace grant authorizes a get in any namespace the guest names — a
 // single object, in whichever namespace, still from cache.
 func TestWildcardNamespaceAllowsAnyNamespace(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"*"}}}
+	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(), Namespaces: []string{"*"}}}
 	h := newTestHandler(srv, resources)
 
 	for _, ns := range []string{"default", "kube-system", "some-team-ns"} {
@@ -285,7 +304,7 @@ func TestPathInjectionRejected(t *testing.T) {
 func TestFlowTaintBlocksRead(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	resources := []Permission{{Group: "", Version: "v1", Resource: "pods",
+	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(),
 		Namespaces: []string{"default"}, Taints: []string{"untrusted_web"}}}
 	h := newTestHandler(srv, resources)
 
@@ -302,7 +321,7 @@ func TestFlowTaintBlocksRead(t *testing.T) {
 func TestApprovalGate(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	resources := []Permission{{Group: "", Version: "v1", Resource: "pods",
+	resources := []Permission{{Group: "", Version: "v1", Resource: "pods", Verbs: getVerb(),
 		Namespaces: []string{"default"}, RequireApproval: true}}
 	h := newTestHandler(srv, resources)
 	args := `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`

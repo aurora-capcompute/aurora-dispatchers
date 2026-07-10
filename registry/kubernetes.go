@@ -20,6 +20,12 @@ import (
 // grant can make. There is only one operation — get one object by name — so a
 // resource that is granted is a resource the guest may get.
 type KubernetesResource struct {
+	// Verbs are the operations granted on this resource. Only "get" is supported
+	// today (the driver is get-only); empty defaults to ["get"]. This is the
+	// explicit, forward-compatible allowlist — when the driver grows another
+	// operation, a grant enables it by naming it here (and it stays disabled
+	// until named). There are no write verbs.
+	Verbs []string `json:"verbs,omitempty"`
 	// Group/Version/Resource identify the resource type; Group "" is the core
 	// group, Version defaults to v1.
 	Group    string `json:"group,omitempty"`
@@ -107,10 +113,15 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 
 	permissions := make([]k8s.Permission, 0, len(resources))
 	for _, resource := range resources {
+		verbs := make(map[string]bool, len(resource.Verbs))
+		for _, verb := range resource.Verbs {
+			verbs[verb] = true
+		}
 		permissions = append(permissions, k8s.Permission{
 			Group:           resource.Group,
 			Version:         resource.Version,
 			Resource:        resource.Resource,
+			Verbs:           verbs,
 			Namespaces:      resource.Namespaces,
 			ClusterScoped:   resource.ClusterScoped,
 			MetadataOnly:    resource.MetadataOnly,
@@ -209,6 +220,12 @@ func normalizeResource(resource KubernetesResource) (KubernetesResource, error) 
 		return KubernetesResource{}, err
 	}
 
+	verbs, err := normalizeVerbs(resource.Verbs)
+	if err != nil {
+		return KubernetesResource{}, err
+	}
+	resource.Verbs = verbs
+
 	namespaces, err := normalizeNamespaces(resource.Namespaces, resource.ClusterScoped)
 	if err != nil {
 		return KubernetesResource{}, err
@@ -228,6 +245,30 @@ func normalizeResource(resource KubernetesResource) (KubernetesResource, error) 
 	}
 	resource.FlowPolicy = flow
 	return resource, nil
+}
+
+// normalizeVerbs canonicalizes the granted verbs, defaulting an empty list to
+// get. get is the only operation the driver implements today; naming anything
+// else is refused with a clear message, since this is the field a future
+// operation would be enabled through.
+func normalizeVerbs(verbs []string) ([]string, error) {
+	if len(verbs) == 0 {
+		return []string{k8s.VerbGet}, nil
+	}
+	seen := make(map[string]struct{}, len(verbs))
+	out := make([]string, 0, len(verbs))
+	for _, verb := range verbs {
+		verb = strings.ToLower(strings.TrimSpace(verb))
+		if verb != k8s.VerbGet {
+			return nil, fmt.Errorf("verb %q is not available; this driver is get-only for now", verb)
+		}
+		if _, dup := seen[verb]; dup {
+			continue
+		}
+		seen[verb] = struct{}{}
+		out = append(out, verb)
+	}
+	return out, nil
 }
 
 // normalizeNamespaces validates the namespace allowlist and enforces the scope
@@ -323,7 +364,7 @@ func kubernetesDescription(resources []KubernetesResource) string {
 		} else if len(resource.Namespaces) == 1 && resource.Namespaces[0] == "*" {
 			scope = "any namespace"
 		}
-		fmt.Fprintf(&b, " version %q — %s", resource.Version, scope)
+		fmt.Fprintf(&b, " version %q — %s, %s", resource.Version, strings.Join(resource.Verbs, "/"), scope)
 		if resource.MetadataOnly {
 			b.WriteString(" (metadata only)")
 		}

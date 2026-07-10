@@ -37,6 +37,9 @@ func TestKubernetesNormalizeDefaults(t *testing.T) {
 	if resource.Version != "v1" {
 		t.Fatalf("version default = %q, want v1", resource.Version)
 	}
+	if strings.Join(resource.Verbs, ",") != "get" {
+		t.Fatalf("verbs default = %v, want [get]", resource.Verbs)
+	}
 	if strings.Join(resource.Namespaces, ",") != "default,kube-system" {
 		t.Fatalf("namespaces not sorted/canonical: %v", resource.Namespaces)
 	}
@@ -55,8 +58,11 @@ func TestKubernetesConfigErrors(t *testing.T) {
 		"bad resource name":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"Pods","namespaces":["default"]}]}`,
 		"negative rate":            `{"endpoint":"https://api.test","token":"t","requests_per_second":-1,"capabilities":[{"resource":"pods","namespaces":["default"]}]}`,
 		"unknown field":            `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"]}],"bogus":1}`,
-		// list, verbs, pagination, etc. were removed: naming them is an unknown field.
-		"verbs field removed":  `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["list"]}]}`,
+		// verbs is a real field, but only get is available for now — list and any
+		// other verb are refused.
+		"list verb unavailable":  `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["list"]}]}`,
+		"write verb unavailable": `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["delete"]}]}`,
+		// pagination/full_objects were deleted, so naming them is an unknown field.
 		"full_objects removed": `{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"full_objects":true}]}`,
 	}
 	reg := k8sRegistry()
@@ -66,6 +72,20 @@ func TestKubernetesConfigErrors(t *testing.T) {
 				t.Fatalf("%s: accepted, want an error", name)
 			}
 		})
+	}
+}
+
+// verbs is an explicit, forward-compatible allowlist: get is accepted and shows
+// in the tool doc, and the resource carries it through to the handler.
+func TestKubernetesExplicitVerbsAccepted(t *testing.T) {
+	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"resource":"pods","namespaces":["default"],"verbs":["get"]}]}`)
+	built, err := k8sRegistry().Build(context.Background(),
+		[]registry.Entry{{Syscall: k8s.Capability, Config: raw}}, registry.Services{})
+	if err != nil {
+		t.Fatalf("explicit verbs:[get] rejected: %v", err)
+	}
+	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "get") {
+		t.Fatalf("description should name the get verb: %s", desc)
 	}
 }
 
