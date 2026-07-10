@@ -22,9 +22,11 @@ var EgressForbidFloor = []string{"secret"}
 
 // WithEgressFloor unions the egress forbid floor onto an operation's declared
 // sink taints. Applied at every network-egress driver's build so a sink is never
-// a fully open channel for the reserved secret class.
+// a fully open channel for the reserved secret class. Returns a fresh slice: for
+// an op with no declared taints, UnionLabels would otherwise return the shared
+// EgressForbidFloor backing array, so every such sink would alias one slice.
 func WithEgressFloor(taints []string) []string {
-	return builtin.UnionLabels(taints, EgressForbidFloor)
+	return append([]string(nil), builtin.UnionLabels(taints, EgressForbidFloor)...)
 }
 
 // FlowPolicy is the per-operation data-flow declaration carried on a leaf grant's
