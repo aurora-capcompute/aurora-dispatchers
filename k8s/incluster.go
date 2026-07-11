@@ -18,10 +18,9 @@ import (
 // re-read rather than captured once; the CA verifies the API server's
 // certificate (the driver never skips verification).
 const (
-	saDir           = "/var/run/secrets/kubernetes.io/serviceaccount"
-	saTokenFile     = saDir + "/token"
-	saCAFile        = saDir + "/ca.crt"
-	saNamespaceFile = saDir + "/namespace"
+	saDir       = "/var/run/secrets/kubernetes.io/serviceaccount"
+	saTokenFile = saDir + "/token"
+	saCAFile    = saDir + "/ca.crt"
 	// tokenReadInterval bounds how stale an in-cluster token read may be: short
 	// enough that a rotated token is picked up promptly, long enough that a burst
 	// of requests does not stat the file every time.
@@ -91,10 +90,9 @@ func (f *fileToken) token() (string, error) {
 // token source. None of it is guest-supplied; the registry threads it into
 // NewClient opaquely (its fields are package-private).
 type Access struct {
-	endpoint  string // https://host[:port], no trailing slash
-	caPEM     []byte
-	tokens    tokenSource
-	namespace string // the pod's own namespace, when known (a convenience default)
+	endpoint string // https://host[:port], no trailing slash
+	caPEM    []byte
+	tokens   tokenSource
 }
 
 // InClusterAccess resolves access from the pod's service account: the API server
@@ -117,15 +115,10 @@ func InClusterAccess() (Access, string, error) {
 	if err != nil {
 		return Access{}, "", err
 	}
-	ns := ""
-	if raw, err := os.ReadFile(saNamespaceFile); err == nil {
-		ns = strings.TrimSpace(string(raw))
-	}
 	return Access{
-		endpoint:  "https://" + net.JoinHostPort(host, port),
-		caPEM:     caPEM,
-		tokens:    token,
-		namespace: ns,
+		endpoint: "https://" + net.JoinHostPort(host, port),
+		caPEM:    caPEM,
+		tokens:   token,
 	}, value, nil
 }
 

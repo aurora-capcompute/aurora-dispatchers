@@ -3,6 +3,7 @@ package openaillm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
@@ -56,6 +57,58 @@ func openaiCall(operation, fields string) sys.Syscall {
 		args = `{"operation":"` + operation + `",` + fields + `}`
 	}
 	return sys.Syscall{Name: SyscallType, Args: json.RawMessage(args)}
+}
+
+// failingClient rejects every call, to exercise the provider-error path.
+type failingClient struct{}
+
+func (failingClient) Chat(context.Context, json.RawMessage) (json.RawMessage, error) {
+	return nil, errProvider
+}
+func (failingClient) Responses(context.Context, json.RawMessage) (json.RawMessage, error) {
+	return nil, errProvider
+}
+func (failingClient) Embeddings(context.Context, json.RawMessage) (json.RawMessage, error) {
+	return nil, errProvider
+}
+func (failingClient) Models(context.Context) (json.RawMessage, error) {
+	return nil, errProvider
+}
+
+var errProvider = errors.New("provider unavailable")
+
+// A failed provider call still contacted a labeled source, so its result must
+// carry the operation's labels — otherwise the error text is an untainted
+// channel a forbidding sink would accept (an error-channel launder). Mirrors the
+// internet/template egress drivers.
+func TestProviderErrorCarriesOperationLabels(t *testing.T) {
+	normalized, err := normalizeSettings(Settings{DefaultModel: "model-a", AllowedModels: []string{"model-a"}})
+	if err != nil {
+		t.Fatalf("settings: %v", err)
+	}
+	handler := NewHandler(failingClient{})
+	handler.AddOperation("chat", normalized, registry.OperationGrant{
+		Operation:  "chat",
+		FlowPolicy: registry.FlowPolicy{Labels: []string{"ai_output"}},
+	})
+	call := openaiCall("chat", `"messages":[{"role":"user","content":"hi"}]`)
+
+	outcome, err := handler.DispatchCall(context.Background(), call, sys.Authorization{Decision: sys.Approved})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if outcome.Status() != sys.StatusFailed || outcome.Errno() != sys.ErrnoTransient {
+		t.Fatalf("outcome = %s/%v, want failed/transient", outcome.Status(), outcome.Errno())
+	}
+	found := false
+	for _, l := range outcome.Labels() {
+		if l == "ai_output" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("failed provider result labels %v lack the operation's source label", outcome.Labels())
+	}
 }
 
 func TestChatYieldsByDefaultAndRunsAfterApproval(t *testing.T) {

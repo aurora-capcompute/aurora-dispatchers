@@ -409,10 +409,25 @@ func failure(ctx context.Context, err error) (sys.SyscallResult, error) {
 	case errors.Is(err, os.ErrNotExist):
 		return sys.FailCode(sys.ErrnoNotFound, "no such file"), nil
 	case errors.Is(err, os.ErrPermission):
-		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
+		return sys.FailCode(sys.ErrnoDenied, scrubPath(err)), nil
 	default:
-		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, scrubPath(err)), nil
 	}
+}
+
+// scrubPath returns an error's message with any absolute host path removed. The
+// os.Open/os.Stat/filepath.EvalSymlinks calls return an *os.PathError whose text
+// embeds the absolute path (root joined with the guest's relative path); the
+// guest is never shown absolute paths anywhere else (reads and approval prompts
+// use the root-relative display path), so an error string must not disclose the
+// mount point either. The underlying error ("permission denied", "is a
+// directory") is kept — only the path is dropped.
+func scrubPath(err error) string {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err.Error()
+	}
+	return err.Error()
 }
 
 func hashBytes(data []byte) string {

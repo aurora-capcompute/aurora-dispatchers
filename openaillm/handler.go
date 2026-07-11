@@ -145,7 +145,7 @@ func (h *Handler) dispatchModelRequest(
 		return sys.SyscallResult{}, err
 	}
 	response, err := invoke(ctx, body)
-	return providerResult(ctx, response, err)
+	return providerResult(ctx, response, capability.labels, err)
 }
 
 func (h *Handler) dispatchModels(ctx context.Context, capability capabilityConfig, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -153,7 +153,7 @@ func (h *Handler) dispatchModels(ctx context.Context, capability capabilityConfi
 		return *outcome, nil
 	}
 	response, err := h.client.Models(ctx)
-	return providerResult(ctx, response, err)
+	return providerResult(ctx, response, capability.labels, err)
 }
 
 func preparePayload(
@@ -213,15 +213,22 @@ func approval(auth sys.Authorization, capability capabilityConfig, summary strin
 	return &outcome
 }
 
-func providerResult(ctx context.Context, response json.RawMessage, err error) (sys.SyscallResult, error) {
+// providerResult classifies the outcome of a provider call the driver actually
+// made. A failure here still contacted a labeled source, so it carries the
+// operation's labels — otherwise a failed call's error text would be an
+// untainted channel a forbidding sink accepts (the error-channel launder the
+// internet/template egress drivers already close). The context-cancellation
+// branch stays label-free: no journaled outcome is produced. The success body
+// is labeled by DispatchCall's tail.
+func providerResult(ctx context.Context, response json.RawMessage, labels []string, err error) (sys.SyscallResult, error) {
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
+		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(labels...), nil
 	}
 	if !json.Valid(response) {
-		return sys.FailCode(sys.ErrnoTransient, "provider returned invalid JSON"), nil
+		return sys.FailCode(sys.ErrnoTransient, "provider returned invalid JSON").WithLabels(labels...), nil
 	}
 	return sys.Result(response), nil
 }

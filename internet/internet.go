@@ -96,12 +96,15 @@ type Request struct {
 }
 
 // Response is the outcome the program observes: the final URL (after redirects),
-// the status code, the response headers, and the bounded body.
+// the status code, the response headers, the bounded body, and whether that body
+// was cut at the byte bound (so a program can tell a partial read from a whole
+// one, as the filesystem and memory drivers already report).
 type Response struct {
-	URL     string            `json:"url"`
-	Status  int               `json:"status"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    string            `json:"body"`
+	URL       string            `json:"url"`
+	Status    int               `json:"status"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Body      string            `json:"body"`
+	Truncated bool              `json:"truncated,omitempty"`
 }
 
 // Policy is a grant's allowlist: the (method, origin) pairs it may request. A
@@ -378,25 +381,29 @@ func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
 		httpRequest.Header.Set(name, value)
 	}
 
-	httpClient := c.HTTPClient
-	if httpClient == nil {
-		httpClient = NewClient(c.Policy).HTTPClient
+	// The client must be built through NewClient/NewConfiguredClient so its
+	// transport carries the SSRF dial guard and configured bounds. Refuse a
+	// zero-value client rather than silently fabricating a default that would
+	// drop that configuration.
+	if c.HTTPClient == nil {
+		return Response{}, fmt.Errorf("internet client is not configured")
 	}
-	httpResponse, err := httpClient.Do(httpRequest)
+	httpResponse, err := c.HTTPClient.Do(httpRequest)
 	if err != nil {
 		return Response{}, err
 	}
 	defer httpResponse.Body.Close()
 
-	content, err := readBounded(httpResponse.Body, c.maxBytes())
+	content, truncated, err := readBounded(httpResponse.Body, c.maxBytes())
 	if err != nil {
 		return Response{}, fmt.Errorf("read response body: %w", err)
 	}
 	return Response{
-		URL:     httpResponse.Request.URL.String(),
-		Status:  httpResponse.StatusCode,
-		Headers: flattenHeader(httpResponse.Header),
-		Body:    content,
+		URL:       httpResponse.Request.URL.String(),
+		Status:    httpResponse.StatusCode,
+		Headers:   flattenHeader(httpResponse.Header),
+		Body:      content,
+		Truncated: truncated,
 	}, nil
 }
 
@@ -438,13 +445,13 @@ func flattenHeader(header http.Header) map[string]string {
 	return out
 }
 
-func readBounded(reader io.Reader, maxBytes int64) (string, error) {
+func readBounded(reader io.Reader, maxBytes int64) (string, bool, error) {
 	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if int64(len(data)) > maxBytes {
-		data = data[:maxBytes]
+		return string(data[:maxBytes]), true, nil
 	}
-	return string(data), nil
+	return string(data), false, nil
 }

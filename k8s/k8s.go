@@ -158,8 +158,19 @@ func NewClient(a Access, opts Options) (*Client, error) {
 		return nil, err
 	}
 	return &Client{
-		access:   a,
-		http:     &http.Client{Timeout: opts.Timeout, Transport: transport},
+		access: a,
+		http: &http.Client{
+			Timeout:   opts.Timeout,
+			Transport: transport,
+			// Never follow redirects. A single-object GET is the whole contract; a
+			// 3xx the driver followed would be a request it never built — the
+			// server could redirect a get to a list, drop the resourceVersion=0
+			// cache guard, reach an ungranted path, or steer past the Secret-data
+			// floor (which checks the prepared URL, not the followed one), all with
+			// the bearer token attached. Return the 3xx verbatim; classify maps it
+			// to an error.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		limiter:  newRateLimiter(opts.RequestsPerSec, opts.Burst),
 		timeout:  opts.Timeout,
 		maxBytes: opts.MaxResponseBytes,
@@ -382,6 +393,12 @@ func (h Handler) prepare(request Request, permission Permission) (prepared, erro
 	if request.Name == "" {
 		return prepared{}, fmt.Errorf("get requires a name")
 	}
+	// The registry always defaults a rule's version to v1, so a blank version
+	// here is a malformed grant, not a guest input. Refuse rather than build a
+	// "/api//…" path — the builder must never trust an unset field.
+	if permission.Version == "" {
+		return prepared{}, fmt.Errorf("resource version is not configured")
+	}
 	namespace := ""
 	if !permission.ClusterScoped {
 		namespace = request.Namespace
@@ -500,11 +517,22 @@ func acceptHeader(metadataOnly bool) string {
 func classify(response Response, summary string) sys.SyscallResult {
 	switch {
 	case response.Status >= 200 && response.Status < 300:
+		// The API server is expected to return a JSON object. Guard the body
+		// rather than let json.Marshal fail on an empty or non-JSON payload (an
+		// intermediary returning HTML, say) and surface a raw encoder error.
+		if !json.Valid(response.Body) {
+			return sys.FailCode(sys.ErrnoTransient, fmt.Sprintf("%s: server returned a non-JSON body", summary))
+		}
 		result, err := json.Marshal(response)
 		if err != nil {
 			return sys.FailCode(sys.ErrnoInternal, fmt.Sprintf("encode get result: %v", err))
 		}
 		return sys.Result(result)
+	case response.Status >= 300 && response.Status < 400:
+		// The client never follows redirects (see NewClient); a 3xx reaching here
+		// is an anomalous or hostile server. Refuse it as invalid, not transient —
+		// re-issuing the same GET will only redirect again.
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("%s: server returned an unexpected redirect (%d)", summary, response.Status))
 	case response.Status == http.StatusNotFound:
 		return sys.FailCode(sys.ErrnoNotFound, statusMessage(response, summary))
 	case response.Status == http.StatusUnauthorized, response.Status == http.StatusForbidden:
@@ -526,6 +554,9 @@ func statusMessage(response Response, summary string) string {
 	_ = json.Unmarshal(response.Body, &status)
 	if status.Message != "" {
 		return fmt.Sprintf("%s (%d): %s", summary, response.Status, status.Message)
+	}
+	if status.Reason != "" {
+		return fmt.Sprintf("%s (%d): %s", summary, response.Status, status.Reason)
 	}
 	return fmt.Sprintf("%s: server returned %d", summary, response.Status)
 }

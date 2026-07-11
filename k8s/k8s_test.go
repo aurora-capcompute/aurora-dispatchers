@@ -3,11 +3,13 @@ package k8s
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -457,6 +459,61 @@ func TestResultLabels(t *testing.T) {
 	}
 	if !got["credential:k8s-serviceaccount@abcdef012345"] {
 		t.Fatalf("result labels %v lack the credential provenance", r.Labels())
+	}
+}
+
+// The client must never follow a redirect: a same-host 302 could turn a
+// single-object GET into a list, drop the resourceVersion=0 cache guard, reach
+// an ungranted path, or steer past the Secret-data floor — with the bearer
+// token attached. This drives the REAL client (via NewClient over TLS), the
+// construction path newTestHandler bypasses, so it pins CheckRedirect.
+func TestClientNeverFollowsRedirects(t *testing.T) {
+	var leaked int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/leaked" {
+			atomic.AddInt32(&leaked, 1)
+			io.WriteString(w, `{"kind":"SecretList"}`)
+			return
+		}
+		http.Redirect(w, r, "/leaked", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	access, err := ExplicitAccess(srv.URL, string(caPEM), "test-token")
+	if err != nil {
+		t.Fatalf("access: %v", err)
+	}
+	client, err := NewClient(access, Options{})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	h := Handler{
+		Name:      Capability,
+		Client:    client,
+		Resources: []Permission{{Verb: "get", Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"default"}}},
+	}
+
+	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
+	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("redirect result = %v/%v, want failed/invalid_args (the 3xx refused, not followed)", r.Status(), r.Errno())
+	}
+	if atomic.LoadInt32(&leaked) != 0 {
+		t.Fatal("the client followed the redirect to the leak target")
+	}
+}
+
+// A 2xx with a non-JSON body is refused as transient rather than surfacing a raw
+// encoder error as an internal fault.
+func TestNonJSONSuccessBodyRefused(t *testing.T) {
+	srv := newRecordingServer()
+	defer srv.Close()
+	srv.body = `<html>not json</html>`
+	h := newTestHandler(srv, fixtureResources())
+
+	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
+	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoTransient {
+		t.Fatalf("non-JSON 200 = %v/%v, want failed/transient", r.Status(), r.Errno())
 	}
 }
 
