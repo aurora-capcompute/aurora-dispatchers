@@ -24,14 +24,12 @@ type KubernetesVerbGrant struct {
 	Resources []KubernetesResourceRule `json:"resources"`
 }
 
-// KubernetesResourceRule is one resource a verb grant covers. Resource "*" (and
-// Group "*") is a wildcard matching any — the guest then names a concrete
-// resource per call, still strictly validated. Each rule carries its own scope
-// (namespaces / cluster-scoped), read shape (metadata_only), approval, and flow.
+// KubernetesResourceRule is one resource a verb grant covers. Each rule carries
+// its own scope (namespaces / cluster-scoped), read shape (metadata_only),
+// approval, and flow policy.
 type KubernetesResourceRule struct {
-	// Group is the API group ("" is the core group, "*" is any). Version pins a
-	// concrete resource's version (default v1); it is ignored for a wildcard
-	// resource.
+	// Group is the API group ("" is the core group). Version pins the resource's
+	// version (default v1).
 	Group    string `json:"group,omitempty"`
 	Version  string `json:"version,omitempty"`
 	Resource string `json:"resource"`
@@ -43,7 +41,7 @@ type KubernetesResourceRule struct {
 	ClusterScoped bool `json:"cluster_scoped,omitempty"`
 	// MetadataOnly forces reads matched by this rule to return only object
 	// metadata — never the object body. (Core Secrets are metadata-only by rule,
-	// enforced even against a wildcard that omits this.)
+	// re-enforced at request time as a hard floor.)
 	MetadataOnly    bool  `json:"metadata_only,omitempty"`
 	RequireApproval *bool `json:"require_approval,omitempty"`
 	FlowPolicy
@@ -252,21 +250,15 @@ func normalizeVerbGrant(grant KubernetesVerbGrant) (KubernetesVerbGrant, error) 
 	return grant, nil
 }
 
-// normalizeResourceRule validates and canonicalizes one resource rule, allowing
-// group/resource wildcards ("*").
+// normalizeResourceRule validates and canonicalizes one resource rule.
 func normalizeResourceRule(rule KubernetesResourceRule) (KubernetesResourceRule, error) {
 	rule.Group = strings.TrimSpace(rule.Group)
 	rule.Resource = strings.TrimSpace(rule.Resource)
 	rule.Version = strings.TrimSpace(rule.Version)
-	if rule.Resource == "" {
-		return KubernetesResourceRule{}, fmt.Errorf(`resource is required (use "*" for any)`)
-	}
-	if rule.Resource == "*" {
-		rule.Version = "" // a wildcard resource's version is guest-supplied
-	} else if rule.Version == "" {
+	if rule.Version == "" {
 		rule.Version = "v1"
 	}
-	if err := k8s.ValidateResourceRule(rule.Group, rule.Version, rule.Resource); err != nil {
+	if err := k8s.ValidateResourceIdentity(rule.Group, rule.Version, rule.Resource); err != nil {
 		return KubernetesResourceRule{}, err
 	}
 
@@ -277,9 +269,9 @@ func normalizeResourceRule(rule KubernetesResourceRule) (KubernetesResourceRule,
 	rule.Namespaces = namespaces
 
 	// A read-only driver reading Secret values would exfiltrate every credential
-	// in scope, so a CONCRETE core Secrets rule must be metadata-only. A wildcard
-	// rule is held to the same floor at request time by the driver (it cannot know
-	// the concrete resource here), so it cannot be used to read Secret data either.
+	// in scope, so a core Secrets rule must be metadata-only. The driver also
+	// re-checks this at request time (a hard floor: a Secret body is unreadable
+	// even if a grant slipped past this validation).
 	if rule.Group == "" && rule.Resource == "secrets" && !rule.MetadataOnly {
 		return KubernetesResourceRule{}, fmt.Errorf(`core "secrets" may only be granted with metadata_only: true (reading Secret data is refused)`)
 	}
@@ -377,14 +369,8 @@ func kubernetesDescription(grants []KubernetesVerbGrant) string {
 	for _, grant := range grants {
 		fmt.Fprintf(&b, "\nVerb %q:", grant.Verb)
 		for _, rule := range grant.Resources {
-			name := rule.Resource
-			if name == "*" {
-				name = "* (any resource)"
-			}
-			fmt.Fprintf(&b, "\n- resource %s", name)
-			if rule.Group == "*" {
-				b.WriteString(" group * (any)")
-			} else if rule.Group != "" {
+			fmt.Fprintf(&b, "\n- resource %q", rule.Resource)
+			if rule.Group != "" {
 				fmt.Fprintf(&b, " group %q", rule.Group)
 			}
 			scope := "namespaces " + strings.Join(rule.Namespaces, ",")

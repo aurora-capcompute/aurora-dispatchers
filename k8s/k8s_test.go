@@ -270,59 +270,29 @@ func TestWildcardNamespaceAllowsAnyNamespace(t *testing.T) {
 	}
 }
 
-// A "*" resource wildcard authorizes a get of any resource the guest names; the
-// path is built from the guest's (validated) group/version/resource.
-func TestWildcardResourceMatchesAny(t *testing.T) {
+// The Secret-data floor is a request-time hard guarantee that does not depend on
+// config validation: a Permission naming core secrets without metadata_only —
+// one normalization should never emit — still cannot read a Secret body. The
+// driver refuses before any request unless the read is metadata-only.
+func TestSecretDataFloorHoldsAtRequestTime(t *testing.T) {
 	srv := newRecordingServer()
 	defer srv.Close()
-	resources := []Permission{{Verb: "get", Group: "*", Resource: "*", Namespaces: []string{"default"}}}
-	h := newTestHandler(srv, resources)
-
-	dispatch(t, h, context.Background(), `{"operation":"get","group":"apps","version":"v1","resource":"replicasets","namespace":"default","name":"web"}`)
-	if _, path, _, _, _, _ := srv.snapshot(); path != "/apis/apps/v1/namespaces/default/replicasets/web" {
-		t.Fatalf("wildcard path = %q", path)
-	}
-	// A namespace outside the rule is still refused.
-	if r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"prod","name":"x"}`); r.Status() != sys.StatusFailed {
-		t.Fatalf("wildcard did not honor the namespace allowlist: %v", r.Status())
-	}
-}
-
-// The Secret-data floor holds even under a wildcard rule that forgot
-// metadata_only: a get of core secrets is refused unless metadata-only.
-func TestWildcardCannotReadSecretData(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	resources := []Permission{{Verb: "get", Group: "*", Resource: "*", Namespaces: []string{"default"}}}
+	// Construct the grant directly, bypassing config normalization, to prove the
+	// floor stands on its own.
+	resources := []Permission{{Verb: "get", Group: "", Version: "v1", Resource: "secrets", Namespaces: []string{"default"}}}
 	h := newTestHandler(srv, resources)
 
 	r := dispatch(t, h, context.Background(), `{"operation":"get","resource":"secrets","namespace":"default","name":"db"}`)
 	if r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("wildcard secret data read = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
+		t.Fatalf("secret data read = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
 	}
 	if _, _, _, _, _, hits := srv.snapshot(); hits != 0 {
-		t.Fatal("a wildcard secret-data read reached the API server")
+		t.Fatal("a secret-data read reached the API server")
 	}
-	// Metadata-only secret read through the wildcard is allowed.
+	// A metadata-only read of the same Secret is allowed — only the body is barred.
 	r = dispatch(t, h, context.Background(), `{"operation":"get","resource":"secrets","namespace":"default","name":"db","metadata_only":true}`)
 	if r.Status() != sys.StatusResult {
 		t.Fatalf("metadata-only secret read = %v (%s)", r.Status(), r.Message())
-	}
-}
-
-// When a concrete rule and a wildcard rule both cover a request, the more
-// specific concrete rule wins (its metadata policy applies).
-func TestSpecificRulePreferredOverWildcard(t *testing.T) {
-	srv := newRecordingServer()
-	defer srv.Close()
-	resources := []Permission{
-		{Verb: "get", Group: "*", Resource: "*", Namespaces: []string{"default"}, MetadataOnly: true},
-		{Verb: "get", Group: "", Version: "v1", Resource: "pods", Namespaces: []string{"default"}}, // full objects
-	}
-	h := newTestHandler(srv, resources)
-	dispatch(t, h, context.Background(), `{"operation":"get","resource":"pods","namespace":"default","name":"web-0"}`)
-	if _, _, _, _, accept, _ := srv.snapshot(); accept != "application/json" {
-		t.Fatalf("concrete rule should win (full object); accept = %q", accept)
 	}
 }
 

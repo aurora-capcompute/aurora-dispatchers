@@ -72,18 +72,17 @@ type Response struct {
 }
 
 // Permission is one flattened (verb, resource-rule) grant: the verb it enables
-// and the resource it covers, plus scope and flow policy. It is host-authored
-// trusted policy. Group and Resource may be "*", a wildcard matching any: a
-// concrete rule pins the path's group/version/resource, while a wildcard rule
-// lets the guest name them (still strictly validated).
+// and the concrete resource it covers, plus scope and flow policy. It is
+// host-authored trusted policy — the path a request is built from comes from
+// here (group/version/resource), never from the guest's raw strings.
 type Permission struct {
 	// Verb is the operation this permission grants (get today).
 	Verb string
-	// Group is the API group, or "*" for any. Version pins a concrete resource's
-	// version; it is empty for a wildcard resource (the guest supplies it).
+	// Group is the API group ("" is the core group). Version pins the resource's
+	// version.
 	Group    string
 	Version  string
-	Resource string // "*" = any resource
+	Resource string
 	// Namespaces are the allowed namespaces; "*" means any. The guest still names
 	// a concrete namespace on each get — the wildcard only removes the
 	// restriction on which one. Ignored when ClusterScoped.
@@ -91,20 +90,12 @@ type Permission struct {
 	// ClusterScoped marks a non-namespaced resource (nodes, namespaces,
 	// persistentvolumes). Its reads carry no namespace.
 	ClusterScoped bool
-	// MetadataOnly forces reads matched by this rule to return object metadata
-	// only — never the object body.
+	// MetadataOnly forces reads matched by this rule to return only object
+	// metadata — never the object body.
 	MetadataOnly    bool
 	RequireApproval bool
 	Labels          []string
 	Taints          []string
-}
-
-// matchesResource reports whether this permission covers a request's group and
-// resource, honoring "*" wildcards on either.
-func (p Permission) matchesResource(group, resource string) bool {
-	groupOK := p.Group == "*" || p.Group == group
-	resourceOK := p.Resource == "*" || p.Resource == resource
-	return groupOK && resourceOK
 }
 
 // authorizesNamespace reports whether a request's namespace is allowed: a
@@ -122,19 +113,6 @@ func (p Permission) authorizesNamespace(ns string) bool {
 		}
 	}
 	return false
-}
-
-// specificity ranks a matching permission so the most specific rule (concrete
-// resource, concrete group) wins when several cover the same request.
-func (p Permission) specificity() int {
-	score := 0
-	if p.Resource != "*" {
-		score += 2
-	}
-	if p.Group != "*" {
-		score++
-	}
-	return score
 }
 
 // Client issues bounded single-object GET requests to one API server, paced by a
@@ -363,27 +341,22 @@ type prepared struct {
 	summary string // human-facing, for approval prompts
 }
 
-// authorize finds the allowlist entry that permits a request: the most specific
-// rule (concrete over wildcard) whose verb, resource, and namespace all admit
-// it. The denial names why — the resource is not granted, or the namespace is.
+// authorize finds the allowlist entry that permits a request: the rule whose
+// verb, group, resource, version, and namespace all admit it. The denial names
+// why — the resource is not granted, or the namespace is.
 func (h Handler) authorize(verb string, r Request) (Permission, error) {
-	best := Permission{}
-	bestScore := -1
 	resourceMatched := false
 	for _, p := range h.Resources {
-		if p.Verb != verb || !p.matchesResource(r.Group, r.Resource) {
+		if p.Verb != verb || p.Group != r.Group || p.Resource != r.Resource {
+			continue
+		}
+		if r.Version != "" && p.Version != r.Version {
 			continue
 		}
 		resourceMatched = true
-		if !p.authorizesNamespace(r.Namespace) {
-			continue
+		if p.authorizesNamespace(r.Namespace) {
+			return p, nil
 		}
-		if score := p.specificity(); score > bestScore {
-			best, bestScore = p, score
-		}
-	}
-	if bestScore >= 0 {
-		return best, nil
 	}
 	target := r.Resource
 	if r.Group != "" {
@@ -400,30 +373,14 @@ func (h Handler) authorize(verb string, r Request) (Permission, error) {
 }
 
 // prepare turns a validated request plus its authorizing permission into the GET
-// to perform. A concrete rule pins group/version/resource; a wildcard rule uses
-// the guest's (strictly validated) values. The read is always served from the
-// API server's watch cache, and core Secrets are held metadata-only however they
-// were matched — the floor a wildcard rule cannot lower.
+// to perform. The path is built from the permission's own group/version/resource
+// (trusted config), with only the validated namespace/name from the guest. The
+// read is always served from the API server's watch cache, and core Secrets are
+// held metadata-only — a request-time floor enforced whatever the matched rule
+// said, so a Secret body is unreadable even if a grant slipped past config.
 func (h Handler) prepare(request Request, permission Permission) (prepared, error) {
 	if request.Name == "" {
 		return prepared{}, fmt.Errorf("get requires a name")
-	}
-	group := permission.Group
-	if group == "*" {
-		group = request.Group
-	}
-	resource := permission.Resource
-	if resource == "*" {
-		resource = request.Resource
-	}
-	version := permission.Version
-	if permission.Resource == "*" || permission.Group == "*" || version == "" {
-		// The identity is (partly) guest-chosen, so a concrete version cannot be
-		// pinned from config; take the guest's, defaulting to v1.
-		version = request.Version
-		if version == "" {
-			version = "v1"
-		}
 	}
 	namespace := ""
 	if !permission.ClusterScoped {
@@ -431,9 +388,7 @@ func (h Handler) prepare(request Request, permission Permission) (prepared, erro
 	}
 
 	metadataOnly := permission.MetadataOnly || (request.MetadataOnly != nil && *request.MetadataOnly)
-	// The Secret-data floor holds regardless of how the read was matched: a
-	// wildcard rule that forgot metadata_only cannot be used to read Secret bodies.
-	if group == "" && resource == "secrets" && !metadataOnly {
+	if permission.Group == "" && permission.Resource == "secrets" && !metadataOnly {
 		return prepared{}, fmt.Errorf(`core "secrets" may only be read metadata-only`)
 	}
 
@@ -442,10 +397,10 @@ func (h Handler) prepare(request Request, permission Permission) (prepared, erro
 	// driver has no path that touches the datastore directly.
 	query.Set("resourceVersion", "0")
 	return prepared{
-		path:    resourcePath(group, version, resource, namespace, request.Name),
+		path:    resourcePath(permission.Group, permission.Version, permission.Resource, namespace, request.Name),
 		query:   query,
 		accept:  acceptHeader(metadataOnly),
-		summary: summarize(group, resource, namespace, request.Name),
+		summary: summarize(permission.Group, permission.Resource, namespace, request.Name),
 	}, nil
 }
 

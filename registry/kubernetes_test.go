@@ -64,6 +64,8 @@ func TestKubernetesConfigErrors(t *testing.T) {
 		"secrets without metadata": `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"secrets","namespaces":["default"]}]}]}`,
 		"duplicate resource rule":  `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["a"]},{"resource":"pods","namespaces":["b"]}]}]}`,
 		"bad resource name":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"Pods","namespaces":["default"]}]}]}`,
+		"resource wildcard":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"*","namespaces":["default"]}]}]}`,
+		"group wildcard":           `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","group":"*","namespaces":["default"]}]}]}`,
 		"negative rate":            `{"endpoint":"https://api.test","token":"t","requests_per_second":-1,"capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
 		"unknown field":            `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}],"bogus":1}`,
 		"unknown rule field":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"],"full_objects":true}]}]}`,
@@ -78,16 +80,17 @@ func TestKubernetesConfigErrors(t *testing.T) {
 	}
 }
 
-// Wildcards on resource and group are accepted, and "*" namespace too.
-func TestKubernetesWildcardsAccepted(t *testing.T) {
-	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"*","group":"*","namespaces":["*"]},{"resource":"*","cluster_scoped":true}]}]}`)
+// The namespace "*" wildcard is accepted (any namespace, one object at a time),
+// while resource and group must be concrete — no resource/group wildcard exists.
+func TestKubernetesNamespaceWildcardAccepted(t *testing.T) {
+	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["*"]}]}]}`)
 	built, err := k8sRegistry().Build(context.Background(),
 		[]registry.Entry{{Syscall: k8s.Capability, Config: raw}}, registry.Services{})
 	if err != nil {
-		t.Fatalf("wildcard config rejected: %v", err)
+		t.Fatalf("namespace wildcard config rejected: %v", err)
 	}
-	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "any resource") {
-		t.Fatalf("description should note the resource wildcard: %s", desc)
+	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "any namespace") {
+		t.Fatalf("description should note the namespace wildcard: %s", desc)
 	}
 }
 
