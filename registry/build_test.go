@@ -42,10 +42,10 @@ func TestBuildRejectsUnknownSyscall(t *testing.T) {
 
 // A hidden grant keeps its published capability off the discoverable menu.
 func TestBuildAppliesHidden(t *testing.T) {
-	services := registry.Services{Tenant: "acme", MemoryStore: memory.NewMapStore()}
+	services := registry.Services{Tenant: "acme", SessionID: "s1", ProcessID: "p1", MemoryStore: memory.NewMapStore()}
 	built, err := registry.Default().Build(context.Background(), []registry.Entry{{
 		Syscall: "core.memory",
-		Config:  json.RawMessage(`{"capabilities":[{"operation":"get"}]}`),
+		Config:  json.RawMessage(`{"capabilities":[{"scope":"session","operations":["get"]}]}`),
 		Hidden:  true,
 	}}, services)
 	if err != nil {

@@ -182,25 +182,43 @@ type Handler struct {
 	Name string
 	// Store is the durable KV store.
 	Store Store
-	// Tenant scopes every access. Required.
+	// Tenant is the absolute isolation boundary: it prefixes every physical key
+	// and is host-set from the process credential (never guest-supplied), so no
+	// access can ever cross tenants. Required.
 	Tenant string
-	// Subtree chroots the grant inside the tenant's space ("" = whole space).
-	// The grant tree does directory permissions: an agent granted "notes"
-	// cannot name anything outside notes/.
-	Subtree string
-	// Operations are the granted cases keyed by operation name (get/put/list);
-	// an operation absent here is not granted. Each carries its per-operation
-	// approval requirement and data-flow policy.
-	Operations map[string]Operation
+	// Mounts are the scopes this grant may address, keyed by scope name
+	// ("process", "session", "shared:<name>"). Each resolves to a physical key
+	// prefix within the tenant and carries the operations and policy allowed on
+	// it. A call selects one by its `scope`; when exactly one mount is granted the
+	// call may omit `scope`. There is deliberately no tenant-wide scope — the
+	// most-shared a key can be is a named shared space.
+	Mounts map[string]Mount
 }
 
-// Operation is one granted memory case's policy: whether it needs human
-// approval, the source classes its results carry (Labels), and the labels it
-// refuses to let flow in (Taints, the sink guard).
-type Operation struct {
+// Mount is one scope a grant may address: the physical key prefix it resolves to
+// inside the tenant (scope + optional subtree, host-computed from the process
+// credential), the operations allowed on it, and the data-flow policy that
+// applies — approval gates writes, Labels stamp reads, Taints guard writes.
+type Mount struct {
+	// Prefix is the physical key prefix within the tenant — "s/<sessionID>",
+	// "p/<processID>", or "shared/<name>", each optionally suffixed with the
+	// mount's subtree. Resolved at build time from the scope and the credential,
+	// so it is never guest-influenced.
+	Prefix string
+	// Operations is the set of verbs granted on this mount (get/put/list/search).
+	Operations map[string]struct{}
+	// RequireApproval gates writes (put) on this mount.
 	RequireApproval bool
-	Labels          []string
-	Taints          []string
+	// Labels are the source classes reads from this mount carry; Taints are the
+	// labels barred from flowing into a write to it (the sink guard).
+	Labels []string
+	Taints []string
+}
+
+// grants reports whether the mount permits an operation.
+func (m Mount) grants(operation string) bool {
+	_, ok := m.Operations[operation]
+	return ok
 }
 
 func (h Handler) Handles(name string) bool { return name == h.Name }
@@ -212,62 +230,88 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if h.Tenant == "" {
 		return sys.FailCode(sys.ErrnoInternal, "memory grant has no tenant"), nil
 	}
-	operation, err := peekOperation(call.Args)
+	operation, scope, err := peekCall(call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	op, granted := h.Operations[operation]
-	if !granted {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("memory operation %q is not granted", operation)), nil
+	mount, err := h.selectMount(scope)
+	if err != nil {
+		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
 	}
-	// Sink guard: refuse before any effect if the run has observed a label this
-	// operation forbids. Deterministic on replay — the taint is rebuilt from the
+	if !mount.grants(operation) {
+		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("memory operation %q is not granted on scope %q", operation, scope)), nil
+	}
+	// Sink guard: refuse a write before any effect if the run has observed a label
+	// this mount forbids. Only writes are sinks — a read is a source — so the guard
+	// applies to put. Deterministic on replay: the taint is rebuilt from the
 	// journal identically, so the same call denies or passes the same way.
-	if blocked := sys.BlockedBy(sys.Taint(ctx), op.Taints); len(blocked) > 0 {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"flow policy: this run has observed %v, which may not flow into memory %q", blocked, operation)), nil
+	if operation == "put" {
+		if blocked := sys.BlockedBy(sys.Taint(ctx), mount.Taints); len(blocked) > 0 {
+			return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
+				"flow policy: this run has observed %v, which may not flow into memory scope %q", blocked, scope)), nil
+		}
 	}
 	var result sys.SyscallResult
 	switch operation {
 	case "get":
-		result, err = h.get(ctx, call)
+		result, err = h.get(ctx, call, mount)
 	case "put":
-		result, err = h.put(ctx, call, auth, op.RequireApproval)
+		result, err = h.put(ctx, call, auth, mount)
 	case "list":
-		result, err = h.list(ctx, call)
+		result, err = h.list(ctx, call, mount)
 	case "search":
-		result, err = h.search(ctx, call)
+		result, err = h.search(ctx, call, mount)
 	default:
 		return sys.FailCode(sys.ErrnoNotFound, "unknown memory operation: "+operation), nil
 	}
 	if err != nil || result.Status() != sys.StatusResult {
 		return result, err
 	}
-	// Stamp the operation's source labels (unions with any the value already
-	// carries, e.g. get's stored provenance).
-	return result.WithLabels(op.Labels...), nil
+	// Stamp the mount's source labels (unions with any the value already carries,
+	// e.g. get's stored provenance).
+	return result.WithLabels(mount.Labels...), nil
 }
 
-// peekOperation reads the ADT discriminator from a memory call's args.
-func peekOperation(args json.RawMessage) (string, error) {
+// selectMount resolves the scope a call names to the mount it may use. An empty
+// scope is allowed only when the grant has exactly one mount (e.g. core.scratch),
+// where there is nothing to disambiguate.
+func (h Handler) selectMount(scope string) (Mount, error) {
+	if scope != "" {
+		m, ok := h.Mounts[scope]
+		if !ok {
+			return Mount{}, fmt.Errorf("memory scope %q is not granted", scope)
+		}
+		return m, nil
+	}
+	if len(h.Mounts) == 1 {
+		for _, m := range h.Mounts {
+			return m, nil
+		}
+	}
+	return Mount{}, fmt.Errorf("a scope is required (this grant has multiple scopes)")
+}
+
+// peekCall reads the ADT discriminator and the addressed scope from a call's args.
+func peekCall(args json.RawMessage) (operation, scope string, err error) {
 	var envelope struct {
 		Operation string `json:"operation"`
+		Scope     string `json:"scope"`
 	}
 	if err := json.Unmarshal(args, &envelope); err != nil {
-		return "", fmt.Errorf("decode operation: %v", err)
+		return "", "", fmt.Errorf("decode call: %v", err)
 	}
 	if envelope.Operation == "" {
-		return "", fmt.Errorf("operation is required")
+		return "", "", fmt.Errorf("operation is required")
 	}
-	return envelope.Operation, nil
+	return envelope.Operation, envelope.Scope, nil
 }
 
-func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
 	var request GetRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := h.qualify(request.Key)
+	qualified, err := qualify(mount.Prefix, request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -285,12 +329,12 @@ func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	return result.WithLabels(labels...), nil
 }
 
-func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorization, requireApproval bool) (sys.SyscallResult, error) {
+func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorization, mount Mount) (sys.SyscallResult, error) {
 	var request PutRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := h.qualify(request.Key)
+	qualified, err := qualify(mount.Prefix, request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -315,7 +359,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 			return marshalResult(PutResponse{Key: request.Key, Version: version})
 		}
 	}
-	if requireApproval && auth.Decision != sys.Approved {
+	if mount.RequireApproval && auth.Decision != sys.Approved {
 		return sys.Yield(fmt.Sprintf("Approve writing memory key %q", request.Key)), nil
 	}
 	expect := PutAny
@@ -339,16 +383,16 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	return marshalResult(PutResponse{Key: request.Key, Version: version})
 }
 
-func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+func (h Handler) list(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
 	var request ListRequest
 	if len(call.Args) > 0 {
 		if err := json.Unmarshal(call.Args, &request); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 		}
 	}
-	prefix := h.Subtree
+	prefix := mount.Prefix
 	if request.Prefix != "" {
-		qualified, err := h.qualify(request.Prefix)
+		qualified, err := qualify(mount.Prefix, request.Prefix)
 		if err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 		}
@@ -366,8 +410,8 @@ func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult,
 	var labels []string
 	for _, entry := range entries {
 		key := entry.Key
-		if h.Subtree != "" {
-			key = strings.TrimPrefix(strings.TrimPrefix(key, h.Subtree), "/")
+		if mount.Prefix != "" {
+			key = strings.TrimPrefix(strings.TrimPrefix(key, mount.Prefix), "/")
 		}
 		relative = append(relative, key)
 		labels = append(labels, entry.Labels...)
@@ -380,15 +424,12 @@ func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult,
 	return result.WithLabels(labels...), nil
 }
 
-// qualify validates a guest key and roots it under the grant's subtree.
-// Chroot semantics: keys are relative slash-paths; traversal cannot escape
-// because escapes are rejected, not resolved.
-func (h Handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+func (h Handler) search(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
 	var request SearchRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := h.qualify(request.Key)
+	qualified, err := qualify(mount.Prefix, request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -490,7 +531,11 @@ func truncateBytes(s string, max int) string {
 	return s[:cut] + "…"
 }
 
-func (h Handler) qualify(key string) (string, error) {
+// qualify validates a guest key and roots it under a mount's physical prefix.
+// Chroot semantics: keys are relative slash-paths; traversal cannot escape
+// because escapes are rejected, not resolved. The prefix is host-computed (scope
+// + subtree), so the returned physical key always stays inside the mount.
+func qualify(prefix, key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("key is required")
 	}
@@ -503,10 +548,10 @@ func (h Handler) qualify(key string) (string, error) {
 			return "", fmt.Errorf("key %q contains an invalid path segment", key)
 		}
 	}
-	if h.Subtree == "" {
+	if prefix == "" {
 		return key, nil
 	}
-	return h.Subtree + "/" + key, nil
+	return prefix + "/" + key, nil
 }
 
 func storeFailure(ctx context.Context, err error) (sys.SyscallResult, error) {

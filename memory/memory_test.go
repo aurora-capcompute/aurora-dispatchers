@@ -47,12 +47,22 @@ func (j *memJournal) Append(record journaled.Record) error {
 
 func (j *memJournal) Length() int { return len(j.records) }
 
-// allOps grants get/put/list with no approval and no flow policy — the common
-// case for these tests. Operations are now ADT cases of one capability, so a
-// grant is a per-operation policy map.
-func allOps() map[string]memory.Operation {
-	return map[string]memory.Operation{"get": {}, "put": {}, "list": {}}
+// mount builds a single unscoped mount granting ops, with an optional subtree
+// prefix and write-approval gate. The engine tests dispatch without a `scope`, so
+// selectMount returns this lone mount for every call — scope selection is
+// exercised in the registry package, where mounts resolve from real scopes.
+func mount(prefix string, requireApproval bool, ops ...string) map[string]memory.Mount {
+	set := make(map[string]struct{}, len(ops))
+	for _, op := range ops {
+		set[op] = struct{}{}
+	}
+	return map[string]memory.Mount{"": {Prefix: prefix, Operations: set, RequireApproval: requireApproval}}
 }
+
+// allOps grants get/put/list on a single unscoped mount with no approval and no
+// flow policy — the common case for these tests. Operations are ADT cases of one
+// capability selected by the `operation` field; policy is a per-mount property.
+func allOps() map[string]memory.Mount { return mount("", false, "get", "put", "list") }
 
 // memArgs builds a memory call's args: the `operation` discriminator merged with
 // the operation's fields (a JSON object, or "").
@@ -89,7 +99,7 @@ func dispatchCtx(t *testing.T, ctx context.Context, h memory.Handler, operation,
 // later list, matching get/search.
 func TestListCarriesValueLabels(t *testing.T) {
 	store := memory.NewMapStore()
-	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 
 	tainted := sys.WithTaint(context.Background(), []string{"untrusted_web"})
 	if r := dispatchCtx(t, tainted, h, "put", `{"key":"notes/x","value":"v"}`, sys.Authorization{}); r.Status() != sys.StatusResult {
@@ -113,8 +123,8 @@ func TestListCarriesValueLabels(t *testing.T) {
 func TestMemoryRoundTripAcrossSessions(t *testing.T) {
 	store := memory.NewMapStore()
 	// Two handlers = two grants in two different sessions of one tenant.
-	sessionOne := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
-	sessionTwo := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+	sessionOne := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	sessionTwo := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 
 	put := dispatch(t, sessionOne, "put", `{"key":"prefs/tone","value":{"formal":true}}`, sys.Authorization{})
 	if put.Status() != sys.StatusResult {
@@ -142,8 +152,8 @@ func TestMemoryRoundTripAcrossSessions(t *testing.T) {
 
 func TestMemoryTenantsAreIsolated(t *testing.T) {
 	store := memory.NewMapStore()
-	acme := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
-	rival := memory.Handler{Name: "mem", Store: store, Tenant: "rival", Operations: allOps()}
+	acme := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	rival := memory.Handler{Name: "mem", Store: store, Tenant: "rival", Mounts: allOps()}
 
 	dispatch(t, acme, "put", `{"key":"secret","value":"acme-only"}`, sys.Authorization{})
 
@@ -159,11 +169,11 @@ func TestMemoryTenantsAreIsolated(t *testing.T) {
 
 func TestMemorySubtreeChroot(t *testing.T) {
 	store := memory.NewMapStore()
-	full := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+	full := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 	dispatch(t, full, "put", `{"key":"secret/root-key","value":"hidden"}`, sys.Authorization{})
 	dispatch(t, full, "put", `{"key":"notes/today","value":"visible"}`, sys.Authorization{})
 
-	notes := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Subtree: "notes", Operations: allOps()}
+	notes := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: mount("notes", false, "get", "put", "list")}
 
 	// Inside the subtree: relative keys resolve under notes/.
 	get := dispatch(t, notes, "get", `{"key":"today"}`, sys.Authorization{})
@@ -197,7 +207,7 @@ func TestMemorySubtreeChroot(t *testing.T) {
 func TestMemoryPutApprovalGate(t *testing.T) {
 	store := memory.NewMapStore()
 	gated := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
-		Operations: map[string]memory.Operation{"get": {}, "put": {RequireApproval: true}, "list": {}}}
+		Mounts: mount("", true, "get", "put", "list")}
 
 	// Unapproved writes yield a human task.
 	result := dispatch(t, gated, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
@@ -230,7 +240,7 @@ func (d handlerDispatcher) Capabilities() []sys.Capability { return nil }
 // replayed from the journal, not re-read from the (since mutated) store.
 func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 	journal := newMemJournal()
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "proc-1"}
 
@@ -301,7 +311,7 @@ func (d tenantChain) Capabilities() []sys.Capability {
 // and the flow policy blocks it from reaching a protected capability there.
 func TestMemoryPoisoningSurfacesAcrossThreads(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 	run := func() *capcompute.FlowMonitor[string, memPID] {
 		return capcompute.NewFlowMonitor(capcompute.NewTaints[string](), capcompute.NewLabeler[memPID](chainAdapter{tenantChain{handler}}))
 	}
@@ -360,7 +370,7 @@ func (a chainAdapter) Capabilities() []sys.Capability { return a.next.Capabiliti
 
 func TestMemoryCompareAndSet(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 
 	// Create-only (if_version 0) succeeds on an absent key…
 	result := dispatch(t, handler, "put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{})
@@ -423,7 +433,7 @@ func TestMemoryCompareAndSet(t *testing.T) {
 // answer identically — including the version in the result payload.
 func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Operations: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/3/sha256:put")
 
 	// Create-only makes re-execution detectable: run twice, it would conflict.
@@ -480,7 +490,7 @@ func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
 func TestMemoryPutDedupeSkipsApprovalGate(t *testing.T) {
 	store := memory.NewMapStore()
 	gated := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
-		Operations: map[string]memory.Operation{"get": {}, "put": {RequireApproval: true}, "list": {}}}
+		Mounts: mount("", true, "get", "put", "list")}
 	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/5/sha256:put")
 
 	approved := dispatchCtx(t, intent, gated, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{Decision: sys.Approved, Actor: "alice"})
@@ -584,7 +594,7 @@ func TestMapStoreActivityMemory(t *testing.T) {
 func TestMemorySearch(t *testing.T) {
 	store := memory.NewMapStore()
 	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
-		Operations: map[string]memory.Operation{"put": {}, "search": {}}}
+		Mounts: mount("", false, "put", "search")}
 
 	// A document with real newlines, stored as a JSON string value.
 	dispatch(t, h, "put", `{"key":"doc","value":"first line\nAlan Turing was a mathematician\nthird line\nturing test\nlast line"}`, sys.Authorization{})

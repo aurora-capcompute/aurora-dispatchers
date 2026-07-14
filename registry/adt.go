@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -78,6 +79,12 @@ func DecodeOperationGrants(raw json.RawMessage) ([]OperationGrant, error) {
 		return nil, err
 	}
 	return grants, nil
+}
+
+// sortOperationGrants orders a grant list by operation so Normalize emits a
+// canonical form — a config that differs only in operation order hashes the same.
+func sortOperationGrants(grants []OperationGrant) {
+	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
 }
 
 // OperationBranch builds one oneOf branch of a leaf capability's ADT: the

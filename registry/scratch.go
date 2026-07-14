@@ -1,8 +1,10 @@
 package registry
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,6 +22,20 @@ const ScratchCapability = "core.scratch"
 // the tenant — the tenant is a constant.
 const scratchTenant = "scratch"
 
+// scratchScope is the internal name of scratch's single mount. Scratch is
+// inherently one compartment — the process's own ephemeral store — so a call
+// never carries a `scope` and the handler's lone mount serves every call
+// (selectMount returns it when a grant has exactly one mount).
+const scratchScope = "scratch"
+
+// scratchConfig is a core.scratch grant's driver configuration: the operations it
+// grants, each an ADT case discriminated by `operation`, with its data-flow
+// policy. Unlike core.memory there is no scope or subtree — scratch is a single,
+// process-private, unscoped store — so it keeps the plain operation-list shape.
+type scratchConfig struct {
+	Capabilities json.RawMessage `json:"capabilities,omitempty"`
+}
+
 // ScratchRegistration provides core.scratch: a process-local, ephemeral KV with
 // the same get/put/list/search operations (and ADT shape) as core.memory, but
 // backed by a fresh in-memory store built per process and discarded when the
@@ -29,16 +45,21 @@ const scratchTenant = "scratch"
 // lives for one activation; a process that parks and reactivates starts with an
 // empty scratch (the journaled summary/excerpt of any offload survive
 // regardless — only a full-text re-query would miss and prompt a re-fetch).
+//
+// Because scratch is one compartment, its flow policy is a single mount property:
+// reads carry the union of the granted operations' labels, writes are guarded by
+// the union of their taints, and a write requires approval if any grant asks for
+// it. In practice a scratch grant declares bare operations and no policy at all.
 type ScratchRegistration struct{}
 
 func (ScratchRegistration) Matches(syscall string) bool { return syscall == ScratchCapability }
 
 func (ScratchRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, grants, err := parseMemoryConfig(raw)
+	config, grants, err := parseScratchConfig(raw)
 	if err != nil {
 		return nil, err
 	}
-	// parseMemoryConfig already returns grants in canonical (sorted) order.
+	// parseScratchConfig already returns grants in canonical (sorted) order.
 	if config.Capabilities, err = json.Marshal(grants); err != nil {
 		return nil, err
 	}
@@ -46,20 +67,23 @@ func (ScratchRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMes
 }
 
 func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Config) error {
-	config, grants, err := parseMemoryConfig(raw)
+	_, grants, err := parseScratchConfig(raw)
 	if err != nil {
 		return err
 	}
 
-	operations := make(map[string]memory.Operation, len(grants))
+	ops := make(map[string]struct{}, len(grants))
+	requireApproval := false
+	var labels, taints []string
 	branches := make([]json.RawMessage, 0, len(grants))
 	names := make([]string, 0, len(grants))
 	for _, grant := range grants {
-		operations[grant.Operation] = memory.Operation{
-			RequireApproval: grant.RequireApproval != nil && *grant.RequireApproval,
-			Labels:          grant.Labels,
-			Taints:          grant.Taints,
+		ops[grant.Operation] = struct{}{}
+		if grant.RequireApproval != nil && *grant.RequireApproval {
+			requireApproval = true
 		}
+		labels = builtin.UnionLabels(labels, grant.Labels)
+		taints = builtin.UnionLabels(taints, grant.Taints)
 		branch, err := OperationBranch(grant.Operation, memoryOperations[grant.Operation].schema)
 		if err != nil {
 			return err
@@ -70,13 +94,21 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 
 	// A fresh in-memory store per Configure call — i.e. per process. It is never
 	// the durable tenant store (Services is unused here), and it is dropped with
-	// the process's dispatcher chain, so nothing stored here outlives the run.
+	// the process's dispatcher chain, so nothing stored here outlives the run. The
+	// lone mount has an empty prefix (the whole per-process store) and no scope, so
+	// calls address it without a `scope`.
 	out.Handlers = append(out.Handlers, memory.Handler{
-		Name:       ScratchCapability,
-		Store:      memory.NewMapStore(),
-		Tenant:     scratchTenant,
-		Subtree:    config.Subtree,
-		Operations: operations,
+		Name:   ScratchCapability,
+		Store:  memory.NewMapStore(),
+		Tenant: scratchTenant,
+		Mounts: map[string]memory.Mount{
+			scratchScope: {
+				Operations:      ops,
+				RequireApproval: requireApproval,
+				Labels:          labels,
+				Taints:          taints,
+			},
+		},
 	})
 	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name: ScratchCapability,
@@ -85,4 +117,44 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 		InputSchema: OneOfSchema(branches),
 	})
 	return nil
+}
+
+// parseScratchConfig validates and canonicalizes a core.scratch grant — the
+// single parse Normalize and Configure share. It rejects unknown fields, requires
+// at least one known operation (get/put/list/search) with no duplicates, and
+// normalizes each operation's flow policy. It mirrors the filesystem parser's
+// shape; scratch reuses core.memory's operation schemas.
+func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, error) {
+	var config scratchConfig
+	if len(raw) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&config); err != nil {
+			return scratchConfig{}, nil, err
+		}
+	}
+	grants, err := DecodeOperationGrants(config.Capabilities)
+	if err != nil {
+		return scratchConfig{}, nil, err
+	}
+	if len(grants) == 0 {
+		return scratchConfig{}, nil, errors.New("capabilities must grant at least one operation (get, put, list, search)")
+	}
+	seen := make(map[string]struct{}, len(grants))
+	for i := range grants {
+		operation := strings.TrimSpace(grants[i].Operation)
+		if _, ok := memoryOperations[operation]; !ok {
+			return scratchConfig{}, nil, fmt.Errorf("unknown scratch operation %q (want get, put, list, search)", grants[i].Operation)
+		}
+		if _, dup := seen[operation]; dup {
+			return scratchConfig{}, nil, fmt.Errorf("duplicate scratch operation %q", operation)
+		}
+		seen[operation] = struct{}{}
+		grants[i].Operation = operation
+		if grants[i].FlowPolicy, err = grants[i].FlowPolicy.Normalized(); err != nil {
+			return scratchConfig{}, nil, fmt.Errorf("operation %q: %w", operation, err)
+		}
+	}
+	sortOperationGrants(grants)
+	return config, grants, nil
 }
