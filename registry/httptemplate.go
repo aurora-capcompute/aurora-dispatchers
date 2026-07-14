@@ -29,10 +29,13 @@ var validParamTypes = map[string]struct{}{
 	"string": {}, "integer": {}, "number": {}, "boolean": {},
 }
 
-// templateConfig is a core.httpTemplate grant's driver configuration: a set of
-// named operations plus the shared transport bounds. Each operation targets its
-// own origin with its own host-held credential, so a single grant can front
-// several APIs; the guest picks one by name and fills only its parameters.
+// templateConfig is a core.httpTemplate grant's driver configuration: its
+// capabilities — a set of named operations — plus the shared transport bounds.
+// Each operation targets its own origin with its own host-held credential, so a
+// single grant can front several APIs; the guest picks one by its `operation`
+// name and fills only its parameters. The `capabilities` key and the per-entry
+// `operation` discriminator match every other leaf grant (core.internet is the
+// one allowlist-shaped exception).
 type templateConfig struct {
 	// BaseURL is an optional default origin (scheme://host) for operations that
 	// give only a path; an operation may override it with its own base_url.
@@ -41,15 +44,16 @@ type templateConfig struct {
 	MaxResponseBytes    int64               `json:"max_response_bytes,omitempty"`
 	MaxRequestBytes     int64               `json:"max_request_bytes,omitempty"`
 	AllowPrivateNetwork bool                `json:"allow_private_network,omitempty"`
-	Operations          []templateOperation `json:"operations"`
+	Capabilities        []templateOperation `json:"capabilities"`
 }
 
 // templateOperation is one named request the guest may invoke: a fixed origin,
 // method, path, optional query and JSON body carrying {{param}} placeholders, the
 // parameter contract that decides what the guest may fill, and the credential(s)
-// attached host-side for this operation only.
+// attached host-side for this operation only. Operation is the ADT discriminator
+// the guest selects (the `operation` field in the call args).
 type templateOperation struct {
-	Name        string `json:"name"`
+	Operation   string `json:"operation"`
 	Description string `json:"description,omitempty"`
 	Method      string `json:"method"`
 	// BaseURL is this operation's origin (scheme://host); it overrides the grant
@@ -93,20 +97,20 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	if err != nil {
 		return err
 	}
-	operations := make(map[string]builtin.TemplateOperation, len(config.Operations))
-	branches := make([]json.RawMessage, 0, len(config.Operations))
-	for _, operation := range config.Operations {
+	operations := make(map[string]builtin.TemplateOperation, len(config.Capabilities))
+	branches := make([]json.RawMessage, 0, len(config.Capabilities))
+	for _, operation := range config.Capabilities {
 		// Resolve this operation's host-held credential at activation. A missing
 		// referenced secret fails the build here, never silently at request time.
 		headers, credentialLabels, err := resolveInjectedHeaders(operation.InjectHeaders, services)
 		if err != nil {
-			return fmt.Errorf("core.httpTemplate operation %q: %w", operation.Name, err)
+			return fmt.Errorf("core.httpTemplate operation %q: %w", operation.Operation, err)
 		}
 		compiled, branch, err := compileOperation(operation, headers, credentialLabels)
 		if err != nil {
-			return fmt.Errorf("operation %q: %w", operation.Name, err)
+			return fmt.Errorf("operation %q: %w", operation.Operation, err)
 		}
-		operations[operation.Name] = compiled
+		operations[operation.Operation] = compiled
 		branches = append(branches, branch)
 	}
 
@@ -155,13 +159,13 @@ func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 		}
 		config.BaseURL, defaultOrigin = origin, origin
 	}
-	if len(config.Operations) == 0 {
-		return templateConfig{}, fmt.Errorf("operations must contain at least one operation")
+	if len(config.Capabilities) == 0 {
+		return templateConfig{}, fmt.Errorf("capabilities must grant at least one operation")
 	}
 
-	seen := make(map[string]struct{}, len(config.Operations))
-	for i := range config.Operations {
-		operation := &config.Operations[i]
+	seen := make(map[string]struct{}, len(config.Capabilities))
+	for i := range config.Capabilities {
+		operation := &config.Capabilities[i]
 		rawOrigin := strings.TrimSpace(operation.BaseURL)
 		if rawOrigin == "" {
 			rawOrigin = defaultOrigin
@@ -183,12 +187,12 @@ func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 		if err := normalizeOperation(operation); err != nil {
 			return templateConfig{}, fmt.Errorf("operation %d: %w", i, err)
 		}
-		if _, dup := seen[operation.Name]; dup {
-			return templateConfig{}, fmt.Errorf("duplicate operation %q", operation.Name)
+		if _, dup := seen[operation.Operation]; dup {
+			return templateConfig{}, fmt.Errorf("duplicate operation %q", operation.Operation)
 		}
-		seen[operation.Name] = struct{}{}
+		seen[operation.Operation] = struct{}{}
 	}
-	sort.Slice(config.Operations, func(i, j int) bool { return config.Operations[i].Name < config.Operations[j].Name })
+	sort.Slice(config.Capabilities, func(i, j int) bool { return config.Capabilities[i].Operation < config.Capabilities[j].Operation })
 
 	config.TimeoutMS = defaultIfZero(config.TimeoutMS, int64(internet.DefaultTimeout/time.Millisecond))
 	config.MaxResponseBytes = defaultIfZero(config.MaxResponseBytes, internet.DefaultMaxResponseBytes)
@@ -216,9 +220,9 @@ func templateOrigin(raw string) (string, error) {
 // body, parameters, flow policy, and placeholder references in place. The origin
 // and credential injection are validated by the caller.
 func normalizeOperation(operation *templateOperation) error {
-	operation.Name = strings.TrimSpace(operation.Name)
-	if operation.Name == "" {
-		return fmt.Errorf("name is required")
+	operation.Operation = strings.TrimSpace(operation.Operation)
+	if operation.Operation == "" {
+		return fmt.Errorf("operation is required")
 	}
 	operation.Method = strings.ToUpper(strings.TrimSpace(operation.Method))
 	if operation.Method == "" || operation.Method == internet.AnyMethod {
@@ -280,7 +284,7 @@ func compileOperation(operation templateOperation, headers map[string]string, cr
 		params[name] = builtin.TemplateParam{Type: param.Type, Required: param.Required}
 	}
 	compiled := builtin.TemplateOperation{
-		Name:             operation.Name,
+		Name:             operation.Operation,
 		Method:           operation.Method,
 		BaseURL:          operation.BaseURL,
 		Path:             operation.Path,
@@ -295,7 +299,7 @@ func compileOperation(operation templateOperation, headers map[string]string, cr
 		Taints:          WithEgressFloor(operation.FlowPolicy.Taints),
 		RequireApproval: operation.RequireApproval != nil && *operation.RequireApproval,
 	}
-	branch, err := OperationBranch(operation.Name, operationParamSchema(operation))
+	branch, err := OperationBranch(operation.Operation, operationParamSchema(operation))
 	if err != nil {
 		return builtin.TemplateOperation{}, nil, err
 	}
@@ -337,9 +341,9 @@ func operationParamSchema(operation templateOperation) json.RawMessage {
 // origin (unioned, deduplicated), so a constructed request can reach only what
 // the grant's operations define.
 func templatePolicy(config templateConfig) internet.Policy {
-	seen := make(map[string]struct{}, len(config.Operations))
+	seen := make(map[string]struct{}, len(config.Capabilities))
 	var rules []internet.Rule
-	for _, operation := range config.Operations {
+	for _, operation := range config.Capabilities {
 		key := operation.Method + " " + operation.BaseURL
 		if _, ok := seen[key]; ok {
 			continue
@@ -355,8 +359,8 @@ func templatePolicy(config templateConfig) internet.Policy {
 func templateDescription(config templateConfig) string {
 	var b strings.Builder
 	b.WriteString("Call a named operation; fill only its declared parameters. Operations:")
-	for _, operation := range config.Operations {
-		fmt.Fprintf(&b, "\n- %s (%s %s%s)", operation.Name, operation.Method, operation.BaseURL, operation.Path)
+	for _, operation := range config.Capabilities {
+		fmt.Fprintf(&b, "\n- %s (%s %s%s)", operation.Operation, operation.Method, operation.BaseURL, operation.Path)
 		if operation.Description != "" {
 			b.WriteString(": ")
 			b.WriteString(operation.Description)

@@ -14,17 +14,18 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// KubernetesVerbGrant is one case of a core.kubernetes grant's `capabilities`
-// ADT, discriminated by verb: the read verb it enables and the resources that
-// verb may read. get is the only verb available today. Making the verb the
-// discriminator groups an operation with the resources it applies to — the
-// natural shape once more than one operation exists.
-type KubernetesVerbGrant struct {
-	Verb      string                   `json:"verb"`
+// KubernetesOperationGrant is one case of a core.kubernetes grant's `capabilities`
+// ADT, discriminated by `operation`: the read operation it enables and the
+// resources that operation may read. get is the only operation available today
+// (it maps to the Kubernetes "get" verb). Making the operation the discriminator
+// groups it with the resources it applies to — the natural shape once more than
+// one operation exists, and the `operation` key matches every other leaf grant.
+type KubernetesOperationGrant struct {
+	Operation string                   `json:"operation"`
 	Resources []KubernetesResourceRule `json:"resources"`
 }
 
-// KubernetesResourceRule is one resource a verb grant covers. Each rule carries
+// KubernetesResourceRule is one resource an operation grant covers. Each rule carries
 // its own scope (namespaces / cluster-scoped), read shape (metadata_only),
 // approval, and flow policy.
 type KubernetesResourceRule struct {
@@ -48,11 +49,11 @@ type KubernetesResourceRule struct {
 }
 
 // kubernetesConfig is a core.kubernetes grant's driver configuration: the
-// verb-discriminated allowlist, an optional explicit API-server override (else
+// operation-discriminated allowlist, an optional explicit API-server override (else
 // the pod's in-cluster service account is used), and the request bounds and
 // pacing that keep the driver gentle on the API server.
 type kubernetesConfig struct {
-	Capabilities []KubernetesVerbGrant `json:"capabilities,omitempty"`
+	Capabilities []KubernetesOperationGrant `json:"capabilities,omitempty"`
 	// Endpoint/Token/CACert are the explicit-config override. When both Endpoint
 	// and Token are set the driver talks to that API server; otherwise it uses
 	// the in-cluster service account. A bearer Token must be a secret reference
@@ -110,14 +111,15 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		return err
 	}
 
-	// Flatten each (verb, resource-rule) into one Permission the handler scans.
+	// Flatten each (operation, resource-rule) into one Permission the handler scans
+	// (its k8s verb is the operation).
 	var permissions []k8s.Permission
-	verbsGranted := map[string]bool{}
+	operationsGranted := map[string]bool{}
 	for _, grant := range grants {
-		verbsGranted[grant.Verb] = true
+		operationsGranted[grant.Operation] = true
 		for _, rule := range grant.Resources {
 			permissions = append(permissions, k8s.Permission{
-				Verb:            grant.Verb,
+				Verb:            grant.Operation,
 				Group:           rule.Group,
 				Version:         rule.Version,
 				Resource:        rule.Resource,
@@ -138,13 +140,13 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		Resources:       permissions,
 	})
 
-	// One guest-facing ADT branch per granted verb (get today).
-	branches := make([]json.RawMessage, 0, len(verbsGranted))
-	for _, verb := range []string{k8s.VerbGet} {
-		if !verbsGranted[verb] {
+	// One guest-facing ADT branch per granted operation (get today).
+	branches := make([]json.RawMessage, 0, len(operationsGranted))
+	for _, operation := range []string{k8s.VerbGet} {
+		if !operationsGranted[operation] {
 			continue
 		}
-		branch, err := OperationBranch(verb, getOperationSchema)
+		branch, err := OperationBranch(operation, getOperationSchema)
 		if err != nil {
 			return err
 		}
@@ -160,9 +162,9 @@ func (KubernetesRegistration) Configure(_ context.Context, raw json.RawMessage, 
 
 // parseKubernetesConfig validates and canonicalizes a core.kubernetes grant's
 // config — the single parse Normalize and Configure share. It rejects unknown
-// fields, requires at least one verb grant, and normalizes each verb case and
-// its resource rules.
-func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesVerbGrant, error) {
+// fields, requires at least one operation grant, and normalizes each operation
+// case and its resource rules.
+func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesOperationGrant, error) {
 	var config kubernetesConfig
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -172,22 +174,22 @@ func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesV
 		}
 	}
 	if len(config.Capabilities) == 0 {
-		return kubernetesConfig{}, nil, fmt.Errorf("capabilities must grant at least one verb")
+		return kubernetesConfig{}, nil, fmt.Errorf("capabilities must grant at least one operation")
 	}
-	seenVerb := make(map[string]struct{}, len(config.Capabilities))
-	grants := make([]KubernetesVerbGrant, len(config.Capabilities))
+	seenOperation := make(map[string]struct{}, len(config.Capabilities))
+	grants := make([]KubernetesOperationGrant, len(config.Capabilities))
 	for i, grant := range config.Capabilities {
-		normalized, err := normalizeVerbGrant(grant)
+		normalized, err := normalizeOperationGrant(grant)
 		if err != nil {
 			return kubernetesConfig{}, nil, fmt.Errorf("capability %d: %w", i, err)
 		}
-		if _, dup := seenVerb[normalized.Verb]; dup {
-			return kubernetesConfig{}, nil, fmt.Errorf("verb %q is granted more than once", normalized.Verb)
+		if _, dup := seenOperation[normalized.Operation]; dup {
+			return kubernetesConfig{}, nil, fmt.Errorf("operation %q is granted more than once", normalized.Operation)
 		}
-		seenVerb[normalized.Verb] = struct{}{}
+		seenOperation[normalized.Operation] = struct{}{}
 		grants[i] = normalized
 	}
-	sort.Slice(grants, func(i, j int) bool { return grants[i].Verb < grants[j].Verb })
+	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
 
 	// An explicit endpoint and token must be given together, or neither (in-cluster).
 	if (config.Endpoint != "") != !config.Token.IsZero() {
@@ -215,32 +217,33 @@ func parseKubernetesConfig(raw json.RawMessage) (kubernetesConfig, []KubernetesV
 	return config, grants, nil
 }
 
-// normalizeVerbGrant validates one verb case and its resource rules. get is the
-// only verb the driver implements today; naming anything else is refused with a
-// clear message, since this is the discriminator a future operation slots into.
-func normalizeVerbGrant(grant KubernetesVerbGrant) (KubernetesVerbGrant, error) {
-	verb := strings.ToLower(strings.TrimSpace(grant.Verb))
-	switch verb {
+// normalizeOperationGrant validates one operation case and its resource rules. get
+// is the only operation the driver implements today (it maps to the Kubernetes
+// "get" verb); naming anything else is refused with a clear message, since this is
+// the discriminator a future operation slots into.
+func normalizeOperationGrant(grant KubernetesOperationGrant) (KubernetesOperationGrant, error) {
+	operation := strings.ToLower(strings.TrimSpace(grant.Operation))
+	switch operation {
 	case k8s.VerbGet:
 	case "":
-		return KubernetesVerbGrant{}, fmt.Errorf("verb is required")
+		return KubernetesOperationGrant{}, fmt.Errorf("operation is required")
 	default:
-		return KubernetesVerbGrant{}, fmt.Errorf("verb %q is not available; this driver is get-only for now", verb)
+		return KubernetesOperationGrant{}, fmt.Errorf("operation %q is not available; this driver is get-only for now", operation)
 	}
-	grant.Verb = verb
+	grant.Operation = operation
 	if len(grant.Resources) == 0 {
-		return KubernetesVerbGrant{}, fmt.Errorf("verb %q grants no resources", verb)
+		return KubernetesOperationGrant{}, fmt.Errorf("operation %q grants no resources", operation)
 	}
 	seen := make(map[string]struct{}, len(grant.Resources))
 	rules := make([]KubernetesResourceRule, len(grant.Resources))
 	for i, rule := range grant.Resources {
 		normalized, err := normalizeResourceRule(rule)
 		if err != nil {
-			return KubernetesVerbGrant{}, fmt.Errorf("resource %d: %w", i, err)
+			return KubernetesOperationGrant{}, fmt.Errorf("resource %d: %w", i, err)
 		}
 		key := fmt.Sprintf("%s/%s/%s/%t", normalized.Group, normalized.Version, normalized.Resource, normalized.ClusterScoped)
 		if _, dup := seen[key]; dup {
-			return KubernetesVerbGrant{}, fmt.Errorf("duplicate resource rule %q (combine its namespaces instead)", normalized.Resource)
+			return KubernetesOperationGrant{}, fmt.Errorf("duplicate resource rule %q (combine its namespaces instead)", normalized.Resource)
 		}
 		seen[key] = struct{}{}
 		rules[i] = normalized
@@ -362,12 +365,12 @@ func sortResourceRules(rules []KubernetesResourceRule) {
 }
 
 // kubernetesDescription composes the published capability's tool doc: the
-// read-only, rate-limited posture and, per verb, the resources it may read.
-func kubernetesDescription(grants []KubernetesVerbGrant) string {
+// read-only, rate-limited posture and, per operation, the resources it may read.
+func kubernetesDescription(grants []KubernetesOperationGrant) string {
 	var b strings.Builder
 	b.WriteString("Read Kubernetes objects (read-only; rate-limited; served from the API server cache). Set resource/group/version to match an allowed resource, plus namespace and name.")
 	for _, grant := range grants {
-		fmt.Fprintf(&b, "\nVerb %q:", grant.Verb)
+		fmt.Fprintf(&b, "\nOperation %q:", grant.Operation)
 		for _, rule := range grant.Resources {
 			fmt.Fprintf(&b, "\n- resource %q", rule.Resource)
 			if rule.Group != "" {

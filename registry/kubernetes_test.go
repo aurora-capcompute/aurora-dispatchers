@@ -12,10 +12,10 @@ import (
 
 func k8sRegistry() *registry.Registry { return registry.New(registry.KubernetesRegistration{}) }
 
-// Normalize fills defaults (version v1) and canonicalizes namespaces within a
-// verb case, while preserving a token as a reference (never a resolved value).
+// Normalize fills defaults (version v1) and canonicalizes namespaces within an
+// operation case, while preserving a token as a reference (never a resolved value).
 func TestKubernetesNormalizeDefaults(t *testing.T) {
-	raw := json.RawMessage(`{"endpoint":"https://api.test:6443","token":{"secret":"K8S_TOKEN"},"capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["kube-system","default"]}]}]}`)
+	raw := json.RawMessage(`{"endpoint":"https://api.test:6443","token":{"secret":"K8S_TOKEN"},"capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["kube-system","default"]}]}]}`)
 	out, err := k8sRegistry().Normalize(k8s.Capability, raw)
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
@@ -23,7 +23,7 @@ func TestKubernetesNormalizeDefaults(t *testing.T) {
 	var config struct {
 		Token        json.RawMessage `json:"token"`
 		Capabilities []struct {
-			Verb      string                            `json:"verb"`
+			Operation string                            `json:"operation"`
 			Resources []registry.KubernetesResourceRule `json:"resources"`
 		} `json:"capabilities"`
 	}
@@ -33,7 +33,7 @@ func TestKubernetesNormalizeDefaults(t *testing.T) {
 	if string(config.Token) != `{"secret":"K8S_TOKEN"}` {
 		t.Fatalf("token did not round-trip as a reference: %s", config.Token)
 	}
-	if len(config.Capabilities) != 1 || config.Capabilities[0].Verb != "get" {
+	if len(config.Capabilities) != 1 || config.Capabilities[0].Operation != "get" {
 		t.Fatalf("capabilities = %+v, want one get grant", config.Capabilities)
 	}
 	rules := config.Capabilities[0].Resources
@@ -51,24 +51,24 @@ func TestKubernetesNormalizeDefaults(t *testing.T) {
 func TestKubernetesConfigErrors(t *testing.T) {
 	cases := map[string]string{
 		"no capabilities":          `{}`,
-		"verb missing":             `{"endpoint":"https://api.test","token":"t","capabilities":[{"resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
-		"verb not available":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"list","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
-		"verb write":               `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"delete","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
-		"verb twice":               `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]},{"verb":"get","resources":[{"resource":"nodes","cluster_scoped":true}]}]}`,
-		"no resources":             `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[]}]}`,
-		"endpoint without token":   `{"endpoint":"https://api.test:6443","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
-		"token without endpoint":   `{"token":{"secret":"T"},"capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
-		"http endpoint":            `{"endpoint":"http://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
-		"namespaced without ns":    `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods"}]}]}`,
-		"cluster-scoped with ns":   `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"nodes","cluster_scoped":true,"namespaces":["default"]}]}]}`,
-		"secrets without metadata": `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"secrets","namespaces":["default"]}]}]}`,
-		"duplicate resource rule":  `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["a"]},{"resource":"pods","namespaces":["b"]}]}]}`,
-		"bad resource name":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"Pods","namespaces":["default"]}]}]}`,
-		"resource wildcard":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"*","namespaces":["default"]}]}]}`,
-		"group wildcard":           `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","group":"*","namespaces":["default"]}]}]}`,
-		"negative rate":            `{"endpoint":"https://api.test","token":"t","requests_per_second":-1,"capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
-		"unknown field":            `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}],"bogus":1}`,
-		"unknown rule field":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"],"full_objects":true}]}]}`,
+		"operation missing":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
+		"operation not available":  `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"list","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
+		"operation write":          `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"delete","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
+		"operation twice":          `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]}]},{"operation":"get","resources":[{"resource":"nodes","cluster_scoped":true}]}]}`,
+		"no resources":             `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[]}]}`,
+		"endpoint without token":   `{"endpoint":"https://api.test:6443","capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
+		"token without endpoint":   `{"token":{"secret":"T"},"capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
+		"http endpoint":            `{"endpoint":"http://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
+		"namespaced without ns":    `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods"}]}]}`,
+		"cluster-scoped with ns":   `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"nodes","cluster_scoped":true,"namespaces":["default"]}]}]}`,
+		"secrets without metadata": `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"secrets","namespaces":["default"]}]}]}`,
+		"duplicate resource rule":  `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["a"]},{"resource":"pods","namespaces":["b"]}]}]}`,
+		"bad resource name":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"Pods","namespaces":["default"]}]}]}`,
+		"resource wildcard":        `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"*","namespaces":["default"]}]}]}`,
+		"group wildcard":           `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods","group":"*","namespaces":["default"]}]}]}`,
+		"negative rate":            `{"endpoint":"https://api.test","token":"t","requests_per_second":-1,"capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`,
+		"unknown field":            `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]}]}],"bogus":1}`,
+		"unknown rule field":       `{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"],"full_objects":true}]}]}`,
 	}
 	reg := k8sRegistry()
 	for name, config := range cases {
@@ -83,7 +83,7 @@ func TestKubernetesConfigErrors(t *testing.T) {
 // The namespace "*" wildcard is accepted (any namespace, one object at a time),
 // while resource and group must be concrete — no resource/group wildcard exists.
 func TestKubernetesNamespaceWildcardAccepted(t *testing.T) {
-	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["*"]}]}]}`)
+	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["*"]}]}]}`)
 	built, err := k8sRegistry().Build(context.Background(),
 		[]registry.Entry{{Syscall: k8s.Capability, Config: raw}}, registry.Services{})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestKubernetesNamespaceWildcardAccepted(t *testing.T) {
 
 // Core Secrets are allowed only for their metadata, never their data.
 func TestKubernetesSecretsMetadataOnlyAccepted(t *testing.T) {
-	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"verb":"get","resources":[{"resource":"secrets","namespaces":["default"],"metadata_only":true}]}]}`)
+	raw := json.RawMessage(`{"endpoint":"https://api.test","token":"t","capabilities":[{"operation":"get","resources":[{"resource":"secrets","namespaces":["default"],"metadata_only":true}]}]}`)
 	if _, err := k8sRegistry().Normalize(k8s.Capability, raw); err != nil {
 		t.Fatalf("secrets with metadata_only should be accepted: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestKubernetesSecretsMetadataOnlyAccepted(t *testing.T) {
 // Build publishes one capability with a get-only ADT schema and a routing
 // handler — no live cluster required, and no list operation exists.
 func TestKubernetesBuildPublishesCapability(t *testing.T) {
-	config := json.RawMessage(`{"endpoint":"https://api.test:6443","token":{"secret":"K8S_TOKEN"},"capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]},{"resource":"nodes","cluster_scoped":true}]}]}`)
+	config := json.RawMessage(`{"endpoint":"https://api.test:6443","token":{"secret":"K8S_TOKEN"},"capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]},{"resource":"nodes","cluster_scoped":true}]}]}`)
 	services := registry.Services{Secrets: mapResolver{"K8S_TOKEN": "tok-abc"}}
 	built, err := k8sRegistry().Build(context.Background(),
 		[]registry.Entry{{Syscall: k8s.Capability, Config: config}}, services)
@@ -122,8 +122,8 @@ func TestKubernetesBuildPublishesCapability(t *testing.T) {
 	if strings.Contains(schema, `"const":"list"`) {
 		t.Fatalf("schema published a list operation, which was removed: %s", schema)
 	}
-	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "pods") || !strings.Contains(desc, `Verb "get"`) {
-		t.Fatalf("description missing resources or verb: %s", desc)
+	if desc := built.Capabilities[0].Description; !strings.Contains(desc, "pods") || !strings.Contains(desc, `Operation "get"`) {
+		t.Fatalf("description missing resources or operation: %s", desc)
 	}
 	if len(built.Handlers) != 1 || !built.Handlers[0].Handles(k8s.Capability) {
 		t.Fatal("handler must route by the capability name core.kubernetes")
@@ -133,7 +133,7 @@ func TestKubernetesBuildPublishesCapability(t *testing.T) {
 // A missing secret fails the build closed — the driver never activates without
 // its credential.
 func TestKubernetesBuildFailsClosedOnMissingSecret(t *testing.T) {
-	config := json.RawMessage(`{"endpoint":"https://api.test","token":{"secret":"ABSENT"},"capabilities":[{"verb":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`)
+	config := json.RawMessage(`{"endpoint":"https://api.test","token":{"secret":"ABSENT"},"capabilities":[{"operation":"get","resources":[{"resource":"pods","namespaces":["default"]}]}]}`)
 	_, err := k8sRegistry().Build(context.Background(),
 		[]registry.Entry{{Syscall: k8s.Capability, Config: config}}, registry.Services{Secrets: mapResolver{}})
 	if err == nil {

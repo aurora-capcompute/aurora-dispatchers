@@ -148,8 +148,10 @@ plus an injected `registry.Services`. Highlights per driver:
   `max_read_bytes` (2 MiB), `max_lines` (10000), `follow_symlinks`.
 - **memory / scratch** — `capabilities[]{operation, require_approval, labels,
   taints}`, `subtree`.
-- **httptemplate** — `base_url`, `operations[]{name, method, path, query, body,
-  params}`, `inject_headers`, bounds.
+- **httptemplate** — `base_url` (grant default), `capabilities[]{operation, method,
+  base_url, path, query, body, params, inject_headers, require_approval}`, bounds.
+- **kubernetes** — `capabilities[]{operation, resources[]{...}}`, `endpoint`,
+  `token`, `ca_cert`, bounds, `requests_per_second`, `burst`.
 
 ## Project layout
 

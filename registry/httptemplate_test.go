@@ -22,16 +22,16 @@ func TestTemplateMatches(t *testing.T) {
 
 func TestTemplateNormalizeRejectsBadConfigs(t *testing.T) {
 	cases := map[string]string{
-		"no operations":            `{"base_url":"https://onyx.example.com","operations":[]}`,
-		"plain http origin":        `{"base_url":"http://onyx.example.com","operations":[{"name":"s","method":"GET","path":"/s"}]}`,
-		"wildcard method":          `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"*","path":"/s"}]}`,
-		"relative path":            `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"GET","path":"s"}]}`,
-		"bad param type":           `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"GET","path":"/s","params":{"q":{"type":"blob"}}}]}`,
-		"placeholder no param":     `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"POST","path":"/s","body":{"m":"{{q}}"}}]}`,
-		"duplicate operation":      `{"base_url":"https://onyx.example.com","operations":[{"name":"s","method":"GET","path":"/a"},{"name":"s","method":"GET","path":"/b"}]}`,
-		"grant-level inject gone":  `{"base_url":"https://onyx.example.com","inject_headers":{"Authorization":{"secret":"X"}},"operations":[{"name":"s","method":"GET","path":"/s"}]}`,
-		"op injects forbidden hdr": `{"operations":[{"name":"s","method":"GET","base_url":"https://onyx.example.com","path":"/s","inject_headers":{"Host":{"secret":"X"}}}]}`,
-		"op missing base_url":      `{"operations":[{"name":"s","method":"GET","path":"/s"}]}`,
+		"no operations":            `{"base_url":"https://onyx.example.com","capabilities":[]}`,
+		"plain http origin":        `{"base_url":"http://onyx.example.com","capabilities":[{"operation":"s","method":"GET","path":"/s"}]}`,
+		"wildcard method":          `{"base_url":"https://onyx.example.com","capabilities":[{"operation":"s","method":"*","path":"/s"}]}`,
+		"relative path":            `{"base_url":"https://onyx.example.com","capabilities":[{"operation":"s","method":"GET","path":"s"}]}`,
+		"bad param type":           `{"base_url":"https://onyx.example.com","capabilities":[{"operation":"s","method":"GET","path":"/s","params":{"q":{"type":"blob"}}}]}`,
+		"placeholder no param":     `{"base_url":"https://onyx.example.com","capabilities":[{"operation":"s","method":"POST","path":"/s","body":{"m":"{{q}}"}}]}`,
+		"duplicate operation":      `{"base_url":"https://onyx.example.com","capabilities":[{"operation":"s","method":"GET","path":"/a"},{"operation":"s","method":"GET","path":"/b"}]}`,
+		"grant-level inject gone":  `{"base_url":"https://onyx.example.com","inject_headers":{"Authorization":{"secret":"X"}},"capabilities":[{"operation":"s","method":"GET","path":"/s"}]}`,
+		"op injects forbidden hdr": `{"capabilities":[{"operation":"s","method":"GET","base_url":"https://onyx.example.com","path":"/s","inject_headers":{"Host":{"secret":"X"}}}]}`,
+		"op missing base_url":      `{"capabilities":[{"operation":"s","method":"GET","path":"/s"}]}`,
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -46,7 +46,7 @@ func TestTemplateNormalizeRejectsBadConfigs(t *testing.T) {
 // normalizes cleanly.
 func TestTemplateNormalizeAcceptsValid(t *testing.T) {
 	for _, base := range []string{"https://onyx.example.com", "http://127.0.0.1:8080"} {
-		raw := `{"base_url":"` + base + `","operations":[{"name":"search","method":"POST","path":"/s","body":{"m":"{{q}}"},"params":{"q":{"type":"string","required":true}}}]}`
+		raw := `{"base_url":"` + base + `","capabilities":[{"operation":"search","method":"POST","path":"/s","body":{"m":"{{q}}"},"params":{"q":{"type":"string","required":true}}}]}`
 		if _, err := (registry.HTTPTemplateRegistration{}).Normalize("core.httpTemplate", json.RawMessage(raw)); err != nil {
 			t.Fatalf("Normalize rejected a valid grant on %q: %v", base, err)
 		}
@@ -54,7 +54,7 @@ func TestTemplateNormalizeAcceptsValid(t *testing.T) {
 }
 
 func templateConfigJSON() string {
-	return `{"operations":[{"name":"search","description":"Search the KB.","method":"POST",` +
+	return `{"capabilities":[{"operation":"search","description":"Search the KB.","method":"POST",` +
 		`"base_url":"https://onyx.example.com","path":"/api/search",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}},` +
 		`"body":{"message":"{{query}}","persona_id":0},"params":{"query":{"type":"string","required":true,"description":"the question"}}}]}`
@@ -94,11 +94,11 @@ func TestTemplateConfigurePublishesCapability(t *testing.T) {
 // with its own credential, unioned into one ADT capability. Each operation's
 // credential is bound to its own host and must not bleed to the other.
 func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
-	raw := `{"operations":[` +
-		`{"name":"search","method":"POST","base_url":"https://onyx.example.com","path":"/api/search",` +
+	raw := `{"capabilities":[` +
+		`{"operation":"search","method":"POST","base_url":"https://onyx.example.com","path":"/api/search",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}},` +
 		`"body":{"q":"{{query}}"},"params":{"query":{"type":"string","required":true}}},` +
-		`{"name":"weather","method":"GET","base_url":"https://api.weather.example.com","path":"/v1/now",` +
+		`{"operation":"weather","method":"GET","base_url":"https://api.weather.example.com","path":"/v1/now",` +
 		`"inject_headers":{"X-Api-Key":{"secret":"WEATHER_KEY"}}}` +
 		`]}`
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc", "WEATHER_KEY": "wk-xyz"}}
