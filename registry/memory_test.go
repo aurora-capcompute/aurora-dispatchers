@@ -56,19 +56,28 @@ func memDispatch(t *testing.T, h builtin.Handler, args string) sys.SyscallResult
 	return r
 }
 
-func memPut(t *testing.T, h builtin.Handler, scope, key, value string) {
+// selector renders the scope/space fields of a call: `"scope":"session"` alone,
+// or with `"space":"team"` when addressing a shared mount.
+func selector(scope, space string) string {
+	if space == "" {
+		return fmt.Sprintf(`"scope":%q`, scope)
+	}
+	return fmt.Sprintf(`"scope":%q,"space":%q`, scope, space)
+}
+
+func memPut(t *testing.T, h builtin.Handler, scope, space, key, value string) {
 	t.Helper()
-	r := memDispatch(t, h, fmt.Sprintf(`{"operation":"put","scope":%q,"key":%q,"value":%s}`, scope, key, value))
+	r := memDispatch(t, h, fmt.Sprintf(`{"operation":"put",%s,"key":%q,"value":%s}`, selector(scope, space), key, value))
 	if r.Status() != sys.StatusResult {
-		t.Fatalf("put scope=%s key=%s: %#v", scope, key, r)
+		t.Fatalf("put %s %s key=%s: %#v", scope, space, key, r)
 	}
 }
 
-func memGet(t *testing.T, h builtin.Handler, scope, key string) memory.GetResponse {
+func memGet(t *testing.T, h builtin.Handler, scope, space, key string) memory.GetResponse {
 	t.Helper()
-	r := memDispatch(t, h, fmt.Sprintf(`{"operation":"get","scope":%q,"key":%q}`, scope, key))
+	r := memDispatch(t, h, fmt.Sprintf(`{"operation":"get",%s,"key":%q}`, selector(scope, space), key))
 	if r.Status() != sys.StatusResult {
-		t.Fatalf("get scope=%s key=%s: %#v", scope, key, r)
+		t.Fatalf("get %s %s key=%s: %#v", scope, space, key, r)
 	}
 	var resp memory.GetResponse
 	if err := json.Unmarshal(r.Result(), &resp); err != nil {
@@ -78,7 +87,7 @@ func memGet(t *testing.T, h builtin.Handler, scope, key string) memory.GetRespon
 }
 
 func TestMemoryPublishesOneCapability(t *testing.T) {
-	handler := buildMemory(t, `{"capabilities":[{"scope":"session","subtree":"notes","operations":["get","put","list"]}]}`)
+	handler := buildMemory(t, `{"capabilities":[{"scope":"session","operations":["get","put","list"]}]}`)
 	if !handler.Handles("core.memory") {
 		t.Fatal("handler must route by the capability name core.memory")
 	}
@@ -88,7 +97,7 @@ func TestMemoryPublishesOneCapability(t *testing.T) {
 }
 
 func TestMemoryRequiresServices(t *testing.T) {
-	config := `{"capabilities":[{"scope":"shared:team","operations":["get"]}]}`
+	config := `{"capabilities":[{"scope":"shared","space":"team","operations":["get"]}]}`
 	entries := []registry.Entry{{Syscall: "core.memory", Config: json.RawMessage(config)}}
 	if _, err := registry.Default().Build(context.Background(), entries,
 		registry.Services{MemoryStore: memory.NewMapStore()}); err == nil || !strings.Contains(err.Error(), "Tenant") {
@@ -109,10 +118,6 @@ func TestMemoryRequiresServices(t *testing.T) {
 
 func TestMemoryRejectsBadConfig(t *testing.T) {
 	bad := []string{
-		// A subtree is a chroot: no absolute, trailing, or traversal segments.
-		`{"capabilities":[{"scope":"session","subtree":"/abs","operations":["get"]}]}`,
-		`{"capabilities":[{"scope":"session","subtree":"trail/","operations":["get"]}]}`,
-		`{"capabilities":[{"scope":"session","subtree":"a/../b","operations":["get"]}]}`,
 		// Unknown operation, and an empty operation set.
 		`{"capabilities":[{"scope":"session","operations":["nope"]}]}`,
 		`{"capabilities":[{"scope":"session","operations":[]}]}`,
@@ -121,13 +126,22 @@ func TestMemoryRejectsBadConfig(t *testing.T) {
 		// There is deliberately no tenant-wide scope, and unknown scopes are refused.
 		`{"capabilities":[{"scope":"tenant","operations":["get"]}]}`,
 		`{"capabilities":[{"scope":"everyone","operations":["get"]}]}`,
-		// A shared space needs a safe, non-empty, path-free name.
-		`{"capabilities":[{"scope":"shared:","operations":["get"]}]}`,
-		`{"capabilities":[{"scope":"shared:../etc","operations":["get"]}]}`,
-		// One scope may be mounted only once.
+		// The scope tag and the space payload are separate fields: a shared mount
+		// needs a space, a non-shared mount may not carry one, and the space is a
+		// safe path-free name.
+		`{"capabilities":[{"scope":"shared","operations":["get"]}]}`,
+		`{"capabilities":[{"scope":"session","space":"team","operations":["get"]}]}`,
+		`{"capabilities":[{"scope":"shared","space":"","operations":["get"]}]}`,
+		`{"capabilities":[{"scope":"shared","space":"a/b","operations":["get"]}]}`,
+		`{"capabilities":[{"scope":"shared","space":"../etc","operations":["get"]}]}`,
+		// The retired packed form ("shared:<name>" in one string) is refused — a
+		// migration guard, not a silent reinterpretation.
+		`{"capabilities":[{"scope":"shared:team","operations":["get"]}]}`,
+		// One mount may be granted only once (same scope, and same space for shared).
 		`{"capabilities":[{"scope":"session","operations":["get"]},{"scope":"session","operations":["put"]}]}`,
-		// The old flat shape (top-level subtree, per-operation entries) is refused —
-		// a migration guard, not a silent reinterpretation.
+		`{"capabilities":[{"scope":"shared","space":"kb","operations":["get"]},{"scope":"shared","space":"kb","operations":["put"]}]}`,
+		// subtree is gone; the old flat shape (per-operation entries) is refused too.
+		`{"capabilities":[{"scope":"session","subtree":"notes","operations":["get"]}]}`,
 		`{"subtree":"notes","capabilities":[{"operation":"get"}]}`,
 		`{"capabilities":[{"operation":"get"}]}`,
 	}
@@ -136,8 +150,13 @@ func TestMemoryRejectsBadConfig(t *testing.T) {
 			t.Fatalf("bad config accepted: %s", config)
 		}
 	}
-	// A well-formed multi-scope grant with a subtree normalizes cleanly.
-	good := `{"capabilities":[{"scope":"process","operations":["get","put"]},{"scope":"shared:team","subtree":"notes/work","operations":["get"]}]}`
+	// A well-formed multi-mount grant — including two distinct shared spaces —
+	// normalizes cleanly.
+	good := `{"capabilities":[
+		{"scope":"process","operations":["get","put"]},
+		{"scope":"shared","space":"team-kb","operations":["get"]},
+		{"scope":"shared","space":"handoff","operations":["put"]}
+	]}`
 	if _, err := registry.Default().Normalize("core.memory", json.RawMessage(good)); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
@@ -152,7 +171,7 @@ func TestMemoryScopeIsolation(t *testing.T) {
 	cfg := `{"capabilities":[
 		{"scope":"process","operations":["get","put"]},
 		{"scope":"session","operations":["get","put"]},
-		{"scope":"shared:team","operations":["get","put"]}
+		{"scope":"shared","space":"team","operations":["get","put"]}
 	]}`
 	// Two processes in one session, and a third in a different session.
 	p1 := buildMemoryWith(t, store, registry.Services{Tenant: "acme", SessionID: "s1", ProcessID: "p1"}, cfg)
@@ -160,27 +179,27 @@ func TestMemoryScopeIsolation(t *testing.T) {
 	p3 := buildMemoryWith(t, store, registry.Services{Tenant: "acme", SessionID: "s2", ProcessID: "p3"}, cfg)
 
 	// process: private to the writer; a sibling process cannot read it.
-	memPut(t, p1, "process", "k", `"p1-only"`)
-	if got := memGet(t, p1, "process", "k"); string(got.Value) != `"p1-only"` {
+	memPut(t, p1, "process", "", "k", `"p1-only"`)
+	if got := memGet(t, p1, "process", "", "k"); string(got.Value) != `"p1-only"` {
 		t.Fatalf("process scope did not round-trip in its own process: %+v", got)
 	}
-	if got := memGet(t, p2, "process", "k"); got.Found {
+	if got := memGet(t, p2, "process", "", "k"); got.Found {
 		t.Fatal("process scope leaked to another process")
 	}
 
 	// session: shared across the session's processes, isolated across sessions.
-	memPut(t, p1, "session", "k", `"sess1"`)
-	if got := memGet(t, p2, "session", "k"); string(got.Value) != `"sess1"` {
+	memPut(t, p1, "session", "", "k", `"sess1"`)
+	if got := memGet(t, p2, "session", "", "k"); string(got.Value) != `"sess1"` {
 		t.Fatalf("session scope not shared across the session's processes: %+v", got)
 	}
-	if got := memGet(t, p3, "session", "k"); got.Found {
+	if got := memGet(t, p3, "session", "", "k"); got.Found {
 		t.Fatal("session scope leaked across sessions")
 	}
 
 	// shared: the one crossing — a different session reads it because it named
 	// the same space.
-	memPut(t, p1, "shared:team", "k", `"team"`)
-	if got := memGet(t, p3, "shared:team", "k"); string(got.Value) != `"team"` {
+	memPut(t, p1, "shared", "team", "k", `"team"`)
+	if got := memGet(t, p3, "shared", "team", "k"); string(got.Value) != `"team"` {
 		t.Fatalf("named shared space did not cross sessions: %+v", got)
 	}
 }
@@ -195,30 +214,38 @@ func TestMemoryCrossTenantIsImpossible(t *testing.T) {
 	acme := buildMemoryWith(t, store, registry.Services{Tenant: "acme", SessionID: "s", ProcessID: "p"}, cfg)
 	rival := buildMemoryWith(t, store, registry.Services{Tenant: "rival", SessionID: "s", ProcessID: "p"}, cfg)
 
-	memPut(t, acme, "session", "secret", `"acme-only"`)
-	if got := memGet(t, rival, "session", "secret"); got.Found {
+	memPut(t, acme, "session", "", "secret", `"acme-only"`)
+	if got := memGet(t, rival, "session", "", "secret"); got.Found {
 		t.Fatalf("cross-tenant read succeeded (%s); tenant is not an absolute boundary", got.Value)
 	}
 }
 
-// A call naming a scope the grant does not mount is denied — the grant is the
-// allowlist of scopes, and an ungranted scope is not reachable.
+// A call naming a mount the grant does not open is denied — the grant is the
+// allowlist of mounts — and a malformed selector (space without the shared
+// scope, shared without a space) is invalid args before any lookup.
 func TestMemoryUngrantedScopeIsDenied(t *testing.T) {
 	h := buildMemoryWith(t, memory.NewMapStore(),
 		registry.Services{Tenant: "acme", SessionID: "s", ProcessID: "p"},
-		`{"capabilities":[{"scope":"session","operations":["get","put"]}]}`)
+		`{"capabilities":[{"scope":"session","operations":["get","put"]},{"scope":"shared","space":"team","operations":["get"]}]}`)
 	// process is not mounted…
 	if r := memDispatch(t, h, `{"operation":"get","scope":"process","key":"k"}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoDenied {
 		t.Fatalf("ungranted scope = %v/%v, want failed/denied", r.Status(), r.Errno())
 	}
 	// …nor is a shared space the grant never named.
-	if r := memDispatch(t, h, `{"operation":"get","scope":"shared:other","key":"k"}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoDenied {
+	if r := memDispatch(t, h, `{"operation":"get","scope":"shared","space":"other","key":"k"}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoDenied {
 		t.Fatalf("ungranted shared space = %v/%v, want failed/denied", r.Status(), r.Errno())
+	}
+	// Selector-shape violations are invalid args, not denials.
+	if r := memDispatch(t, h, `{"operation":"get","scope":"session","space":"team","key":"k"}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("space on a non-shared scope = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
+	}
+	if r := memDispatch(t, h, `{"operation":"get","scope":"shared","key":"k"}`); r.Status() != sys.StatusFailed || r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("shared without a space = %v/%v, want failed/invalid_args", r.Status(), r.Errno())
 	}
 }
 
-// With one mount the scope may be omitted; with several it is required, so a
-// multi-scope call can never be silently misrouted. The handler enforces this
+// With one mount the selector may be omitted; with several it is required, so a
+// multi-mount call can never be silently misrouted. The handler enforces this
 // even though the published schema also marks scope required — defense in depth.
 func TestMemoryScopeRequiredWhenAmbiguous(t *testing.T) {
 	store := memory.NewMapStore()
@@ -244,6 +271,25 @@ func TestMemoryGrantsOnlySelectedOperations(t *testing.T) {
 	}
 }
 
+// The published schema names the granted shared spaces in a `space` enum, so the
+// manifest's mount list is the guest-visible vocabulary.
+func TestMemorySchemaListsSharedSpaces(t *testing.T) {
+	store := memory.NewMapStore()
+	services := registry.Services{Tenant: "acme", SessionID: "s", ProcessID: "p", MemoryStore: store}
+	built, err := registry.Default().Build(context.Background(),
+		[]registry.Entry{{Syscall: memory.Capability, Config: json.RawMessage(
+			`{"capabilities":[{"scope":"session","operations":["get"]},{"scope":"shared","space":"team-kb","operations":["get"]}]}`)}}, services)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	schema := string(built.Capabilities[0].InputSchema)
+	for _, want := range []string{`"scope"`, `"space"`, `"team-kb"`} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("schema missing %s: %s", want, schema)
+		}
+	}
+}
+
 // Flow policy is a per-mount property: a mount's taints guard every write into it
 // and its labels ride every read out of it.
 func TestMemoryMountFlow(t *testing.T) {
@@ -263,7 +309,7 @@ func TestMemoryMountFlow(t *testing.T) {
 	}
 
 	// A clean run writes, then reads the value back carrying the mount's source label.
-	memPut(t, handler, "session", "k", `"v"`)
+	memPut(t, handler, "session", "", "k", `"v"`)
 	got := memDispatch(t, handler, `{"operation":"get","scope":"session","key":"k"}`)
 	if got.Status() != sys.StatusResult {
 		t.Fatalf("get = %#v", got)

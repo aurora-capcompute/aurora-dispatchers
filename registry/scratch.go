@@ -22,15 +22,9 @@ const ScratchCapability = "core.scratch"
 // the tenant — the tenant is a constant.
 const scratchTenant = "scratch"
 
-// scratchScope is the internal name of scratch's single mount. Scratch is
-// inherently one compartment — the process's own ephemeral store — so a call
-// never carries a `scope` and the handler's lone mount serves every call
-// (selectMount returns it when a grant has exactly one mount).
-const scratchScope = "scratch"
-
 // scratchConfig is a core.scratch grant's driver configuration: the operations it
 // grants, each an ADT case discriminated by `operation`, with its data-flow
-// policy. Unlike core.memory there is no scope or subtree — scratch is a single,
+// policy. Unlike core.memory there is no scope selector — scratch is a single,
 // process-private, unscoped store — so it keeps the plain operation-list shape.
 type scratchConfig struct {
 	Capabilities json.RawMessage `json:"capabilities,omitempty"`
@@ -94,21 +88,20 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 
 	// A fresh in-memory store per Configure call — i.e. per process. It is never
 	// the durable tenant store (Services is unused here), and it is dropped with
-	// the process's dispatcher chain, so nothing stored here outlives the run. The
-	// lone mount has an empty prefix (the whole per-process store) and no scope, so
-	// calls address it without a `scope`.
+	// the process's dispatcher chain, so nothing stored here outlives the run.
+	// Scratch is inherently one compartment — the process's own ephemeral store —
+	// so its lone mount is anonymous (no scope, empty prefix = the whole
+	// per-process store) and calls address it with no selector.
 	out.Handlers = append(out.Handlers, memory.Handler{
 		Name:   ScratchCapability,
 		Store:  memory.NewMapStore(),
 		Tenant: scratchTenant,
-		Mounts: map[string]memory.Mount{
-			scratchScope: {
-				Operations:      ops,
-				RequireApproval: requireApproval,
-				Labels:          labels,
-				Taints:          taints,
-			},
-		},
+		Mounts: []memory.Mount{{
+			Operations:      ops,
+			RequireApproval: requireApproval,
+			Labels:          labels,
+			Taints:          taints,
+		}},
 	})
 	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name: ScratchCapability,

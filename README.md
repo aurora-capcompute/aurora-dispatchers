@@ -63,7 +63,7 @@ and replaying around it.
 | --- | --- | --- | --- |
 | `core.internet` | `internet/` | Bounded HTTP client, any method | Allowlist of `METHOD:origin`; **SSRF guard** blocks loopback/private/metadata IPs (post‑DNS, defeats rebinding); size + time bounds; policy re‑checked on every redirect |
 | `core.filesystem` | `filesystem/` | **Read‑only** host‑file reads | Chrooted to declared `roots`; rejects symlink escapes; whole‑file or 1‑based line range; byte/line caps; optional extension allowlist; returns a SHA‑256 hash |
-| `core.memory` | `memory/` | Tenant‑scoped durable shared key/value store | `get`/`put`/`list`/`search` on scoped **mounts** — `process` / `session` / `shared:<name>` (no tenant‑wide scope; the tenant is host‑set and prefixes every key, so cross‑tenant read is impossible); subtree‑chrooted; optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
+| `core.memory` | `memory/` | Tenant‑scoped durable shared key/value store | `get`/`put`/`list`/`search` on scoped **mounts** — `process` / `session` / `shared` (a `space` field names which shared space; no tenant‑wide scope; the tenant is host‑set and prefixes every key, so cross‑tenant read is impossible); optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
 | `core.scratch` | `registry/scratch.go` | Process‑local *ephemeral* store | Same operations as `core.memory` but a single **unscoped** fresh, private store per process — cleared when it ends (a place to offload a large read out of the model's context) |
 | `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
 | `core.httpTemplate` | `builtin/template.go` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
@@ -147,14 +147,17 @@ plus an injected `registry.Services`. Highlights per driver:
 - **filesystem** — `roots[]` (required, existing absolute dirs), `extensions[]`,
   `max_read_bytes` (2 MiB), `max_lines` (10000), `follow_symlinks`.
 - **memory** — `capabilities[]` is a list of **mounts**, each
-  `{scope, subtree, operations[], require_approval, labels, taints}`; `scope` ∈
-  `process` / `session` / `shared:<name>` (there is no tenant‑wide scope). Each
-  call names its `scope` (omittable only when one mount is granted) and a `key`;
-  the tenant + scope prefix are host‑set, so a key can never cross a tenant, and
-  crosses a session only through a named shared space. `Services` must carry the
-  calling `SessionID`/`ProcessID` for the self‑scopes to resolve.
+  `{scope, space, operations[], require_approval, labels, taints}`; `scope` ∈
+  `process` / `session` / `shared` (there is no tenant‑wide scope), and `space`
+  names the shared space — required exactly when `scope` is `shared`, forbidden
+  otherwise (the tag and its payload are separate fields, never packed into one
+  string). Each call names its `scope` (+`space` for shared; omittable only when
+  one mount is granted) and a `key`; the tenant + scope prefix are host‑set, so a
+  key can never cross a tenant, and crosses a session only through a named shared
+  space. `Services` must carry the calling `SessionID`/`ProcessID` for the
+  self‑scopes to resolve.
 - **scratch** — `capabilities[]{operation, require_approval, labels, taints}` — a
-  single unscoped, process‑private store (no `scope`, no `subtree`).
+  single unscoped, process‑private store (no scope selector).
 - **httptemplate** — `base_url` (grant default), `capabilities[]{operation, method,
   base_url, path, query, body, params, inject_headers, require_approval}`, bounds.
 - **kubernetes** — `capabilities[]{operation, resources[]{...}}`, `endpoint`,

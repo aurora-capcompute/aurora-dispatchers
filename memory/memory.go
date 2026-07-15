@@ -5,8 +5,9 @@
 // capabilities, never ambiently. The two kernel laws fix the driver's form:
 // determinism — reads travel the journaled syscall path, so replay re-reads
 // the recorded value regardless of later mutations; no ambient authority —
-// each grant is scoped to a tenant and attenuated to a subtree (chroot
-// semantics: guest keys are relative, escapes are rejected), and writes can
+// each grant is scoped to a tenant and partitioned into mounts (process,
+// session, or a named shared space; guest keys are relative to the mount's
+// host-computed prefix and escapes are rejected), and writes can
 // require human approval. Cross-tenant access is impossible by construction.
 //
 // A third law governs the driver's one effect: the kernel journals an intent
@@ -33,7 +34,7 @@ import (
 )
 
 // Store is the app-supplied durable KV store behind tenant memory. Keys are
-// slash-separated paths, already tenant- and subtree-qualified by the
+// slash-separated paths, already tenant- and mount-qualified by the
 // handler. Every value is stored with its provenance labels — the taint of
 // the process that wrote it — and Get returns them so a later session reads the
 // value *as tainted*, not as laundered truth (the memory-poisoning defense).
@@ -84,6 +85,17 @@ type ListedKey struct {
 // by the `operation` field in the call args, not separate capability names.
 const Capability = "core.memory"
 
+// Memory scopes — the compartment kinds a mount may address. A call selects its
+// mount with `scope`; when the scope is shared it also names which space with a
+// separate `space` field (the tag and its payload are distinct fields, never
+// packed into one string). This vocabulary is the call ABI and lives here; the
+// registry validates grants against it.
+const (
+	ScopeProcess = "process"
+	ScopeSession = "session"
+	ScopeShared  = "shared"
+)
+
 const (
 	// PutAny overwrites unconditionally — last writer wins.
 	PutAny int64 = -1
@@ -96,7 +108,7 @@ const (
 // and retries — optimistic concurrency across a tenant's sessions.
 var ErrConflict = errors.New("memory: version conflict")
 
-// GetRequest asks for one key, relative to the grant's subtree.
+// GetRequest asks for one key, relative to the addressed mount.
 type GetRequest struct {
 	Key string `json:"key"`
 }
@@ -172,11 +184,11 @@ const (
 	searchMaxTotalBytes     = 16 * 1024
 )
 
-// Handler serves one memory grant: a tenant plus a subtree of that tenant's
-// space. It satisfies builtin.Handler and publishes the single core.memory
+// Handler serves one memory grant: a tenant plus the mounts the grant opens
+// within it. It satisfies builtin.Handler and publishes the single core.memory
 // capability; its get/put/list operations are ADT cases selected by the
-// `operation` field. Tenant and subtree are host-side grant parameters — the
-// guest only ever sees keys relative to its subtree.
+// `operation` field. Tenant and mount prefixes are host-side grant parameters —
+// the guest only ever sees keys relative to its mount.
 type Handler struct {
 	// Name is the published capability name (core.memory).
 	Name string
@@ -186,24 +198,29 @@ type Handler struct {
 	// and is host-set from the process credential (never guest-supplied), so no
 	// access can ever cross tenants. Required.
 	Tenant string
-	// Mounts are the scopes this grant may address, keyed by scope name
-	// ("process", "session", "shared:<name>"). Each resolves to a physical key
-	// prefix within the tenant and carries the operations and policy allowed on
-	// it. A call selects one by its `scope`; when exactly one mount is granted the
-	// call may omit `scope`. There is deliberately no tenant-wide scope — the
-	// most-shared a key can be is a named shared space.
-	Mounts map[string]Mount
+	// Mounts are the compartments this grant may address. A call selects one by
+	// its `scope` (process, session, shared) plus `space` when the scope is
+	// shared; when exactly one mount is granted the call may omit the selector.
+	// Each mount resolves to a physical key prefix within the tenant and carries
+	// the operations and policy allowed on it. There is deliberately no
+	// tenant-wide scope — the most-shared a key can be is a named shared space.
+	Mounts []Mount
 }
 
-// Mount is one scope a grant may address: the physical key prefix it resolves to
-// inside the tenant (scope + optional subtree, host-computed from the process
-// credential), the operations allowed on it, and the data-flow policy that
-// applies — approval gates writes, Labels stamp reads, Taints guard writes.
+// Mount is one compartment a grant may address: the physical key prefix it
+// resolves to inside the tenant (host-computed from the process credential), the
+// operations allowed on it, and the data-flow policy that applies — approval
+// gates writes, Labels stamp reads, Taints guard writes.
 type Mount struct {
+	// Scope is the compartment kind (ScopeProcess, ScopeSession, ScopeShared) and
+	// Space names which shared space when Scope is ScopeShared. They are what a
+	// call's selector is matched against; an empty Scope is the anonymous single
+	// mount of a scope-free grant (core.scratch).
+	Scope string
+	Space string
 	// Prefix is the physical key prefix within the tenant — "s/<sessionID>",
-	// "p/<processID>", or "shared/<name>", each optionally suffixed with the
-	// mount's subtree. Resolved at build time from the scope and the credential,
-	// so it is never guest-influenced.
+	// "p/<processID>", or "shared/<name>". Resolved at build time from the scope
+	// and the credential, so it is never guest-influenced.
 	Prefix string
 	// Operations is the set of verbs granted on this mount (get/put/list/search).
 	Operations map[string]struct{}
@@ -230,16 +247,16 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if h.Tenant == "" {
 		return sys.FailCode(sys.ErrnoInternal, "memory grant has no tenant"), nil
 	}
-	operation, scope, err := peekCall(call.Args)
+	operation, scope, space, err := peekCall(call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	mount, err := h.selectMount(scope)
+	mount, err := h.selectMount(scope, space)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
 	}
 	if !mount.grants(operation) {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("memory operation %q is not granted on scope %q", operation, scope)), nil
+		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("memory operation %q is not granted on %s", operation, mount.label())), nil
 	}
 	// Sink guard: refuse a write before any effect if the run has observed a label
 	// this mount forbids. Only writes are sinks — a read is a source — so the guard
@@ -248,7 +265,7 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if operation == "put" {
 		if blocked := sys.BlockedBy(sys.Taint(ctx), mount.Taints); len(blocked) > 0 {
 			return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-				"flow policy: this run has observed %v, which may not flow into memory scope %q", blocked, scope)), nil
+				"flow policy: this run has observed %v, which may not flow into %s", blocked, mount.label())), nil
 		}
 	}
 	var result sys.SyscallResult
@@ -272,38 +289,58 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	return result.WithLabels(mount.Labels...), nil
 }
 
-// selectMount resolves the scope a call names to the mount it may use. An empty
-// scope is allowed only when the grant has exactly one mount (e.g. core.scratch),
-// where there is nothing to disambiguate.
-func (h Handler) selectMount(scope string) (Mount, error) {
-	if scope != "" {
-		m, ok := h.Mounts[scope]
-		if !ok {
-			return Mount{}, fmt.Errorf("memory scope %q is not granted", scope)
+// selectMount resolves the selector a call names (scope, plus space for shared)
+// to the mount it may use. An empty selector is allowed only when the grant has
+// exactly one mount (e.g. core.scratch), where there is nothing to disambiguate.
+func (h Handler) selectMount(scope, space string) (Mount, error) {
+	if scope == "" {
+		if len(h.Mounts) == 1 {
+			return h.Mounts[0], nil
 		}
-		return m, nil
+		return Mount{}, fmt.Errorf("a scope is required (this grant has multiple mounts)")
 	}
-	if len(h.Mounts) == 1 {
-		for _, m := range h.Mounts {
+	for _, m := range h.Mounts {
+		if m.Scope == scope && m.Space == space {
 			return m, nil
 		}
 	}
-	return Mount{}, fmt.Errorf("a scope is required (this grant has multiple scopes)")
+	return Mount{}, fmt.Errorf("memory %s is not granted", Mount{Scope: scope, Space: space}.label())
 }
 
-// peekCall reads the ADT discriminator and the addressed scope from a call's args.
-func peekCall(args json.RawMessage) (operation, scope string, err error) {
+// label names a mount for error text and denials.
+func (m Mount) label() string {
+	switch {
+	case m.Scope == ScopeShared:
+		return fmt.Sprintf("shared space %q", m.Space)
+	case m.Scope != "":
+		return fmt.Sprintf("scope %q", m.Scope)
+	default:
+		return "this grant"
+	}
+}
+
+// peekCall reads the ADT discriminator and the mount selector from a call's
+// args, and enforces the selector's shape: `space` accompanies exactly the
+// shared scope — the scope tag and the space payload are separate fields.
+func peekCall(args json.RawMessage) (operation, scope, space string, err error) {
 	var envelope struct {
 		Operation string `json:"operation"`
 		Scope     string `json:"scope"`
+		Space     string `json:"space"`
 	}
 	if err := json.Unmarshal(args, &envelope); err != nil {
-		return "", "", fmt.Errorf("decode call: %v", err)
+		return "", "", "", fmt.Errorf("decode call: %v", err)
 	}
 	if envelope.Operation == "" {
-		return "", "", fmt.Errorf("operation is required")
+		return "", "", "", fmt.Errorf("operation is required")
 	}
-	return envelope.Operation, envelope.Scope, nil
+	if envelope.Space != "" && envelope.Scope != ScopeShared {
+		return "", "", "", fmt.Errorf("space applies only to the shared scope")
+	}
+	if envelope.Scope == ScopeShared && envelope.Space == "" {
+		return "", "", "", fmt.Errorf("the shared scope requires a space (the shared space's name)")
+	}
+	return envelope.Operation, envelope.Scope, envelope.Space, nil
 }
 
 func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
@@ -402,7 +439,7 @@ func (h Handler) list(ctx context.Context, call sys.Syscall, mount Mount) (sys.S
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	// Return keys relative to the grant's subtree — the guest's view — and carry
+	// Return keys relative to the mount — the guest's view — and carry
 	// the union of the listed values' provenance labels, so a key name derived
 	// from tainted data cannot be read back label-free (get/search already
 	// re-stamp their values; list now matches for key names).
@@ -533,8 +570,8 @@ func truncateBytes(s string, max int) string {
 
 // qualify validates a guest key and roots it under a mount's physical prefix.
 // Chroot semantics: keys are relative slash-paths; traversal cannot escape
-// because escapes are rejected, not resolved. The prefix is host-computed (scope
-// + subtree), so the returned physical key always stays inside the mount.
+// because escapes are rejected, not resolved. The prefix is host-computed from
+// the scope, so the returned physical key always stays inside the mount.
 func qualify(prefix, key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("key is required")

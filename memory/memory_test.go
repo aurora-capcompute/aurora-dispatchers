@@ -47,22 +47,22 @@ func (j *memJournal) Append(record journaled.Record) error {
 
 func (j *memJournal) Length() int { return len(j.records) }
 
-// mount builds a single unscoped mount granting ops, with an optional subtree
-// prefix and write-approval gate. The engine tests dispatch without a `scope`, so
-// selectMount returns this lone mount for every call — scope selection is
-// exercised in the registry package, where mounts resolve from real scopes.
-func mount(prefix string, requireApproval bool, ops ...string) map[string]memory.Mount {
+// mount builds a single anonymous mount granting ops, with an optional physical
+// prefix and write-approval gate. The engine tests dispatch without a selector,
+// so selectMount returns this lone mount for every call — scope/space selection
+// is exercised in the registry package, where mounts resolve from real scopes.
+func mount(prefix string, requireApproval bool, ops ...string) []memory.Mount {
 	set := make(map[string]struct{}, len(ops))
 	for _, op := range ops {
 		set[op] = struct{}{}
 	}
-	return map[string]memory.Mount{"": {Prefix: prefix, Operations: set, RequireApproval: requireApproval}}
+	return []memory.Mount{{Prefix: prefix, Operations: set, RequireApproval: requireApproval}}
 }
 
-// allOps grants get/put/list on a single unscoped mount with no approval and no
+// allOps grants get/put/list on a single anonymous mount with no approval and no
 // flow policy — the common case for these tests. Operations are ADT cases of one
 // capability selected by the `operation` field; policy is a per-mount property.
-func allOps() map[string]memory.Mount { return mount("", false, "get", "put", "list") }
+func allOps() []memory.Mount { return mount("", false, "get", "put", "list") }
 
 // memArgs builds a memory call's args: the `operation` discriminator merged with
 // the operation's fields (a JSON object, or "").
@@ -167,7 +167,10 @@ func TestMemoryTenantsAreIsolated(t *testing.T) {
 	}
 }
 
-func TestMemorySubtreeChroot(t *testing.T) {
+// A mount's physical prefix (the scope's resolution, e.g. "s/<sessionID>") is a
+// chroot: guest keys are relative to it and escapes are rejected, not resolved,
+// so no key can reach outside its compartment.
+func TestMemoryMountPrefixChroot(t *testing.T) {
 	store := memory.NewMapStore()
 	full := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
 	dispatch(t, full, "put", `{"key":"secret/root-key","value":"hidden"}`, sys.Authorization{})
@@ -175,14 +178,14 @@ func TestMemorySubtreeChroot(t *testing.T) {
 
 	notes := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: mount("notes", false, "get", "put", "list")}
 
-	// Inside the subtree: relative keys resolve under notes/.
+	// Inside the mount: relative keys resolve under its prefix.
 	get := dispatch(t, notes, "get", `{"key":"today"}`, sys.Authorization{})
 	var response memory.GetResponse
 	if err := json.Unmarshal(get.Result(), &response); err != nil {
 		t.Fatalf("decode get: %v", err)
 	}
 	if !response.Found || string(response.Value) != `"visible"` {
-		t.Fatalf("subtree get = %+v", response)
+		t.Fatalf("mount get = %+v", response)
 	}
 
 	// Escape attempts are rejected, not resolved.
@@ -193,14 +196,14 @@ func TestMemorySubtreeChroot(t *testing.T) {
 		}
 	}
 
-	// Listing is confined to the subtree and returns relative keys.
+	// Listing is confined to the mount and returns relative keys.
 	list := dispatch(t, notes, "list", "", sys.Authorization{})
 	var listed memory.ListResponse
 	if err := json.Unmarshal(list.Result(), &listed); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
 	if len(listed.Keys) != 1 || listed.Keys[0] != "today" {
-		t.Fatalf("subtree list = %+v, want [today]", listed)
+		t.Fatalf("mount list = %+v, want [today]", listed)
 	}
 }
 

@@ -15,32 +15,21 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Memory scopes. A core.memory mount addresses exactly one scope, and every
-// physical key is prefixed by the tenant (host-set), so no scope can ever cross a
-// tenant boundary. There is deliberately no tenant-wide scope — the most-shared a
-// key can be is a named shared space.
-const (
-	// scopeProcess is private to the calling process.
-	scopeProcess = "process"
-	// scopeSession is shared across the calling session's processes — its whole
-	// spawn tree — and isolated from every other session.
-	scopeSession = "session"
-	// sharedScopePrefix marks a named tenant-local shared space: "shared:<name>".
-	// Any grant in the tenant that names the same space shares it (publish/read),
-	// so cross-session sharing is explicit and visible in both manifests.
-	sharedScopePrefix = "shared:"
-)
-
-// sharedNamePattern constrains a shared space name to a safe path-free identifier.
+// sharedNamePattern constrains a shared space name to a safe path-free
+// identifier — the name becomes a physical key segment, so it may not carry
+// slashes or dot segments.
 var sharedNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // memoryMount is one entry of a core.memory grant's capabilities: the scope it
-// mounts, an optional subtree chroot within that scope, the operations allowed on
-// it, and the data-flow policy. Scope is a whole-mount property; a call names the
-// scope it addresses and the handler enforces it.
+// mounts, the operations allowed on it, and the data-flow policy. Scope is a
+// tagged union kept as two fields — `scope` is the tag (process, session,
+// shared) and `space` is the shared variant's payload, required exactly when the
+// scope is shared. Every physical key is prefixed by the host-set tenant, so no
+// mount can ever cross a tenant boundary, and there is deliberately no
+// tenant-wide scope — the most-shared a key can be is a named shared space.
 type memoryMount struct {
 	Scope           string   `json:"scope"`
-	Subtree         string   `json:"subtree,omitempty"`
+	Space           string   `json:"space,omitempty"`
 	Operations      []string `json:"operations"`
 	RequireApproval *bool    `json:"require_approval,omitempty"`
 	FlowPolicy
@@ -52,8 +41,8 @@ type memoryConfig struct {
 }
 
 // memoryOperations are the cases a core.memory grant may enable, each with the
-// field schema its args carry (minus the `operation` and `scope` fields the
-// registry injects) and a one-line description.
+// field schema its args carry (minus the `operation` discriminator and the
+// scope/space selector the registry injects) and a one-line description.
 var memoryOperations = map[string]struct {
 	schema      json.RawMessage
 	description string
@@ -122,47 +111,46 @@ func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, serv
 
 // buildMemoryMounts resolves each mount's scope to its physical key prefix inside
 // the tenant, using the calling process's identity for the self-scopes.
-func buildMemoryMounts(config memoryConfig, services Services) (map[string]memory.Mount, error) {
-	mounts := make(map[string]memory.Mount, len(config.Capabilities))
+func buildMemoryMounts(config memoryConfig, services Services) ([]memory.Mount, error) {
+	mounts := make([]memory.Mount, 0, len(config.Capabilities))
 	for _, m := range config.Capabilities {
-		prefix, err := scopePrefix(m.Scope, services)
+		prefix, err := scopePrefix(m.Scope, m.Space, services)
 		if err != nil {
 			return nil, err
-		}
-		if m.Subtree != "" {
-			prefix += "/" + m.Subtree
 		}
 		ops := make(map[string]struct{}, len(m.Operations))
 		for _, op := range m.Operations {
 			ops[op] = struct{}{}
 		}
-		mounts[m.Scope] = memory.Mount{
+		mounts = append(mounts, memory.Mount{
+			Scope:           m.Scope,
+			Space:           m.Space,
 			Prefix:          prefix,
 			Operations:      ops,
 			RequireApproval: m.RequireApproval != nil && *m.RequireApproval,
 			Labels:          m.Labels,
 			Taints:          m.Taints,
-		}
+		})
 	}
 	return mounts, nil
 }
 
 // scopePrefix maps a scope to its physical key prefix within the tenant. The
 // self-scopes need the process credential; a missing id fails the build closed.
-func scopePrefix(scope string, services Services) (string, error) {
-	switch {
-	case scope == scopeProcess:
+func scopePrefix(scope, space string, services Services) (string, error) {
+	switch scope {
+	case memory.ScopeProcess:
 		if services.ProcessID == "" {
 			return "", errors.New("core.memory: the process scope needs the calling process's identity")
 		}
 		return "p/" + services.ProcessID, nil
-	case scope == scopeSession:
+	case memory.ScopeSession:
 		if services.SessionID == "" {
 			return "", errors.New("core.memory: the session scope needs the calling session's identity")
 		}
 		return "s/" + services.SessionID, nil
-	case strings.HasPrefix(scope, sharedScopePrefix):
-		return "shared/" + scope[len(sharedScopePrefix):], nil
+	case memory.ScopeShared:
+		return "shared/" + space, nil
 	default:
 		return "", fmt.Errorf("unknown memory scope %q", scope)
 	}
@@ -170,8 +158,8 @@ func scopePrefix(scope string, services Services) (string, error) {
 
 // parseMemoryConfig validates and canonicalizes a core.memory grant — the single
 // parse Normalize and Configure share. It rejects unknown fields, requires at
-// least one mount, each with a valid scope (no duplicate scope), a valid subtree,
-// at least one known operation, and a normalized flow policy.
+// least one mount, each with a valid scope/space pair (no duplicate mount), at
+// least one known operation, and a normalized flow policy.
 func parseMemoryConfig(raw json.RawMessage) (memoryConfig, error) {
 	var config memoryConfig
 	if len(raw) > 0 {
@@ -184,47 +172,58 @@ func parseMemoryConfig(raw json.RawMessage) (memoryConfig, error) {
 	if len(config.Capabilities) == 0 {
 		return memoryConfig{}, errors.New("capabilities must grant at least one mount")
 	}
-	seenScope := make(map[string]struct{}, len(config.Capabilities))
+	seen := make(map[string]struct{}, len(config.Capabilities))
 	for i := range config.Capabilities {
 		m := &config.Capabilities[i]
-		if err := validateScope(m.Scope); err != nil {
+		if err := validateScope(m.Scope, m.Space); err != nil {
 			return memoryConfig{}, fmt.Errorf("mount %d: %w", i, err)
 		}
-		if _, dup := seenScope[m.Scope]; dup {
-			return memoryConfig{}, fmt.Errorf("scope %q is mounted more than once", m.Scope)
+		key := m.Scope + "\x00" + m.Space
+		if _, dup := seen[key]; dup {
+			return memoryConfig{}, fmt.Errorf("mount %s is granted more than once", describeMount(*m))
 		}
-		seenScope[m.Scope] = struct{}{}
-		if err := validateSubtree(m.Subtree); err != nil {
-			return memoryConfig{}, fmt.Errorf("mount %q: %w", m.Scope, err)
-		}
+		seen[key] = struct{}{}
 		ops, err := normalizeMemoryOperations(m.Operations)
 		if err != nil {
-			return memoryConfig{}, fmt.Errorf("mount %q: %w", m.Scope, err)
+			return memoryConfig{}, fmt.Errorf("mount %s: %w", describeMount(*m), err)
 		}
 		m.Operations = ops
 		if m.FlowPolicy, err = m.FlowPolicy.Normalized(); err != nil {
-			return memoryConfig{}, fmt.Errorf("mount %q: %w", m.Scope, err)
+			return memoryConfig{}, fmt.Errorf("mount %s: %w", describeMount(*m), err)
 		}
 	}
-	sort.Slice(config.Capabilities, func(i, j int) bool { return config.Capabilities[i].Scope < config.Capabilities[j].Scope })
+	sort.Slice(config.Capabilities, func(i, j int) bool {
+		a, b := config.Capabilities[i], config.Capabilities[j]
+		if a.Scope != b.Scope {
+			return a.Scope < b.Scope
+		}
+		return a.Space < b.Space
+	})
 	return config, nil
 }
 
-// validateScope accepts process, session, or shared:<name>. There is no
-// tenant-wide scope — that permissiveness is removed by construction.
-func validateScope(scope string) error {
-	switch {
-	case scope == scopeProcess || scope == scopeSession:
-		return nil
-	case strings.HasPrefix(scope, sharedScopePrefix):
-		if name := scope[len(sharedScopePrefix):]; !sharedNamePattern.MatchString(name) {
-			return fmt.Errorf("invalid shared space name in scope %q (want shared:<name>, name of letters/digits/._-)", scope)
+// validateScope accepts process, session, or shared — with `space` naming the
+// shared space exactly when the scope is shared. There is no tenant-wide scope —
+// that permissiveness is removed by construction.
+func validateScope(scope, space string) error {
+	switch scope {
+	case memory.ScopeProcess, memory.ScopeSession:
+		if space != "" {
+			return fmt.Errorf("space applies only to the shared scope, not %q", scope)
 		}
 		return nil
-	case scope == "":
-		return errors.New("scope is required (process, session, or shared:<name>)")
+	case memory.ScopeShared:
+		if space == "" {
+			return errors.New("the shared scope requires a space (the shared space's name)")
+		}
+		if !sharedNamePattern.MatchString(space) {
+			return fmt.Errorf("invalid shared space name %q (letters/digits/._- only)", space)
+		}
+		return nil
+	case "":
+		return errors.New("scope is required (process, session, or shared)")
 	default:
-		return fmt.Errorf("unknown scope %q (want process, session, or shared:<name>) — there is no tenant-wide scope", scope)
+		return fmt.Errorf("unknown scope %q (want process, session, or shared) — there is no tenant-wide scope", scope)
 	}
 }
 
@@ -252,14 +251,23 @@ func normalizeMemoryOperations(ops []string) ([]string, error) {
 }
 
 // memorySchema publishes the guest-facing input schema: a oneOf over the granted
-// operations, each carrying a `scope` enum of the scopes that grant it. When more
-// than one scope is mounted, `scope` is required on every call so the target is
-// never ambiguous; a single-mount grant may omit it.
+// operations, each carrying a `scope` enum of the scopes that grant it and — when
+// any of those are shared — a `space` enum of the granting shared spaces. With
+// more than one mount, `scope` is required on every call so the target is never
+// ambiguous; a single-mount grant may omit the selector. Space's
+// required-exactly-when-shared rule is conditional, so the handler enforces it.
 func memorySchema(config memoryConfig) json.RawMessage {
-	scopesByOp := map[string][]string{}
+	scopesByOp := map[string]map[string]struct{}{}
+	spacesByOp := map[string][]string{}
 	for _, m := range config.Capabilities {
 		for _, op := range m.Operations {
-			scopesByOp[op] = append(scopesByOp[op], m.Scope)
+			if scopesByOp[op] == nil {
+				scopesByOp[op] = map[string]struct{}{}
+			}
+			scopesByOp[op][m.Scope] = struct{}{}
+			if m.Scope == memory.ScopeShared {
+				spacesByOp[op] = append(spacesByOp[op], m.Space)
+			}
 		}
 	}
 	scopeRequired := len(config.Capabilities) > 1
@@ -270,17 +278,23 @@ func memorySchema(config memoryConfig) json.RawMessage {
 	sort.Strings(ops)
 	branches := make([]json.RawMessage, 0, len(ops))
 	for _, op := range ops {
-		scopes := scopesByOp[op]
+		scopes := make([]string, 0, len(scopesByOp[op]))
+		for scope := range scopesByOp[op] {
+			scopes = append(scopes, scope)
+		}
 		sort.Strings(scopes)
-		branch, _ := OperationBranch(op, withScopeProperty(memoryOperations[op].schema, scopes, scopeRequired))
+		spaces := spacesByOp[op]
+		sort.Strings(spaces)
+		branch, _ := OperationBranch(op, withMountSelector(memoryOperations[op].schema, scopes, spaces, scopeRequired))
 		branches = append(branches, branch)
 	}
 	return OneOfSchema(branches)
 }
 
-// withScopeProperty adds the `scope` enum to an operation's object schema,
-// marking it required when the grant has multiple scopes.
-func withScopeProperty(base json.RawMessage, scopes []string, required bool) json.RawMessage {
+// withMountSelector adds the mount-selector properties to an operation's object
+// schema: the `scope` enum (required when the grant has multiple mounts) and,
+// when shared spaces grant the operation, the `space` enum naming them.
+func withMountSelector(base json.RawMessage, scopes, spaces []string, scopeRequired bool) json.RawMessage {
 	var schema map[string]json.RawMessage
 	_ = json.Unmarshal(base, &schema)
 	props := map[string]json.RawMessage{}
@@ -288,8 +302,11 @@ func withScopeProperty(base json.RawMessage, scopes []string, required bool) jso
 		_ = json.Unmarshal(raw, &props)
 	}
 	props["scope"], _ = json.Marshal(map[string]any{"type": "string", "enum": scopes})
+	if len(spaces) > 0 {
+		props["space"], _ = json.Marshal(map[string]any{"type": "string", "enum": spaces})
+	}
 	schema["properties"], _ = json.Marshal(props)
-	if required {
+	if scopeRequired {
 		var req []string
 		if raw, ok := schema["required"]; ok {
 			_ = json.Unmarshal(raw, &req)
@@ -302,28 +319,18 @@ func withScopeProperty(base json.RawMessage, scopes []string, required bool) jso
 
 func memoryDescription(config memoryConfig) string {
 	var b strings.Builder
-	b.WriteString("Tenant memory — durable key/value persisted across this tenant's sessions; keys are relative slash-paths. Each call names a `scope` (below) and a `key`. Scopes: process (this process only), session (this conversation), shared:<name> (a named cross-session space). Granted:")
+	b.WriteString("Tenant memory — durable key/value persisted across this tenant's sessions; keys are relative slash-paths. Each call names a `scope` and a `key`; a shared mount is addressed with scope \"shared\" plus its `space` name. Scopes: process (this process only), session (this conversation), shared (a named cross-session space). Granted:")
 	for _, m := range config.Capabilities {
-		fmt.Fprintf(&b, "\n- %s: %s", m.Scope, strings.Join(m.Operations, "/"))
-		if m.Subtree != "" {
-			fmt.Fprintf(&b, " (under %q)", m.Subtree)
-		}
+		fmt.Fprintf(&b, "\n- %s: %s", describeMount(m), strings.Join(m.Operations, "/"))
 	}
 	return b.String()
 }
 
-// validateSubtree enforces chroot semantics: a relative path with no leading or
-// trailing slash and no empty/./.. segment.
-func validateSubtree(subtree string) error {
-	if strings.HasPrefix(subtree, "/") || strings.HasSuffix(subtree, "/") {
-		return fmt.Errorf("subtree must be a relative path without leading or trailing slashes")
+// describeMount names a mount for descriptions and errors: `process`, `session`,
+// or `shared "team-kb"`.
+func describeMount(m memoryMount) string {
+	if m.Scope == memory.ScopeShared {
+		return fmt.Sprintf("shared %q", m.Space)
 	}
-	if subtree != "" {
-		for _, segment := range strings.Split(subtree, "/") {
-			if segment == "" || segment == "." || segment == ".." {
-				return fmt.Errorf("subtree %q contains an invalid path segment", subtree)
-			}
-		}
-	}
-	return nil
+	return m.Scope
 }
