@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
+	"github.com/aurora-capcompute/aurora-capcompute/replay"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
-	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/sys"
-	"github.com/aurora-capcompute/capcompute/sys/replay"
-	"github.com/aurora-capcompute/capcompute/sys/replay/tape/journaled"
 )
 
 // memJournal is a local in-memory journaled.Journal double; the kernel ships
@@ -315,10 +315,10 @@ func (d tenantChain) Capabilities() []sys.Capability {
 func TestMemoryPoisoningSurfacesAcrossThreads(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
-	run := func() *capcompute.FlowMonitor[string, memPID] {
-		return capcompute.NewFlowMonitor(capcompute.NewTaints[string](), capcompute.NewLabeler[memPID](chainAdapter{tenantChain{handler}}))
+	run := func() *monitor.FlowMonitor[string, memPID] {
+		return monitor.NewFlowMonitor(monitor.NewTaints[string](), monitor.NewLabeler[memPID](chainAdapter{tenantChain{handler}}))
 	}
-	dispatchRun := func(t *testing.T, monitor *capcompute.FlowMonitor[string, memPID], pid, name, args string) sys.SyscallResult {
+	dispatchRun := func(t *testing.T, monitor *monitor.FlowMonitor[string, memPID], pid, name, args string) sys.SyscallResult {
 		t.Helper()
 		call := sys.Syscall{Abi: sys.ABIVersion, Name: name}
 		if args != "" {

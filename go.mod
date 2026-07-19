@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/aurora-capcompute/aurora-capcompute v0.0.0-20260715151219-5426fd65f4aa
 	github.com/dylibso/observe-sdk/go v0.0.0-20240828172851-9145d8ad07e1 // indirect
 	github.com/extism/go-pdk v1.1.3 // indirect
 	github.com/extism/go-sdk v1.7.1 // indirect
