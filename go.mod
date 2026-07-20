@@ -3,12 +3,12 @@ module github.com/aurora-capcompute/aurora-dispatchers
 go 1.26
 
 require (
-	github.com/aurora-capcompute/capcompute v0.0.0-20260719205213-36cf1e2c9b9e
+	github.com/aurora-capcompute/capcompute v0.0.0-20260720213527-910038e5ae95
 	github.com/openai/openai-go/v3 v3.43.0
 )
 
 require (
-	github.com/aurora-capcompute/aurora-capcompute v0.0.0-20260719205319-2575c03b5dc9
+	github.com/aurora-capcompute/aurora-capcompute v0.0.0-20260720213739-4c82038acf53
 	github.com/dylibso/observe-sdk/go v0.0.0-20240828172851-9145d8ad07e1 // indirect
 	github.com/extism/go-pdk v1.1.3 // indirect
 	github.com/extism/go-sdk v1.7.1 // indirect
