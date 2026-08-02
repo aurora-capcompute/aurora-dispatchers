@@ -39,7 +39,9 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -112,10 +114,8 @@ func (p Param) validate(name, value string) error {
 		}
 	}
 	if len(p.OneOf) > 0 {
-		for _, allowed := range p.OneOf {
-			if value == allowed {
-				return nil
-			}
+		if slices.Contains(p.OneOf, value) {
+			return nil
 		}
 		return fmt.Errorf("parameter %q must be one of %s", name, strings.Join(p.OneOf, ", "))
 	}
@@ -172,9 +172,6 @@ func (c Command) ParamNames() []string {
 type Handler struct {
 	Name     string
 	Commands []Command
-	// run executes a resolved command. It is a field so tests can observe what
-	// would run without spawning it; production leaves it nil and gets execCommand.
-	run func(ctx context.Context, c Command, argv []string) (Response, error)
 }
 
 func (h Handler) Handles(name string) bool { return name == h.Name }
@@ -217,19 +214,22 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 		return sys.Yield("Approve " + summary), nil
 	}
 
-	runner := h.run
-	if runner == nil {
-		runner = execCommand
-	}
-	response, err := runner(ctx, command, argv)
+	response, err := execCommand(ctx, command, argv)
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		// A command that could not be started at all — a missing binary, a bad
-		// working directory. The run still touched a labeled capability, so the
-		// failure carries its labels: an error channel must not launder them.
-		return sys.FailCode(sys.ErrnoInternal, fmt.Sprintf("%s: %v", summary, err)).WithLabels(command.Labels...), nil
+		// A timeout may well pass on a retry — a slow cluster, a busy host — while
+		// a command that could not start at all (missing binary, bad working
+		// directory) is a configuration fault that retrying will not fix. Either
+		// way the run touched a labeled capability, so the failure carries its
+		// labels: an error channel must not launder them.
+		errno := sys.ErrnoInternal
+		var timedOut errTimeout
+		if errors.As(err, &timedOut) {
+			errno = sys.ErrnoTransient
+		}
+		return sys.FailCode(errno, fmt.Sprintf("%s: %v", summary, err)).WithLabels(command.Labels...), nil
 	}
 	if response.ExitCode != 0 {
 		// A non-zero exit is the command's own verdict, not an infrastructure
@@ -308,6 +308,14 @@ func execCommand(ctx context.Context, command Command, argv []string) (Response,
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// A floor enforced where the command runs, not only where it was configured:
+	// a relative path would be resolved against the working directory or PATH,
+	// which is exactly the ambient authority this driver refuses to depend on.
+	// The registry checks this too; a Handler built by hand must not slip past it.
+	if !filepath.IsAbs(command.Path) {
+		return Response{}, fmt.Errorf("executable %q is not an absolute path", command.Path)
+	}
+
 	cmd := exec.CommandContext(ctx, command.Path, argv...)
 	cmd.Dir = command.Dir
 	// The child's whole environment, never inherited. A nil Env would hand it
@@ -349,7 +357,7 @@ func execCommand(ctx context.Context, command Command, argv []string) (Response,
 	case err == nil:
 		response.ExitCode = 0
 	case errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil:
-		return Response{}, fmt.Errorf("timed out after %s", timeout)
+		return Response{}, errTimeout{after: timeout}
 	default:
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -361,6 +369,12 @@ func execCommand(ctx context.Context, command Command, argv []string) (Response,
 	}
 	return response, nil
 }
+
+// errTimeout is a command stopped by its own deadline, as opposed to one that
+// never started.
+type errTimeout struct{ after time.Duration }
+
+func (e errTimeout) Error() string { return fmt.Sprintf("timed out after %s", e.after) }
 
 // boundedBuffer accumulates up to limit bytes and discards the rest, recording
 // that it did. It never grows past the bound however much the child writes.

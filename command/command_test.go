@@ -301,6 +301,39 @@ func TestNonZeroExitSurfacesStderr(t *testing.T) {
 	}
 }
 
+// A timeout and a command that never started are different failures: the first
+// may well pass on a retry, the second is a configuration fault that will not.
+func TestTimeoutIsTransientAndStartFailureIsNot(t *testing.T) {
+	slow := Command{Name: "slow", Path: "/bin/sleep", Args: []string{"5"}, Timeout: 150 * time.Millisecond}
+	h := Handler{Name: Capability, Commands: []Command{slow}}
+	result := dispatch(t, h, `{"operation":"run","name":"slow","params":{}}`)
+	if result.Errno() != sys.ErrnoTransient {
+		t.Fatalf("timeout errno = %v, want transient (a retry may succeed)", result.Errno())
+	}
+
+	missing := Command{Name: "missing", Path: "/nonexistent/aurora/binary"}
+	h = Handler{Name: Capability, Commands: []Command{missing}}
+	result = dispatch(t, h, `{"operation":"run","name":"missing","params":{}}`)
+	if result.Errno() != sys.ErrnoInternal {
+		t.Fatalf("missing-binary errno = %v, want internal (retrying will not fix it)", result.Errno())
+	}
+}
+
+// The executable must be absolute where it runs, not only where it was
+// configured: a relative path would resolve against the working directory or
+// PATH, the ambient authority this driver refuses to depend on. The registry
+// checks it too; this is the floor under a Handler built by hand.
+func TestRelativeExecutableIsRefusedAtRunTime(t *testing.T) {
+	h := Handler{Name: Capability, Commands: []Command{{Name: "relative", Path: "echo"}}}
+	result := dispatch(t, h, `{"operation":"run","name":"relative","params":{}}`)
+	if result.Status() != sys.StatusFailed {
+		t.Fatalf("a relative executable must be refused, got %v", result.Status())
+	}
+	if !strings.Contains(result.Message(), "absolute") {
+		t.Fatalf("the refusal should say why: %s", result.Message())
+	}
+}
+
 // A command marked for approval yields until it is approved, and nothing runs
 // in the meantime.
 func TestApprovalGate(t *testing.T) {

@@ -11,8 +11,11 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
-// kubectlGrant is the shape this driver exists for: a host-owned script, a
-// closed set of contexts, and a pattern for the resource.
+// kubectlGrant is the shape this driver exists for: a host-owned script and
+// closed sets for what the agent may choose. The resource is a set rather than a
+// name-shaped pattern on purpose — "[a-z][a-z0-9]*" reads like "a resource" and
+// is one, but it also admits "secrets", and `kubectl get secrets -o json`
+// returns every value.
 const kubectlGrant = `{"capabilities":[{"operation":"run","commands":[{
   "name":"kubectl-get",
   "description":"List Kubernetes objects in a cluster",
@@ -21,7 +24,7 @@ const kubectlGrant = `{"capabilities":[{"operation":"run","commands":[{
   "env":{"KUBECONFIG":"/etc/aurora/kubeconfig","PATH":"/usr/bin:/bin"},
   "params":{
     "context":["prod-eu","staging"],
-    "resource":"[a-z][a-z0-9]*",
+    "resource":["pods","deployments","configmaps"],
     "namespace":"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
   },
   "timeout_ms":10000,
@@ -58,6 +61,31 @@ func TestPublishedSchemaCarriesTheClosedSet(t *testing.T) {
 	// The description tells the model what it may choose.
 	if desc := out.Capabilities[0].Description; !strings.Contains(desc, "prod-eu") || !strings.Contains(desc, "staging") {
 		t.Fatalf("description does not list the contexts: %s", desc)
+	}
+}
+
+// Two commands may declare the same slot name with different constraints. A
+// merged params object would have to pick one — publishing a constraint that
+// does not match the command being called, and picking it by map iteration
+// order, so the schema would not even be the same twice.
+func TestPerCommandSchemasDoNotCollide(t *testing.T) {
+	grant := `{"capabilities":[{"operation":"run","commands":[
+	  {"name":"read-eu","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-eu"]}},
+	  {"name":"read-us","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-us"]}}
+	]}]}`
+	first := string(configure(t, grant).Capabilities[0].InputSchema)
+	if !strings.Contains(first, `"prod-eu"`) || !strings.Contains(first, `"prod-us"`) {
+		t.Fatalf("both commands' constraints must survive:\n%s", first)
+	}
+	// Each branch pins its own name, so neither context escapes into the other.
+	if strings.Count(first, `"prod-eu"`) != 1 || strings.Count(first, `"prod-us"`) != 1 {
+		t.Fatalf("a constraint leaked across commands:\n%s", first)
+	}
+	// And it is the same schema every time: nothing here may depend on map order.
+	for i := 0; i < 20; i++ {
+		if again := string(configure(t, grant).Capabilities[0].InputSchema); again != first {
+			t.Fatalf("schema is not deterministic:\n%s\n%s", first, again)
+		}
 	}
 }
 

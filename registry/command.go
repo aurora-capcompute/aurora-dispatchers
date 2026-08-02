@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -152,14 +151,24 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		Commands: commands,
 	})
 
-	branch, err := OperationBranch(command.VerbRun, commandRunSchema(commands))
-	if err != nil {
-		return err
+	// One branch per command rather than one branch listing every name: two
+	// commands may declare the same slot name with different constraints, and a
+	// merged params object would have to pick one of them — silently publishing a
+	// constraint that does not match the command actually being called.
+	sorted := append([]command.Command(nil), commands...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	branches := make([]json.RawMessage, 0, len(sorted))
+	for _, c := range sorted {
+		branch, err := OperationBranch(command.VerbRun, commandCallSchema(c))
+		if err != nil {
+			return err
+		}
+		branches = append(branches, branch)
 	}
 	out.Capabilities = append(out.Capabilities, sys.Capability{
 		Name:        command.Capability,
 		Description: commandDescription(commands),
-		InputSchema: OneOfSchema([]json.RawMessage{branch}),
+		InputSchema: OneOfSchema(branches),
 	})
 	return nil
 }
@@ -350,41 +359,28 @@ func normalizeCommandRule(rule CommandRule) (CommandRule, error) {
 // placeholderPattern mirrors the driver's own placeholder syntax.
 var placeholderPattern = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 
-// CommandExecutableExists reports whether a rule's executable is present and
-// executable. Configure does not call it — a grant is validated where it is
-// authored, which may not be the host that runs it — but an assembly that wants
-// to fail closed at startup can.
-func CommandExecutableExists(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
+// commandCallSchema types a call to one command: its name pinned to a const, and
+// a params object carrying exactly that command's slots with their own enum or
+// pattern, all required. The kernel Validator enforces this before dispatch, so
+// an ungranted name, a missing slot, or an out-of-set value is refused before the
+// driver sees it — and the driver checks again.
+func commandCallSchema(c command.Command) json.RawMessage {
+	nameConst, _ := json.Marshal(c.Name)
+	names := c.ParamNames()
+	if len(names) == 0 {
+		return json.RawMessage(fmt.Sprintf(
+			`{"type":"object","properties":{"name":{"const":%s}},"required":["name"],"additionalProperties":false}`,
+			nameConst))
 	}
-	if info.IsDir() || info.Mode()&0o111 == 0 {
-		return fmt.Errorf("%s is not an executable file", path)
+	properties := make(map[string]json.RawMessage, len(names))
+	for _, name := range names {
+		properties[name] = paramSchema(c.Params[name])
 	}
-	return nil
-}
-
-// commandRunSchema types the guest's run call: the command name pinned to the
-// granted set, and a params object whose properties are exactly the slots those
-// commands declare, each carrying its own enum or pattern. The kernel Validator
-// enforces this before dispatch, so an ungranted name or an out-of-set value is
-// refused before the driver sees it.
-func commandRunSchema(commands []command.Command) json.RawMessage {
-	names := make([]string, 0, len(commands))
-	properties := map[string]json.RawMessage{}
-	for _, c := range commands {
-		names = append(names, c.Name)
-		for name, param := range c.Params {
-			properties[name] = paramSchema(param)
-		}
-	}
-	sort.Strings(names)
-	nameEnum, _ := json.Marshal(names)
 	props, _ := json.Marshal(properties)
+	required, _ := json.Marshal(names)
 	return json.RawMessage(fmt.Sprintf(
-		`{"type":"object","properties":{"name":{"enum":%s},"params":{"type":"object","properties":%s,"additionalProperties":false}},"required":["name"],"additionalProperties":false}`,
-		nameEnum, props))
+		`{"type":"object","properties":{"name":{"const":%s},"params":{"type":"object","properties":%s,"required":%s,"additionalProperties":false}},"required":["name","params"],"additionalProperties":false}`,
+		nameConst, props, required))
 }
 
 func paramSchema(param command.Param) json.RawMessage {
