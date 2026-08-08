@@ -64,9 +64,9 @@ func New(registrations ...Registration) *Registry {
 // Try-Confirm/Cancel is deliberately not a driver. A reservation is a real
 // write to the participant that owns the resource — the third-party system
 // every reader treats as the source of truth — so it is an ordinary dispatch:
-// reserve, register the release with sys.compensate (the runtime guarantees it
-// runs if the section aborts or fails), confirm as the last call before
-// sys.commit. Pending state, and any expiry policy, belong to the resource
+// reserve, then confirm as the last call before sys.commit; a section that
+// aborts re-runs from its sys.begin, so releasing the reservation is the
+// program's own business. Pending state, and any expiry policy, belong to the resource
 // owner (Pardon & Pautasso's RESTful TCC puts them on the participant); an
 // orchestrator-side hold table would be a reservation no other booker can see.
 func Default() *Registry {
