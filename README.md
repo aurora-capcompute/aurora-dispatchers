@@ -160,8 +160,6 @@ plus an injected `registry.Services`. Highlights per driver:
   single unscoped, process‑private store (no scope selector).
 - **httptemplate** — `base_url` (grant default), `capabilities[]{operation, method,
   base_url, path, query, body, params, inject_headers, require_approval}`, bounds.
-- **kubernetes** — `capabilities[]{operation, resources[]{...}}`, `endpoint`,
-  `token`, `ca_cert`, bounds, `requests_per_second`, `burst`.
 
 ## Project layout
 
@@ -179,8 +177,8 @@ registry/    the Registration interface + Registry.Build, per-syscall registrati
 
 Only two direct dependencies: `github.com/aurora-capcompute/capcompute` (the `sys`
 vocabulary every driver speaks) and `github.com/openai/openai-go/v3` (used only by
-`openaillm`). Domain drivers like `-k8s` and `-helm` live in their own modules so an
-assembly pulls only the clients it ships.
+`openaillm`). Domain drivers live in their own modules so an assembly pulls only
+the clients it ships.
 
 ## Related repos
 
