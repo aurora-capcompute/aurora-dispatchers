@@ -50,14 +50,14 @@ func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
 
 func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`)
-	var config builtin.Config
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, &config); err != nil {
+	config := builtin.NewTable()
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != internet.Capability {
-		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities, internet.Capability)
+	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != internet.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities(), internet.Capability)
 	}
-	if len(config.Handlers) != 1 || !config.Handlers[0].Handles(internet.Capability) {
+	if len(config.Operations(internet.Capability)) == 0 {
 		t.Fatalf("handler must route by the capability name %s", internet.Capability)
 	}
 }

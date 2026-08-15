@@ -62,30 +62,21 @@ func (FilesystemRegistration) Normalize(_ string, raw json.RawMessage) (json.Raw
 	return json.Marshal(config)
 }
 
-func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Config) error {
+func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Table) error {
 	config, grants, err := parseFilesystemConfig(raw)
 	if err != nil {
 		return err
 	}
 
 	operations := make(map[string]filesystem.Operation, len(grants))
-	branches := make([]json.RawMessage, 0, len(grants))
-	names := make([]string, 0, len(grants))
 	for _, grant := range grants {
 		operations[grant.Operation] = filesystem.Operation{
 			RequireApproval: grant.RequireApproval != nil && *grant.RequireApproval,
 			Labels:          grant.Labels,
 			Taints:          grant.Taints,
 		}
-		branch, err := OperationBranch(grant.Operation, filesystemOperations[grant.Operation].schema)
-		if err != nil {
-			return err
-		}
-		branches = append(branches, branch)
-		names = append(names, filesystemOperations[grant.Operation].description)
 	}
-
-	out.Handlers = append(out.Handlers, filesystem.Handler{
+	handler := filesystem.Handler{
 		Name:           filesystem.Capability,
 		Roots:          config.Roots,
 		Extensions:     config.Extensions,
@@ -93,14 +84,32 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		MaxLines:       config.MaxLines,
 		FollowSymlinks: config.FollowSymlinks,
 		Operations:     operations,
-	})
-	out.Capabilities = append(out.Capabilities, sys.Capability{
+	}
+
+	entries := make([]builtin.Entry, 0, len(grants))
+	branches := make([]json.RawMessage, 0, len(grants))
+	names := make([]string, 0, len(grants))
+	for _, grant := range grants {
+		branch, err := OperationBranch(grant.Operation, filesystemOperations[grant.Operation].schema)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, builtin.Entry{
+			Key:         builtin.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
+			Description: filesystemOperations[grant.Operation].description,
+			Input:       branch,
+			Handler:     handler,
+		})
+		branches = append(branches, branch)
+		names = append(names, filesystemOperations[grant.Operation].description)
+	}
+
+	return out.Add(filesystem.Capability, builtin.Field("operation"), entries, sys.Capability{
 		Name: filesystem.Capability,
 		Description: fmt.Sprintf("Read-only filesystem access under %s — paths are absolute or relative to a root, and never escape it. Choose an operation:\n- %s.",
 			strings.Join(config.Roots, ", "), strings.Join(names, "\n- ")),
 		InputSchema: OneOfSchema(branches),
 	})
-	return nil
 }
 
 // parseFilesystemConfig validates and canonicalizes a core.filesystem grant's

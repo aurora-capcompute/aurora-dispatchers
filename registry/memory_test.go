@@ -16,17 +16,27 @@ import (
 // buildMemory builds a core.memory grant with a default process identity — the
 // common case for tests that don't care which concrete session/process they run
 // as. Isolation tests use buildMemoryWith to pin identities and share a store.
+func buildMemoryTable(t *testing.T, config string) *builtin.Table {
+	t.Helper()
+	return buildMemoryTableWith(t, memory.NewMapStore(),
+		registry.Services{Tenant: "acme", SessionID: "s1", ProcessID: "p1"}, config)
+}
+
 func buildMemory(t *testing.T, config string) builtin.Handler {
 	t.Helper()
-	return buildMemoryWith(t, memory.NewMapStore(),
-		registry.Services{Tenant: "acme", SessionID: "s1", ProcessID: "p1"}, config)
+	return buildMemoryTable(t, config).Entries()[0].Handler
+}
+
+func buildMemoryWith(t *testing.T, store memory.Store, services registry.Services, config string) builtin.Handler {
+	t.Helper()
+	return buildMemoryTableWith(t, store, services, config).Entries()[0].Handler
 }
 
 // buildMemoryWith builds a core.memory grant against a caller-supplied store and
 // identity, so several handlers can be pointed at one store to prove scope
 // isolation (different process/session ids resolve the self-scopes to different
 // physical prefixes).
-func buildMemoryWith(t *testing.T, store memory.Store, services registry.Services, config string) builtin.Handler {
+func buildMemoryTableWith(t *testing.T, store memory.Store, services registry.Services, config string) *builtin.Table {
 	t.Helper()
 	services.MemoryStore = store
 	built, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Build(context.Background(),
@@ -34,16 +44,16 @@ func buildMemoryWith(t *testing.T, store memory.Store, services registry.Service
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(built.Capabilities) != 1 || built.Capabilities[0].Name != memory.Capability {
-		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities, memory.Capability)
+	if len(built.Capabilities()) != 1 || built.Capabilities()[0].Name != memory.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities(), memory.Capability)
 	}
-	if !strings.Contains(string(built.Capabilities[0].InputSchema), `"oneOf"`) {
-		t.Fatalf("input schema is not a oneOf ADT: %s", built.Capabilities[0].InputSchema)
+	if !strings.Contains(string(built.Capabilities()[0].InputSchema), `"oneOf"`) {
+		t.Fatalf("input schema is not a oneOf ADT: %s", built.Capabilities()[0].InputSchema)
 	}
-	if len(built.Handlers) != 1 {
-		t.Fatalf("handlers = %+v", built.Handlers)
+	if len(built.Entries()) == 0 {
+		t.Fatalf("no operations indexed: %+v", built.Capabilities())
 	}
-	return built.Handlers[0]
+	return built
 }
 
 func memDispatch(t *testing.T, h builtin.Handler, args string) sys.SyscallResult {
@@ -86,12 +96,14 @@ func memGet(t *testing.T, h builtin.Handler, scope, space, key string) memory.Ge
 	return resp
 }
 
+// Operations are cases of one capability, indexed under it — never capability
+// names of their own.
 func TestMemoryPublishesOneCapability(t *testing.T) {
-	handler := buildMemory(t, `{"capabilities":[{"scope":"session","operations":["get","put","list"]}]}`)
-	if !handler.Handles("core.memory") {
-		t.Fatal("handler must route by the capability name core.memory")
+	table := buildMemoryTable(t, `{"capabilities":[{"scope":"session","operations":["get","put","list"]}]}`)
+	if got := table.Operations("core.memory"); len(got) != 3 {
+		t.Fatalf("operations = %v, want get/list/put under core.memory", got)
 	}
-	if handler.Handles("memory.put") {
+	if len(table.Operations("memory.put")) != 0 {
 		t.Fatal("operations are ADT cases, not separate capability names")
 	}
 }
@@ -282,7 +294,7 @@ func TestMemorySchemaListsSharedSpaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	schema := string(built.Capabilities[0].InputSchema)
+	schema := string(built.Capabilities()[0].InputSchema)
 	for _, want := range []string{`"scope"`, `"space"`, `"team-kb"`} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("schema missing %s: %s", want, schema)

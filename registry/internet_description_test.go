@@ -19,11 +19,11 @@ func TestInternetDescriptionIncludesAuthorUsageNote(t *testing.T) {
 		`{"methods":["GET","POST"],"domain":"https://onyx.example.com","description":` + mustJSON(usage) + `},` +
 		`{"methods":["GET"],"domain":"https://docs.example.org"}` +
 		`]}`)
-	var config builtin.Config
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, &config); err != nil {
+	config := builtin.NewTable()
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	got := config.Capabilities[0].Description
+	got := config.Capabilities()[0].Description
 	for _, want := range []string{"onyx.example.com", "GET/POST", usage, "docs.example.org"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("description missing %q:\n%s", want, got)
@@ -68,12 +68,12 @@ func TestInternetDescriptionRejectsUnsafeText(t *testing.T) {
 func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"https://onyx.example.com",` +
 		`"description":"Onyx KB.","inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
-	var config builtin.Config
+	config := builtin.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, &config); err != nil {
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	got := config.Capabilities[0].Description
+	got := config.Capabilities()[0].Description
 	for _, want := range []string{"Onyx KB.", "Authorization", "attached automatically", "do not set it"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("description missing %q:\n%s", want, got)
@@ -91,12 +91,12 @@ func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
 func TestInternetDescriptionAnnotatesMultipleInjectedHeaders(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://onyx.example.com",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN"},"X-Api-Key":{"secret":"ONYX_KEY"}}}]}`)
-	var config builtin.Config
+	config := builtin.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "t", "ONYX_KEY": "k"}}
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, &config); err != nil {
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	got := config.Capabilities[0].Description
+	got := config.Capabilities()[0].Description
 	for _, want := range []string{"Authorization, X-Api-Key", "do not set them"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("description missing %q:\n%s", want, got)

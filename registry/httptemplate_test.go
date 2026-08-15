@@ -65,24 +65,24 @@ func templateConfigJSON() string {
 // operations, and a handler that routes it.
 func TestTemplateConfigurePublishesCapability(t *testing.T) {
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
-	var config builtin.Config
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, &config); err != nil {
+	config := builtin.NewTable()
+	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != "core.httpTemplate" {
-		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Capabilities)
+	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != "core.httpTemplate" {
+		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Capabilities())
 	}
-	schema := string(config.Capabilities[0].InputSchema)
+	schema := string(config.Capabilities()[0].InputSchema)
 	for _, want := range []string{`"oneOf"`, `"search"`, `"query"`} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("schema missing %q: %s", want, schema)
 		}
 	}
-	desc := config.Capabilities[0].Description
+	desc := config.Capabilities()[0].Description
 	if !strings.Contains(desc, "search") || !strings.Contains(desc, "Search the KB.") {
 		t.Fatalf("description does not document the operation: %s", desc)
 	}
-	if len(config.Handlers) != 1 || !config.Handlers[0].Handles("core.httpTemplate") {
+	if len(config.Operations("core.httpTemplate")) == 0 {
 		t.Fatalf("handler must route core.httpTemplate")
 	}
 	// The resolved token must never appear in the published surface.
@@ -103,13 +103,13 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 		`"inject_headers":{"X-Api-Key":{"secret":"WEATHER_KEY"}}}` +
 		`]}`
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc", "WEATHER_KEY": "wk-xyz"}}
-	var config builtin.Config
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(raw), services, &config); err != nil {
+	config := builtin.NewTable()
+	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(raw), services, config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	handler, ok := config.Handlers[0].(httptemplate.Handler)
+	handler, ok := config.Entries()[0].Handler.(httptemplate.Handler)
 	if !ok {
-		t.Fatalf("handler = %T, want httptemplate.Handler", config.Handlers[0])
+		t.Fatalf("handler = %T, want httptemplate.Handler", config.Entries()[0].Handler)
 	}
 	search, weather := handler.Operations["search"], handler.Operations["weather"]
 	if search.BaseURL != "https://onyx.example.com" || weather.BaseURL != "https://api.weather.example.com" {
@@ -130,12 +130,12 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 // A referenced secret the resolver cannot supply fails the driver build — at
 // activation — never at request time.
 func TestTemplateConfigureFailsClosedOnMissingSecret(t *testing.T) {
-	var config builtin.Config
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), registry.Services{}, &config); err == nil {
+	config := builtin.NewTable()
+	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), registry.Services{}, config); err == nil {
 		t.Fatal("Configure built a handler referencing a secret with no resolver")
 	}
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, &config); err == nil {
+	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, config); err == nil {
 		t.Fatal("Configure built a handler referencing an unknown secret")
 	}
 }

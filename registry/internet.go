@@ -82,7 +82,7 @@ func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMe
 	return json.Marshal(config)
 }
 
-func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
+func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
 	config, policy, err := parseInternetConfig(raw)
 	if err != nil {
 		return err
@@ -101,18 +101,35 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	)
 	// SSRF guard on unless the grant explicitly opted into private networks.
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
-	out.Handlers = append(out.Handlers, internet.Handler{
+	methods := internetMethodPolicies(config.Capabilities)
+	handler := internet.Handler{
 		Name:       internet.Capability,
-		Methods:    internetMethodPolicies(config.Capabilities),
+		Methods:    methods,
 		Client:     client,
 		Injections: injections,
-	})
-	out.Capabilities = append(out.Capabilities, sys.Capability{
+	}
+	// One handler, many keys: every granted method indexes to the same client
+	// and allowlist, and it is the entry — not the handler — that the call was
+	// matched against.
+	granted := make([]string, 0, len(methods))
+	for method := range methods {
+		granted = append(granted, method)
+	}
+	sort.Strings(granted)
+	entries := make([]builtin.Entry, 0, len(granted))
+	for _, method := range granted {
+		entries = append(entries, builtin.Entry{
+			Key:         builtin.Key{Syscall: internet.Capability, Operation: method},
+			Description: fmt.Sprintf("%s request", method),
+			Input:       internetRequestSchema,
+			Handler:     handler,
+		})
+	}
+	return out.Add(internet.Capability, builtin.Field("method"), entries, sys.Capability{
 		Name:        internet.Capability,
 		Description: internetDescription(config.Capabilities),
 		InputSchema: internetRequestSchema,
 	})
-	return nil
 }
 
 // parseInternetConfig validates and canonicalizes a core.internet grant's
@@ -144,7 +161,16 @@ func parseInternetConfig(raw json.RawMessage) (internetConfig, internet.Policy, 
 		}
 		methods := canonicalMethods(permission.Methods)
 		if len(methods) == 0 {
-			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: methods must contain at least one HTTP method (or \"*\")", i)
+			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: methods must name at least one HTTP method", i)
+		}
+		// Methods are enumerated, never wildcarded: the granted set is the index,
+		// and an unbounded one cannot be indexed, listed in a refusal, or given
+		// per-method flow policy.
+		for _, method := range methods {
+			if method == internet.AnyMethod {
+				return internetConfig{}, internet.Policy{}, fmt.Errorf(
+					"permission %d: methods must be enumerated; %q is not allowed", i, internet.AnyMethod)
+			}
 		}
 		for _, method := range methods {
 			rule, err := internet.NewRule(method, domain)

@@ -76,13 +76,13 @@ func TestInjectHeadersConfigureResolvesReference(t *testing.T) {
 		Secrets:  mapResolver{"ONYX_TOKEN": "tok-abc"},
 		AuditKey: []byte("audit-key"),
 	}
-	var config builtin.Config
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, &config); err != nil {
+	config := builtin.NewTable()
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	handler, ok := config.Handlers[0].(internet.Handler)
+	handler, ok := config.Entries()[0].Handler.(internet.Handler)
 	if !ok {
-		t.Fatalf("handler = %T, want internet.Handler", config.Handlers[0])
+		t.Fatalf("handler = %T, want internet.Handler", config.Entries()[0].Handler)
 	}
 	if len(handler.Injections) != 1 {
 		t.Fatalf("injections = %+v, want one", handler.Injections)
@@ -112,14 +112,14 @@ func TestInjectHeadersConfigureResolvesReference(t *testing.T) {
 func TestInjectHeadersConfigureFailsClosedOnMissingSecret(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://onyx.example.com",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
-	var config builtin.Config
+	config := builtin.NewTable()
 	// No resolver configured at all.
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, &config); err == nil {
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, config); err == nil {
 		t.Fatal("Configure built a driver referencing a secret with no resolver")
 	}
 	// Resolver present but the name is unknown.
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, &config); err == nil {
+	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err == nil {
 		t.Fatal("Configure built a driver referencing an unknown secret")
 	}
 }

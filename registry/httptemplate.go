@@ -93,7 +93,7 @@ func (HTTPTemplateRegistration) Normalize(_ string, raw json.RawMessage) (json.R
 	return json.Marshal(config)
 }
 
-func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
+func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
 	config, err := parseTemplateConfig(raw)
 	if err != nil {
 		return err
@@ -123,17 +123,25 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	)
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 
-	out.Handlers = append(out.Handlers, httptemplate.Handler{
+	handler := httptemplate.Handler{
 		Name:       HTTPTemplateSyscall,
 		Client:     client,
 		Operations: operations,
-	})
-	out.Capabilities = append(out.Capabilities, sys.Capability{
+	}
+	entries := make([]builtin.Entry, 0, len(config.Capabilities))
+	for i, operation := range config.Capabilities {
+		entries = append(entries, builtin.Entry{
+			Key:         builtin.Key{Syscall: HTTPTemplateSyscall, Operation: operation.Operation},
+			Description: operation.Description,
+			Input:       branches[i],
+			Handler:     handler,
+		})
+	}
+	return out.Add(HTTPTemplateSyscall, builtin.Field("operation"), entries, sys.Capability{
 		Name:        HTTPTemplateSyscall,
 		Description: templateDescription(config),
 		InputSchema: OneOfSchema(branches),
 	})
-	return nil
 }
 
 // parseTemplateConfig validates and canonicalizes a template grant: at least one

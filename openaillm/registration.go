@@ -74,7 +74,7 @@ func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, e
 // granted operations — and the handler that serves them. The grant is kept off
 // the discoverable menu via the manifest `hidden` flag (the agent calls the LLM
 // itself; the model never sees it).
-func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services, out *builtin.Config) error {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services, out *builtin.Table) error {
 	config, grants, err := parseGrantConfig(raw)
 	if err != nil {
 		return err
@@ -91,11 +91,18 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		return fmt.Errorf("core.openaiApi api_key: %w", err)
 	}
 	normalized.apiKey = apiKey
-	handler, err := findOrCreateHandler(out, normalized)
+	// One handler backs every operation of this grant. The table refuses a
+	// second Add for the same syscall, so the old find-or-create scan — which
+	// existed to share a handler across repeated grants — has nothing to find:
+	// the manifest already rejects a duplicate syscall.
+	client, err := NewClient(normalized)
 	if err != nil {
-		return err
+		client = failedClient{err: err}
 	}
+	handler := NewHandler(client)
+	handler.connection = connectionFor(normalized)
 
+	entries := make([]builtin.Entry, 0, len(grants))
 	branches := make([]json.RawMessage, 0, len(grants))
 	descriptions := make([]string, 0, len(grants))
 	for _, grant := range grants {
@@ -104,16 +111,21 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		if err != nil {
 			return err
 		}
+		entries = append(entries, builtin.Entry{
+			Key:         builtin.Key{Syscall: SyscallType, Operation: grant.Operation},
+			Description: openaiOperations[grant.Operation].description,
+			Input:       branch,
+			Handler:     handler,
+		})
 		branches = append(branches, branch)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
-	out.Capabilities = append(out.Capabilities, sys.Capability{
+	return out.Add(SyscallType, builtin.Field("operation"), entries, sys.Capability{
 		Name: SyscallType,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
 			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),
 		InputSchema: registry.OneOfSchema(branches),
 	})
-	return nil
 }
 
 func modelScope(settings normalizedSettings) string {
@@ -160,26 +172,6 @@ func parseGrantConfig(raw json.RawMessage) (grantConfig, []registry.OperationGra
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
 	return config, grants, nil
-}
-
-func findOrCreateHandler(config *builtin.Config, settings normalizedSettings) (*Handler, error) {
-	connection := connectionFor(settings)
-	for _, existing := range config.Handlers {
-		if handler, ok := existing.(*Handler); ok {
-			if handler.connection != connection {
-				return nil, fmt.Errorf("OpenAI-compatible capabilities must use identical connection settings")
-			}
-			return handler, nil
-		}
-	}
-	client, err := NewClient(settings)
-	if err != nil {
-		client = failedClient{err: err}
-	}
-	handler := NewHandler(client)
-	handler.connection = connection
-	config.Handlers = append(config.Handlers, handler)
-	return handler, nil
 }
 
 func connectionFor(settings normalizedSettings) connectionSettings {

@@ -129,7 +129,7 @@ func (CommandRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMes
 	return json.Marshal(config)
 }
 
-func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
+func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
 	_, grants, err := parseCommandConfig(raw)
 	if err != nil {
 		return err
@@ -146,31 +146,42 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		}
 	}
 
-	out.Handlers = append(out.Handlers, command.Handler{
+	handler := command.Handler{
 		Name:     command.Capability,
 		Commands: commands,
-	})
+	}
 
-	// One branch per command rather than one branch listing every name: two
-	// commands may declare the same slot name with different constraints, and a
-	// merged params object would have to pick one of them — silently publishing a
-	// constraint that does not match the command actually being called.
+	// The index keys on the command's name, which is what actually selects the
+	// effect. `operation` was a constant "run" on every branch and discriminated
+	// nothing; it survives in the published schema only so the guest-visible
+	// shape is unchanged.
+	//
+	// One entry per command rather than one listing every name: two commands may
+	// declare the same slot name with different constraints, and a merged params
+	// object would have to pick one of them — silently publishing a constraint
+	// that does not match the command actually being called.
 	sorted := append([]command.Command(nil), commands...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	entries := make([]builtin.Entry, 0, len(sorted))
 	branches := make([]json.RawMessage, 0, len(sorted))
 	for _, c := range sorted {
 		branch, err := OperationBranch(command.VerbRun, commandCallSchema(c))
 		if err != nil {
 			return err
 		}
+		entries = append(entries, builtin.Entry{
+			Key:         builtin.Key{Syscall: command.Capability, Operation: c.Name},
+			Description: c.Description,
+			Input:       branch,
+			Handler:     handler,
+		})
 		branches = append(branches, branch)
 	}
-	out.Capabilities = append(out.Capabilities, sys.Capability{
+	return out.Add(command.Capability, builtin.Field("name"), entries, sys.Capability{
 		Name:        command.Capability,
 		Description: commandDescription(commands),
 		InputSchema: OneOfSchema(branches),
 	})
-	return nil
 }
 
 // buildCommand resolves one validated rule into the executable form, resolving

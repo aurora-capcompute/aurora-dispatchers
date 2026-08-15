@@ -11,7 +11,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-func buildScratch(t *testing.T, config string) builtin.Handler {
+func buildScratchTable(t *testing.T, config string) *builtin.Table {
 	t.Helper()
 	// Unlike core.memory, scratch needs no Services — it owns a fresh in-memory
 	// store per build (i.e. per process).
@@ -22,16 +22,20 @@ func buildScratch(t *testing.T, config string) builtin.Handler {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(built.Capabilities) != 1 || built.Capabilities[0].Name != registry.ScratchCapability {
-		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities, registry.ScratchCapability)
+	if len(built.Capabilities()) != 1 || built.Capabilities()[0].Name != registry.ScratchCapability {
+		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities(), registry.ScratchCapability)
 	}
-	if !strings.Contains(string(built.Capabilities[0].InputSchema), `"oneOf"`) {
-		t.Fatalf("input schema is not a oneOf ADT: %s", built.Capabilities[0].InputSchema)
+	if !strings.Contains(string(built.Capabilities()[0].InputSchema), `"oneOf"`) {
+		t.Fatalf("input schema is not a oneOf ADT: %s", built.Capabilities()[0].InputSchema)
 	}
-	if len(built.Handlers) != 1 {
-		t.Fatalf("handlers = %+v", built.Handlers)
+	if len(built.Entries()) == 0 {
+		t.Fatalf("no operations indexed: %+v", built.Capabilities())
 	}
-	return built.Handlers[0]
+	return built
+}
+
+func buildScratch(t *testing.T, config string) builtin.Handler {
+	return buildScratchTable(t, config).Entries()[0].Handler
 }
 
 func scratchCall(t *testing.T, h builtin.Handler, args string) sys.SyscallResult {
@@ -47,11 +51,11 @@ func scratchCall(t *testing.T, h builtin.Handler, args string) sys.SyscallResult
 // core.scratch routes by the capability name and, unlike core.memory, requires
 // no host Services.
 func TestScratchRoutesByNameAndNeedsNoServices(t *testing.T) {
-	handler := buildScratch(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`)
-	if !handler.Handles(registry.ScratchCapability) {
-		t.Fatalf("handler must route by %s", registry.ScratchCapability)
+	table := buildScratchTable(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`)
+	if got := table.Operations(registry.ScratchCapability); len(got) != 3 {
+		t.Fatalf("operations = %v, want get/put/search under %s", got, registry.ScratchCapability)
 	}
-	if handler.Handles("core.memory") {
+	if len(table.Operations("core.memory")) != 0 {
 		t.Fatal("scratch must not answer to core.memory")
 	}
 }

@@ -32,10 +32,10 @@ const kubectlGrant = `{"capabilities":[{"operation":"run","commands":[{
   "labels":["k8s"]
 }]}]}`
 
-func configure(t *testing.T, grant string) builtin.Config {
+func configure(t *testing.T, grant string) *builtin.Table {
 	t.Helper()
-	var out builtin.Config
-	if err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{}, &out); err != nil {
+	out := builtin.NewTable()
+	if err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{}, out); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
 	return out
@@ -46,10 +46,10 @@ func configure(t *testing.T, grant string) builtin.Config {
 // twice — and the model can see which contexts exist.
 func TestPublishedSchemaCarriesTheClosedSet(t *testing.T) {
 	out := configure(t, kubectlGrant)
-	if len(out.Capabilities) != 1 || out.Capabilities[0].Name != command.Capability {
-		t.Fatalf("capabilities = %+v", out.Capabilities)
+	if len(out.Capabilities()) != 1 || out.Capabilities()[0].Name != command.Capability {
+		t.Fatalf("capabilities = %+v", out.Capabilities())
 	}
-	schema := string(out.Capabilities[0].InputSchema)
+	schema := string(out.Capabilities()[0].InputSchema)
 	for _, want := range []string{`"prod-eu"`, `"staging"`, `"kubectl-get"`, `"enum"`} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("schema does not carry %s:\n%s", want, schema)
@@ -59,7 +59,7 @@ func TestPublishedSchemaCarriesTheClosedSet(t *testing.T) {
 		t.Fatalf("schema admits an ungranted context:\n%s", schema)
 	}
 	// The description tells the model what it may choose.
-	if desc := out.Capabilities[0].Description; !strings.Contains(desc, "prod-eu") || !strings.Contains(desc, "staging") {
+	if desc := out.Capabilities()[0].Description; !strings.Contains(desc, "prod-eu") || !strings.Contains(desc, "staging") {
 		t.Fatalf("description does not list the contexts: %s", desc)
 	}
 }
@@ -73,7 +73,7 @@ func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 	  {"name":"read-eu","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-eu"]}},
 	  {"name":"read-us","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-us"]}}
 	]}]}`
-	first := string(configure(t, grant).Capabilities[0].InputSchema)
+	first := string(configure(t, grant).Capabilities()[0].InputSchema)
 	if !strings.Contains(first, `"prod-eu"`) || !strings.Contains(first, `"prod-us"`) {
 		t.Fatalf("both commands' constraints must survive:\n%s", first)
 	}
@@ -83,7 +83,7 @@ func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 	}
 	// And it is the same schema every time: nothing here may depend on map order.
 	for i := 0; i < 20; i++ {
-		if again := string(configure(t, grant).Capabilities[0].InputSchema); again != first {
+		if again := string(configure(t, grant).Capabilities()[0].InputSchema); again != first {
 			t.Fatalf("schema is not deterministic:\n%s\n%s", first, again)
 		}
 	}
@@ -96,9 +96,9 @@ func TestPatternsAreAnchored(t *testing.T) {
 	  "name":"echo","path":"/bin/echo","args":["{env}"],
 	  "params":{"env":"prod"}}]}]}`
 	out := configure(t, grant)
-	handler, ok := out.Handlers[0].(command.Handler)
+	handler, ok := out.Entries()[0].Handler.(command.Handler)
 	if !ok {
-		t.Fatalf("handler = %T", out.Handlers[0])
+		t.Fatalf("handler = %T", out.Entries()[0].Handler)
 	}
 	param := handler.Commands[0].Params["env"]
 	if param.Pattern == nil {
@@ -117,7 +117,7 @@ func TestPatternsAreAnchored(t *testing.T) {
 func TestApprovalDefaultsOn(t *testing.T) {
 	grant := `{"capabilities":[{"operation":"run","commands":[{"name":"echo","path":"/bin/echo"}]}]}`
 	out := configure(t, grant)
-	handler := out.Handlers[0].(command.Handler)
+	handler := out.Entries()[0].Handler.(command.Handler)
 	if !handler.Commands[0].RequireApproval {
 		t.Fatal("require_approval must default to true for core.command")
 	}
@@ -182,8 +182,8 @@ func TestNormalizeRoundTrips(t *testing.T) {
 func TestEnvSecretFailsClosed(t *testing.T) {
 	grant := `{"capabilities":[{"operation":"run","commands":[{
 	  "name":"a","path":"/bin/echo","env":{"TOKEN":{"secret":"absent"}}}]}]}`
-	var out builtin.Config
-	err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{}, &out)
+	out := builtin.NewTable()
+	err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{}, out)
 	if err == nil {
 		t.Fatal("a grant referencing an unknown secret must fail to build")
 	}

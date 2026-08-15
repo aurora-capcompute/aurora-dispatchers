@@ -80,7 +80,7 @@ func (MemoryRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMess
 	return json.Marshal(config)
 }
 
-func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Config) error {
+func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
 	config, err := parseMemoryConfig(raw)
 	if err != nil {
 		return err
@@ -95,18 +95,27 @@ func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, serv
 	if err != nil {
 		return err
 	}
-	out.Handlers = append(out.Handlers, memory.Handler{
+	handler := memory.Handler{
 		Name:   memory.Capability,
 		Store:  services.MemoryStore,
 		Tenant: services.Tenant,
 		Mounts: mounts,
-	})
-	out.Capabilities = append(out.Capabilities, sys.Capability{
+	}
+	ops, branches := memoryBranches(config)
+	entries := make([]builtin.Entry, 0, len(ops))
+	for i, op := range ops {
+		entries = append(entries, builtin.Entry{
+			Key:         builtin.Key{Syscall: memory.Capability, Operation: op},
+			Description: memoryOperations[op].description,
+			Input:       branches[i],
+			Handler:     handler,
+		})
+	}
+	return out.Add(memory.Capability, builtin.Field("operation"), entries, sys.Capability{
 		Name:        memory.Capability,
 		Description: memoryDescription(config),
-		InputSchema: memorySchema(config),
+		InputSchema: OneOfSchema(branches),
 	})
-	return nil
 }
 
 // buildMemoryMounts resolves each mount's scope to its physical key prefix inside
@@ -257,6 +266,13 @@ func normalizeMemoryOperations(ops []string) ([]string, error) {
 // ambiguous; a single-mount grant may omit the selector. Space's
 // required-exactly-when-shared rule is conditional, so the handler enforces it.
 func memorySchema(config memoryConfig) json.RawMessage {
+	_, branches := memoryBranches(config)
+	return OneOfSchema(branches)
+}
+
+// memoryBranches is the per-operation half of the schema: one branch per granted
+// operation, in order, alongside the operation names the index keys on.
+func memoryBranches(config memoryConfig) ([]string, []json.RawMessage) {
 	scopesByOp := map[string]map[string]struct{}{}
 	spacesByOp := map[string][]string{}
 	for _, m := range config.Capabilities {
@@ -288,7 +304,7 @@ func memorySchema(config memoryConfig) json.RawMessage {
 		branch, _ := OperationBranch(op, withMountSelector(memoryOperations[op].schema, scopes, spaces, scopeRequired))
 		branches = append(branches, branch)
 	}
-	return OneOfSchema(branches)
+	return ops, branches
 }
 
 // withMountSelector adds the mount-selector properties to an operation's object

@@ -40,13 +40,13 @@ type Services struct {
 }
 
 // Registration builds a leaf I/O driver for one syscall. A registration is
-// selected by the granted syscall, and publishes exactly one capability named
-// for that syscall — its operations are cases of a discriminated ADT, not
-// separate names.
+// selected by the granted syscall, and contributes one indexed operation per
+// case of that syscall's ADT — plus the discriminator that finds the case in a
+// call's arguments, and the one capability the operations add up to.
 type Registration interface {
 	Matches(syscall string) bool
 	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
-	Configure(ctx context.Context, config json.RawMessage, services Services, out *builtin.Config) error
+	Configure(ctx context.Context, config json.RawMessage, services Services, out *builtin.Table) error
 }
 
 type Registry struct {
@@ -75,27 +75,23 @@ type Entry struct {
 	Hidden  bool
 }
 
-func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (builtin.Config, error) {
-	var config builtin.Config
+func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (*builtin.Table, error) {
+	table := builtin.NewTable()
 	for _, entry := range entries {
 		selected := r.selectFor(entry.Syscall)
 		if selected == nil {
-			return builtin.Config{}, fmt.Errorf("unsupported syscall %q", entry.Syscall)
+			return nil, fmt.Errorf("unsupported syscall %q", entry.Syscall)
 		}
-		before := len(config.Capabilities)
-		if err := selected.Configure(ctx, entry.Config, services, &config); err != nil {
-			return builtin.Config{}, err
+		if err := selected.Configure(ctx, entry.Config, services, table); err != nil {
+			return nil, err
 		}
-		// A hidden grant keeps the capability it just published off the
-		// discoverable menu. Data-flow labels/taints are per-operation and live
-		// inside the driver (self-enforced at dispatch), not a build-time stamp.
+		// A hidden grant keeps the capability it just contributed off the
+		// discoverable menu; its operations stay dispatchable.
 		if entry.Hidden {
-			for i := before; i < len(config.Capabilities); i++ {
-				config.Capabilities[i].Hidden = true
-			}
+			table.Hide(entry.Syscall)
 		}
 	}
-	return config, nil
+	return table, nil
 }
 
 func (r *Registry) selectFor(syscall string) Registration {

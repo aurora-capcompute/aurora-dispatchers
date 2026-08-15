@@ -60,7 +60,7 @@ func (ScratchRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMes
 	return json.Marshal(config)
 }
 
-func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Config) error {
+func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Table) error {
 	_, grants, err := parseScratchConfig(raw)
 	if err != nil {
 		return err
@@ -92,7 +92,7 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 	// Scratch is inherently one compartment — the process's own ephemeral store —
 	// so its lone mount is anonymous (no scope, empty prefix = the whole
 	// per-process store) and calls address it with no selector.
-	out.Handlers = append(out.Handlers, memory.Handler{
+	handler := memory.Handler{
 		Name:   ScratchCapability,
 		Store:  memory.NewMapStore(),
 		Tenant: scratchTenant,
@@ -102,14 +102,22 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 			Labels:          labels,
 			Taints:          taints,
 		}},
-	})
-	out.Capabilities = append(out.Capabilities, sys.Capability{
+	}
+	entries := make([]builtin.Entry, 0, len(grants))
+	for i, grant := range grants {
+		entries = append(entries, builtin.Entry{
+			Key:         builtin.Key{Syscall: ScratchCapability, Operation: grant.Operation},
+			Description: memoryOperations[grant.Operation].description,
+			Input:       branches[i],
+			Handler:     handler,
+		})
+	}
+	return out.Add(ScratchCapability, builtin.Field("operation"), entries, sys.Capability{
 		Name: ScratchCapability,
 		Description: fmt.Sprintf("Process-local scratch memory — ephemeral and private to this process, cleared when it ends, never written to shared storage. Keys are relative slash-paths. Stash large content here and query it with search rather than carrying it in the conversation. Choose an operation:\n- %s.",
 			strings.Join(names, "\n- ")),
 		InputSchema: OneOfSchema(branches),
 	})
-	return nil
 }
 
 // parseScratchConfig validates and canonicalizes a core.scratch grant — the
