@@ -26,14 +26,14 @@ func buildFilesystemTable(t *testing.T, config string) *capability.Table {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(built.Capabilities()) != 1 || built.Capabilities()[0].Name != filesystem.Capability {
-		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities(), filesystem.Capability)
+	if len(built.Descriptors()) != 1 || built.Descriptors()[0].Name != filesystem.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", built.Descriptors(), filesystem.Capability)
 	}
-	if !strings.Contains(string(built.Capabilities()[0].InputSchema), `"oneOf"`) {
-		t.Fatalf("input schema is not a oneOf ADT: %s", built.Capabilities()[0].InputSchema)
+	if !strings.Contains(string(built.Descriptors()[0].InputSchema), `"oneOf"`) {
+		t.Fatalf("input schema is not a oneOf ADT: %s", built.Descriptors()[0].InputSchema)
 	}
 	if len(built.Entries()) == 0 {
-		t.Fatalf("no operations indexed: %+v", built.Capabilities())
+		t.Fatalf("no operations indexed: %+v", built.Descriptors())
 	}
 	return built
 }
@@ -62,7 +62,7 @@ func TestFilesystemPublishesOneCapability(t *testing.T) {
 	if len(table.Operations("filesystem.read")) != 0 {
 		t.Fatal("operations are ADT cases, not separate capability names")
 	}
-	if caps := table.Capabilities(); len(caps) != 1 || caps[0].Name != "core.filesystem" {
+	if caps := table.Descriptors(); len(caps) != 1 || caps[0].Name != "core.filesystem" {
 		t.Fatalf("capabilities = %+v, want one named core.filesystem", caps)
 	}
 }
@@ -139,11 +139,11 @@ func TestFilesystemDescriptionNamesRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if !strings.Contains(built.Capabilities()[0].Description, dir) {
-		t.Fatalf("description should name the root %q: %s", dir, built.Capabilities()[0].Description)
+	if !strings.Contains(built.Descriptors()[0].Description, dir) {
+		t.Fatalf("description should name the root %q: %s", dir, built.Descriptors()[0].Description)
 	}
-	if !strings.Contains(built.Capabilities()[0].Description, "read") {
-		t.Fatalf("description should mention the read operation: %s", built.Capabilities()[0].Description)
+	if !strings.Contains(built.Descriptors()[0].Description, "read") {
+		t.Fatalf("description should mention the read operation: %s", built.Descriptors()[0].Description)
 	}
 }
 

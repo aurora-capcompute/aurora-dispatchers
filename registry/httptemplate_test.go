@@ -74,16 +74,16 @@ func TestTemplateConfigurePublishesCapability(t *testing.T) {
 	if err := config.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != "core.httpTemplate" {
-		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Capabilities())
+	if len(config.Descriptors()) != 1 || config.Descriptors()[0].Name != "core.httpTemplate" {
+		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Descriptors())
 	}
-	schema := string(config.Capabilities()[0].InputSchema)
+	schema := string(config.Descriptors()[0].InputSchema)
 	for _, want := range []string{`"oneOf"`, `"search"`, `"query"`} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("schema missing %q: %s", want, schema)
 		}
 	}
-	desc := config.Capabilities()[0].Description
+	desc := config.Descriptors()[0].Description
 	if !strings.Contains(desc, "search") || !strings.Contains(desc, "Search the KB.") {
 		t.Fatalf("description does not document the operation: %s", desc)
 	}

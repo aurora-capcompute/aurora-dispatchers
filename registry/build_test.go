@@ -21,11 +21,11 @@ func TestBuildPublishesOneCapabilityPerGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(built.Capabilities()) != 1 || built.Capabilities()[0].Name != internet.Capability {
-		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities(), internet.Capability)
+	if len(built.Descriptors()) != 1 || built.Descriptors()[0].Name != internet.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", built.Descriptors(), internet.Capability)
 	}
-	if built.Capabilities()[0].Name != "core.internet" {
-		t.Fatalf("capability name = %q, want the syscall name core.internet", built.Capabilities()[0].Name)
+	if built.Descriptors()[0].Name != "core.internet" {
+		t.Fatalf("capability name = %q, want the syscall name core.internet", built.Descriptors()[0].Name)
 	}
 	if len(built.Operations("core.internet")) == 0 {
 		t.Fatalf("handler must route by the capability name core.internet")
@@ -51,7 +51,7 @@ func TestBuildAppliesHidden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(built.Capabilities()) != 1 || !built.Capabilities()[0].Hidden {
-		t.Fatalf("capabilities = %+v, want one hidden", built.Capabilities())
+	if len(built.Descriptors()) != 1 || !built.Descriptors()[0].Hidden {
+		t.Fatalf("capabilities = %+v, want one hidden", built.Descriptors())
 	}
 }

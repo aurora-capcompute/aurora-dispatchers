@@ -191,7 +191,6 @@ type handlerDispatcher struct{ handler memory.Handler }
 func (d handlerDispatcher) Dispatch(ctx context.Context, _ string, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	return d.handler.DispatchCall(ctx, call, auth)
 }
-func (d handlerDispatcher) Capabilities() []sys.Capability { return nil }
 
 func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	store := memory.NewMapStore()
@@ -252,8 +251,6 @@ func (d tenantChain) Dispatch(ctx context.Context, _ string, call sys.Syscall, a
 	}
 	return sys.Result(json.RawMessage(`{"from":"` + call.Name + `"}`)), nil
 }
-
-func (d tenantChain) Capabilities() []sys.Capability { return memTable(d.handler).Capabilities() }
 
 // memTable is the grant index the flow layer reads its policy from: a web
 // source, a protected sink, and the memory handler under test.
@@ -345,8 +342,6 @@ type chainAdapter struct{ next tenantChain }
 func (a chainAdapter) Dispatch(ctx context.Context, cred memPID, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	return a.next.Dispatch(ctx, cred.id, call, auth)
 }
-
-func (a chainAdapter) Capabilities() []sys.Capability { return a.next.Capabilities() }
 
 func TestMemoryCompareAndSet(t *testing.T) {
 	store := memory.NewMapStore()

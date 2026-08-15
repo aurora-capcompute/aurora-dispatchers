@@ -60,8 +60,8 @@ func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 	if err := config.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != internet.Capability {
-		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities(), internet.Capability)
+	if len(config.Descriptors()) != 1 || config.Descriptors()[0].Name != internet.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", config.Descriptors(), internet.Capability)
 	}
 	if len(config.Operations(internet.Capability)) == 0 {
 		t.Fatalf("handler must route by the capability name %s", internet.Capability)

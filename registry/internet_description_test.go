@@ -27,7 +27,7 @@ func TestInternetDescriptionIncludesAuthorUsageNote(t *testing.T) {
 	if err := config.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	got := config.Capabilities()[0].Description
+	got := config.Descriptors()[0].Description
 	for _, want := range []string{"onyx.example.com", "GET/POST", usage, "docs.example.org"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("description missing %q:\n%s", want, got)
@@ -81,7 +81,7 @@ func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
 	if err := config.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	got := config.Capabilities()[0].Description
+	got := config.Descriptors()[0].Description
 	for _, want := range []string{"Onyx KB.", "Authorization", "attached automatically", "do not set it"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("description missing %q:\n%s", want, got)
@@ -108,7 +108,7 @@ func TestInternetDescriptionAnnotatesMultipleInjectedHeaders(t *testing.T) {
 	if err := config.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	got := config.Capabilities()[0].Description
+	got := config.Descriptors()[0].Description
 	for _, want := range []string{"Authorization, X-Api-Key", "do not set them"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("description missing %q:\n%s", want, got)

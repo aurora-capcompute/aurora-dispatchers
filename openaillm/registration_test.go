@@ -40,10 +40,10 @@ func TestConfigurePublishesOneCapability(t *testing.T) {
 	if err := config.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != SyscallType {
-		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities(), SyscallType)
+	if len(config.Descriptors()) != 1 || config.Descriptors()[0].Name != SyscallType {
+		t.Fatalf("capabilities = %+v, want one named %s", config.Descriptors(), SyscallType)
 	}
-	schema := string(config.Capabilities()[0].InputSchema)
+	schema := string(config.Descriptors()[0].InputSchema)
 	if !strings.Contains(schema, `"oneOf"`) || !strings.Contains(schema, `"chat"`) || !strings.Contains(schema, `"models"`) {
 		t.Fatalf("input schema is not a oneOf over the granted operations: %s", schema)
 	}

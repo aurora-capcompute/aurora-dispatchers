@@ -50,10 +50,10 @@ func configure(t *testing.T, grant string) *capability.Table {
 // twice — and the model can see which contexts exist.
 func TestPublishedSchemaCarriesTheClosedSet(t *testing.T) {
 	out := configure(t, kubectlGrant)
-	if len(out.Capabilities()) != 1 || out.Capabilities()[0].Name != command.Capability {
-		t.Fatalf("capabilities = %+v", out.Capabilities())
+	if len(out.Descriptors()) != 1 || out.Descriptors()[0].Name != command.Capability {
+		t.Fatalf("capabilities = %+v", out.Descriptors())
 	}
-	schema := string(out.Capabilities()[0].InputSchema)
+	schema := string(out.Descriptors()[0].InputSchema)
 	for _, want := range []string{`"prod-eu"`, `"staging"`, `"kubectl-get"`, `"enum"`} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("schema does not carry %s:\n%s", want, schema)
@@ -63,7 +63,7 @@ func TestPublishedSchemaCarriesTheClosedSet(t *testing.T) {
 		t.Fatalf("schema admits an ungranted context:\n%s", schema)
 	}
 	// The description tells the model what it may choose.
-	if desc := out.Capabilities()[0].Description; !strings.Contains(desc, "prod-eu") || !strings.Contains(desc, "staging") {
+	if desc := out.Descriptors()[0].Description; !strings.Contains(desc, "prod-eu") || !strings.Contains(desc, "staging") {
 		t.Fatalf("description does not list the contexts: %s", desc)
 	}
 }
@@ -77,7 +77,7 @@ func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 	  {"name":"read-eu","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-eu"]}},
 	  {"name":"read-us","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-us"]}}
 	]}]}`
-	first := string(configure(t, grant).Capabilities()[0].InputSchema)
+	first := string(configure(t, grant).Descriptors()[0].InputSchema)
 	if !strings.Contains(first, `"prod-eu"`) || !strings.Contains(first, `"prod-us"`) {
 		t.Fatalf("both commands' constraints must survive:\n%s", first)
 	}
@@ -87,7 +87,7 @@ func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 	}
 	// And it is the same schema every time: nothing here may depend on map order.
 	for i := 0; i < 20; i++ {
-		if again := string(configure(t, grant).Capabilities()[0].InputSchema); again != first {
+		if again := string(configure(t, grant).Descriptors()[0].InputSchema); again != first {
 			t.Fatalf("schema is not deterministic:\n%s\n%s", first, again)
 		}
 	}

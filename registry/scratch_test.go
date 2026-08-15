@@ -22,14 +22,14 @@ func buildScratchTable(t *testing.T, config string) *capability.Table {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(built.Capabilities()) != 1 || built.Capabilities()[0].Name != registry.ScratchCapability {
-		t.Fatalf("capabilities = %+v, want one named %s", built.Capabilities(), registry.ScratchCapability)
+	if len(built.Descriptors()) != 1 || built.Descriptors()[0].Name != registry.ScratchCapability {
+		t.Fatalf("capabilities = %+v, want one named %s", built.Descriptors(), registry.ScratchCapability)
 	}
-	if !strings.Contains(string(built.Capabilities()[0].InputSchema), `"oneOf"`) {
-		t.Fatalf("input schema is not a oneOf ADT: %s", built.Capabilities()[0].InputSchema)
+	if !strings.Contains(string(built.Descriptors()[0].InputSchema), `"oneOf"`) {
+		t.Fatalf("input schema is not a oneOf ADT: %s", built.Descriptors()[0].InputSchema)
 	}
 	if len(built.Entries()) == 0 {
-		t.Fatalf("no operations indexed: %+v", built.Capabilities())
+		t.Fatalf("no operations indexed: %+v", built.Descriptors())
 	}
 	return built
 }
