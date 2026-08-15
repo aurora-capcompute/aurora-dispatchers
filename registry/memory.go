@@ -102,16 +102,41 @@ func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, serv
 		Mounts: mounts,
 	}
 	ops, branches := memoryBranches(config)
-	entries := make([]builtin.Entry, 0, len(ops))
+	schema := make(map[string]json.RawMessage, len(ops))
 	for i, op := range ops {
-		entries = append(entries, builtin.Entry{
-			Key:         builtin.Key{Syscall: memory.Capability, Operation: op},
-			Description: memoryOperations[op].description,
-			Input:       branches[i],
-			Handler:     handler,
-		})
+		schema[op] = branches[i]
 	}
-	return out.Add(memory.Capability, "operation", builtin.Field("operation"), entries, sys.Capability{
+	// A case is (operation, mount), not just the operation: the same get on two
+	// mounts is two cases with two policies, and the mount is what the call's
+	// scope/space selects. One entry each, all backed by the one handler.
+	entries := make([]builtin.Entry, 0, len(ops)*len(mounts))
+	for _, mount := range mounts {
+		for op := range mount.Operations {
+			entries = append(entries, builtin.Entry{
+				Key:             builtin.Key{Syscall: memory.Capability, Operation: caseName(op, mount.Scope, mount.Space)},
+				Description:     memoryOperations[op].description,
+				Input:           schema[op],
+				Labels:          mount.Labels,
+				Forbid:          sinkTaints(op, mount.Taints),
+				RequireApproval: mount.RequireApproval && isMemorySink(op),
+				Handler:         handler,
+			})
+			// A grant with one mount lets a call omit the selector entirely, so
+			// that bare form is a case too — the same mount, the same policy.
+			if len(mounts) == 1 && mount.Scope != "" {
+				entries = append(entries, builtin.Entry{
+					Key:             builtin.Key{Syscall: memory.Capability, Operation: caseName(op, "", "")},
+					Description:     memoryOperations[op].description,
+					Input:           schema[op],
+					Labels:          mount.Labels,
+					Forbid:          sinkTaints(op, mount.Taints),
+					RequireApproval: mount.RequireApproval && isMemorySink(op),
+					Handler:         handler,
+				})
+			}
+		}
+	}
+	return out.Add(memory.Capability, []string{"operation", "scope", "space"}, entries, sys.Capability{
 		Name:        memory.Capability,
 		Description: memoryDescription(config),
 		InputSchema: OneOfSchema(branches),
@@ -268,6 +293,25 @@ func normalizeMemoryOperations(ops []string) ([]string, error) {
 func memorySchema(config memoryConfig) json.RawMessage {
 	_, branches := memoryBranches(config)
 	return OneOfSchema(branches)
+}
+
+// isMemorySink is true for the operations that write. Only a write is a sink —
+// a read is a source — so the mount's forbid set and its approval gate apply to
+// those alone, exactly as the handler used to apply them.
+func isMemorySink(operation string) bool { return operation == "put" }
+
+// sinkTaints is a mount's forbid set, applied only where it means something.
+func sinkTaints(operation string, taints []string) []string {
+	if !isMemorySink(operation) {
+		return nil
+	}
+	return taints
+}
+
+// caseName is a core.memory case: the operation and the mount its call selects,
+// in the discriminator's order.
+func caseName(operation, scope, space string) string {
+	return strings.Join([]string{operation, scope, space}, sys.OperationSeparator)
 }
 
 // memoryBranches is the per-operation half of the schema: one branch per granted

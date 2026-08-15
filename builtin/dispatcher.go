@@ -77,24 +77,25 @@ type Discriminator func(args json.RawMessage) (string, error)
 // SingleOperation is the Discriminator of a syscall that is one operation.
 func SingleOperation(json.RawMessage) (string, error) { return "", nil }
 
-// Field builds the Discriminator that reads one top-level string property.
-func Field(name string) Discriminator {
+// Fields builds the Discriminator that reads the named string properties and
+// joins them into the case name. It is the same read sys.OperationName does, so
+// the dispatcher below the journal and the monitor above it resolve one call to
+// one case — a divergence there would apply no policy at all.
+//
+// A property that is absent reads as empty, which is a case in its own right:
+// core.memory's bare selector on a single-mount grant names that mount.
+func Fields(names ...string) Discriminator {
 	return func(args json.RawMessage) (string, error) {
-		var envelope map[string]json.RawMessage
-		if err := json.Unmarshal(args, &envelope); err != nil {
-			return "", fmt.Errorf("arguments must be an object")
-		}
-		raw, ok := envelope[name]
+		name, ok := sys.OperationName(names, args)
 		if !ok {
-			return "", fmt.Errorf("%q is required", name)
+			return "", fmt.Errorf("arguments must be an object with string %s", strings.Join(names, ", "))
 		}
-		var value string
-		if err := json.Unmarshal(raw, &value); err != nil {
-			return "", fmt.Errorf("%q must be a string", name)
-		}
-		return value, nil
+		return name, nil
 	}
 }
+
+// Field is the one-property case of Fields.
+func Field(name string) Discriminator { return Fields(name) }
 
 // Table is one process's whole leaf surface: every operation it may reach, how
 // to find the operation in a call, and the capabilities those operations add up
@@ -113,12 +114,9 @@ func NewTable() *Table {
 // an error rather than a silent first-wins: two grants serving one operation is
 // a manifest that means two things at once, and the old linear scan answered
 // that by picking whichever was appended first.
-func (t *Table) Add(syscall, discriminatorField string, discriminator Discriminator, entries []Entry, capability sys.Capability) error {
+func (t *Table) Add(syscall string, discriminator []string, entries []Entry, capability sys.Capability) error {
 	if _, taken := t.discriminators[syscall]; taken {
 		return fmt.Errorf("syscall %q is served twice", syscall)
-	}
-	if discriminator == nil {
-		return fmt.Errorf("syscall %q has no discriminator", syscall)
 	}
 	for _, entry := range entries {
 		if entry.Key.Syscall != syscall {
@@ -132,11 +130,11 @@ func (t *Table) Add(syscall, discriminatorField string, discriminator Discrimina
 		}
 		t.entries[entry.Key] = entry
 	}
-	t.discriminators[syscall] = discriminator
+	t.discriminators[syscall] = Fields(discriminator...)
 	// The capability's ADT is the entries, projected: the operation list, its
 	// per-case schema, and its per-case policy all come from one place, so the
 	// menu cannot drift from what is dispatchable.
-	capability.Discriminator = discriminatorField
+	capability.Discriminator = discriminator
 	capability.Operations = operationsOf(entries)
 	t.capabilities = append(t.capabilities, capability)
 	return nil

@@ -258,16 +258,9 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if !mount.grants(operation) {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("memory operation %q is not granted on %s", operation, mount.label())), nil
 	}
-	// Sink guard: refuse a write before any effect if the run has observed a label
-	// this mount forbids. Only writes are sinks — a read is a source — so the guard
-	// applies to put. Deterministic on replay: the taint is rebuilt from the
-	// journal identically, so the same call denies or passes the same way.
-	if operation == "put" {
-		if blocked := sys.BlockedBy(sys.Taint(ctx), mount.Taints); len(blocked) > 0 {
-			return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-				"flow policy: this run has observed %v, which may not flow into %s", blocked, mount.label())), nil
-		}
-	}
+	// Flow policy and approval are this (operation, mount) case's entry's,
+	// enforced by the runtime above and below the replay tape. This handler
+	// reads and writes.
 	var result sys.SyscallResult
 	switch operation {
 	case "get":
@@ -284,9 +277,9 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err != nil || result.Status() != sys.StatusResult {
 		return result, err
 	}
-	// Stamp the mount's source labels (unions with any the value already carries,
-	// e.g. get's stored provenance).
-	return result.WithLabels(mount.Labels...), nil
+	// The stored provenance a value already carries is the value's own and is
+	// stamped by the read; the mount's source labels are the entry's.
+	return result, nil
 }
 
 // selectMount resolves the selector a call names (scope, plus space for shared)
@@ -395,9 +388,6 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 		case done:
 			return marshalResult(PutResponse{Key: request.Key, Version: version})
 		}
-	}
-	if mount.RequireApproval && auth.Decision != sys.Approved {
-		return sys.Yield(fmt.Sprintf("Approve writing memory key %q", request.Key)), nil
 	}
 	expect := PutAny
 	if request.IfVersion != nil {

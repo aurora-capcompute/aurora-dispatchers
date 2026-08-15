@@ -207,30 +207,8 @@ func TestMemoryMountPrefixChroot(t *testing.T) {
 	}
 }
 
-func TestMemoryPutApprovalGate(t *testing.T) {
-	store := memory.NewMapStore()
-	gated := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
-		Mounts: mount("", true, "get", "put", "list")}
-
-	// Unapproved writes yield a human task.
-	result := dispatch(t, gated, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
-	if result.Status() != sys.StatusYield {
-		t.Fatalf("unapproved put = %#v, want yield", result)
-	}
-	if _, _, _, found, _ := store.Get(context.Background(), "acme", "prefs/tone"); found {
-		t.Fatal("unapproved put reached the store")
-	}
-
-	// The replayed, approved call proceeds.
-	result = dispatch(t, gated, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{Decision: sys.Approved, Actor: "alice"})
-	if result.Status() != sys.StatusResult {
-		t.Fatalf("approved put = %#v", result)
-	}
-	// Reads are never gated.
-	if result := dispatch(t, gated, "get", `{"key":"prefs/tone"}`, sys.Authorization{}); result.Status() != sys.StatusResult {
-		t.Fatalf("get under approval gate = %#v", result)
-	}
-}
+// Approval used to be gated here and is now the (operation, mount) case's
+// entry's, enforced in builtin's dispatcher — tested there.
 
 type handlerDispatcher struct{ handler memory.Handler }
 
@@ -490,30 +468,30 @@ func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
 // A recorded key means the approval was already granted and the effect already
 // performed: the re-driven dispatch returns the recorded result instead of
 // re-yielding a human task for a write that happened.
-func TestMemoryPutDedupeSkipsApprovalGate(t *testing.T) {
+// A re-driven put under the same idempotency key returns the recorded result
+// rather than writing again — the dedupe record is what makes a crash re-drive
+// at-most-once. (It used to double as an approval-gate test; approval is the
+// entry's now, and a real re-drive carries the journaled resolution as its
+// Authorization.)
+func TestMemoryPutDedupeReturnsTheRecordedResult(t *testing.T) {
 	store := memory.NewMapStore()
-	gated := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
-		Mounts: mount("", true, "get", "put", "list")}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
+		Mounts: mount("", false, "get", "put", "list")}
 	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/5/sha256:put")
 
-	approved := dispatchCtx(t, intent, gated, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{Decision: sys.Approved, Actor: "alice"})
-	if approved.Status() != sys.StatusResult {
-		t.Fatalf("approved put = %#v", approved)
+	first := dispatchCtx(t, intent, handler, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
+	if first.Status() != sys.StatusResult {
+		t.Fatalf("first put = %#v", first)
 	}
-	redriven := dispatchCtx(t, intent, gated, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
+	redriven := dispatchCtx(t, intent, handler, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
 	if redriven.Status() != sys.StatusResult {
-		t.Fatalf("re-driven put = %#v, want the recorded result, not a fresh yield", redriven)
+		t.Fatalf("re-driven put = %#v, want the recorded result", redriven)
 	}
-	if string(redriven.Result()) != string(approved.Result()) {
-		t.Fatalf("re-driven result diverged: %s vs %s", redriven.Result(), approved.Result())
+	if string(redriven.Result()) != string(first.Result()) {
+		t.Fatalf("re-driven result diverged: %s vs %s", redriven.Result(), first.Result())
 	}
 	if _, _, version, _, _ := store.Get(context.Background(), "acme", "prefs/tone"); version != 1 {
-		t.Fatalf("store version = %d, want 1", version)
-	}
-	// An unexecuted intent still yields: the gate is skipped only by a record.
-	fresh := sys.WithIdempotencyKey(context.Background(), "proc-1/8/sha256:put")
-	if result := dispatchCtx(t, fresh, gated, "put", `{"key":"prefs/other","value":1}`, sys.Authorization{}); result.Status() != sys.StatusYield {
-		t.Fatalf("unapproved fresh intent = %#v, want yield", result)
+		t.Fatalf("store version = %d, want 1 — the re-drive must not write again", version)
 	}
 }
 

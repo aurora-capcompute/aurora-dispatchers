@@ -29,10 +29,10 @@ func call(name, args string) sys.Syscall {
 	return sys.Syscall{Abi: sys.ABIVersion, Name: name, Args: json.RawMessage(args)}
 }
 
-func table(t *testing.T, syscall string, d builtin.Discriminator, entries ...builtin.Entry) *builtin.Table {
+func table(t *testing.T, syscall string, discriminator []string, entries ...builtin.Entry) *builtin.Table {
 	t.Helper()
 	tbl := builtin.NewTable()
-	if err := tbl.Add(syscall, "operation", d, entries, sys.Capability{Name: syscall}); err != nil {
+	if err := tbl.Add(syscall, discriminator, entries, sys.Capability{Name: syscall}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	return tbl
@@ -41,7 +41,7 @@ func table(t *testing.T, syscall string, d builtin.Discriminator, entries ...bui
 // The operation in the args selects the entry, and only that entry runs.
 func TestDispatchRoutesByOperation(t *testing.T) {
 	get, put := &stub{}, &stub{}
-	tbl := table(t, "core.memory", builtin.Field("operation"),
+	tbl := table(t, "core.memory", []string{"operation"},
 		entry("core.memory", "get", get), entry("core.memory", "put", put))
 
 	result, err := builtin.New[struct{}](tbl).Dispatch(
@@ -61,7 +61,7 @@ func TestDispatchRoutesByOperation(t *testing.T) {
 // POST — and the entry, not the handler, is what the call matched.
 func TestOneHandlerMayBackSeveralEntries(t *testing.T) {
 	shared := &stub{}
-	tbl := table(t, "core.internet", builtin.Field("method"),
+	tbl := table(t, "core.internet", []string{"method"},
 		entry("core.internet", "GET", shared), entry("core.internet", "POST", shared))
 
 	dispatcher := builtin.New[struct{}](tbl)
@@ -79,7 +79,7 @@ func TestOneHandlerMayBackSeveralEntries(t *testing.T) {
 // An operation outside the grant is denied, and the refusal names what is
 // granted rather than leaving the caller to guess.
 func TestUngrantedOperationIsDeniedAndNamesTheAlternatives(t *testing.T) {
-	tbl := table(t, "core.memory", builtin.Field("operation"),
+	tbl := table(t, "core.memory", []string{"operation"},
 		entry("core.memory", "get", &stub{}), entry("core.memory", "put", &stub{}))
 
 	result, _ := builtin.New[struct{}](tbl).Dispatch(
@@ -96,7 +96,7 @@ func TestUngrantedOperationIsDeniedAndNamesTheAlternatives(t *testing.T) {
 // near miss is a precise refusal rather than a silent correction.
 func TestDiscriminatorIsMatchedExactly(t *testing.T) {
 	served := &stub{}
-	tbl := table(t, "core.internet", builtin.Field("method"), entry("core.internet", "GET", served))
+	tbl := table(t, "core.internet", []string{"method"}, entry("core.internet", "GET", served))
 
 	result, _ := builtin.New[struct{}](tbl).Dispatch(
 		context.Background(), struct{}{}, call("core.internet", `{"method":"get"}`), sys.Authorization{})
@@ -111,7 +111,7 @@ func TestDiscriminatorIsMatchedExactly(t *testing.T) {
 // A syscall nothing serves is a denial, not a routing miss: the table is the
 // grant.
 func TestUnservedSyscallIsDenied(t *testing.T) {
-	tbl := table(t, "core.memory", builtin.Field("operation"), entry("core.memory", "get", &stub{}))
+	tbl := table(t, "core.memory", []string{"operation"}, entry("core.memory", "get", &stub{}))
 
 	result, _ := builtin.New[struct{}](tbl).Dispatch(
 		context.Background(), struct{}{}, call("core.internet", `{"method":"GET"}`), sys.Authorization{})
@@ -120,13 +120,16 @@ func TestUnservedSyscallIsDenied(t *testing.T) {
 	}
 }
 
-// Args that carry no readable discriminator are the caller's mistake, reported
-// as invalid arguments rather than as a denial.
+// Arguments that cannot yield a case name at all are the caller's mistake,
+// reported as invalid arguments. An *absent* property is not that: it reads as
+// empty and names a case in its own right — which is how core.memory's bare
+// selector names a single-mount grant — so it is denied if that case is not
+// granted, never mistaken for a malformed call.
 func TestUnreadableDiscriminatorIsAnArgumentError(t *testing.T) {
-	tbl := table(t, "core.memory", builtin.Field("operation"), entry("core.memory", "get", &stub{}))
+	tbl := table(t, "core.memory", []string{"operation"}, entry("core.memory", "get", &stub{}))
 	dispatcher := builtin.New[struct{}](tbl)
 
-	for _, args := range []string{`{}`, `{"operation":7}`, `"not an object"`} {
+	for _, args := range []string{`{"operation":7}`, `"not an object"`} {
 		result, err := dispatcher.Dispatch(context.Background(), struct{}{}, call("core.memory", args), sys.Authorization{})
 		if err != nil {
 			t.Fatalf("dispatch %s: %v", args, err)
@@ -135,12 +138,42 @@ func TestUnreadableDiscriminatorIsAnArgumentError(t *testing.T) {
 			t.Fatalf("args %s = %v, want invalid-args", args, result.Errno())
 		}
 	}
+	absent, _ := dispatcher.Dispatch(context.Background(), struct{}{}, call("core.memory", `{}`), sys.Authorization{})
+	if absent.Errno() != sys.ErrnoDenied {
+		t.Fatalf("absent discriminator = %v, want denied — the empty case is a case", absent.Errno())
+	}
+}
+
+// A case may be a tuple: core.memory's is (operation, scope, space), because
+// one operation on two mounts is two cases carrying two policies.
+func TestCaseMayBeATuple(t *testing.T) {
+	session, shared := &stub{}, &stub{}
+	sessionGet := entry("core.memory", "get\x00session\x00", session)
+	sessionGet.Labels = []string{"session_data"}
+	sharedGet := entry("core.memory", "get\x00shared\x00notes", shared)
+	sharedGet.Labels = []string{"shared_data"}
+	tbl := table(t, "core.memory", []string{"operation", "scope", "space"}, sessionGet, sharedGet)
+	dispatcher := builtin.New[struct{}](tbl)
+
+	if _, err := dispatcher.Dispatch(context.Background(), struct{}{},
+		call("core.memory", `{"operation":"get","scope":"shared","space":"notes"}`), sys.Authorization{}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if session.called != 0 || shared.called != 1 {
+		t.Fatalf("session=%d shared=%d, want the shared mount alone", session.called, shared.called)
+	}
+	// Each mount publishes its own policy — the whole reason the case is a tuple.
+	published := tbl.Capabilities()[0]
+	resolved, ok := published.FindOperation(json.RawMessage(`{"operation":"get","scope":"session"}`))
+	if !ok || len(resolved.Labels) != 1 || resolved.Labels[0] != "session_data" {
+		t.Fatalf("resolved = %+v ok=%v, want the session mount's own labels", resolved, ok)
+	}
 }
 
 // A syscall that is one operation carries no discriminator at all.
 func TestSingleOperationSyscall(t *testing.T) {
 	served := &stub{}
-	tbl := table(t, "sys.log", builtin.SingleOperation, entry("sys.log", "", served))
+	tbl := table(t, "sys.log", nil, entry("sys.log", "", served))
 
 	if _, err := builtin.New[struct{}](tbl).Dispatch(context.Background(), struct{}{},
 		call("sys.log", `{"message":"hi"}`), sys.Authorization{}); err != nil {
@@ -155,7 +188,7 @@ func TestSingleOperationSyscall(t *testing.T) {
 // The old linear scan answered it by picking whichever was appended first.
 func TestDuplicateOperationIsRefused(t *testing.T) {
 	tbl := builtin.NewTable()
-	err := tbl.Add("core.memory", "operation", builtin.Field("operation"), []builtin.Entry{
+	err := tbl.Add("core.memory", []string{"operation"}, []builtin.Entry{
 		entry("core.memory", "get", &stub{}),
 		entry("core.memory", "get", &stub{}),
 	}, sys.Capability{Name: "core.memory"})
@@ -166,8 +199,8 @@ func TestDuplicateOperationIsRefused(t *testing.T) {
 
 // The same syscall cannot be served by two families.
 func TestDuplicateSyscallIsRefused(t *testing.T) {
-	tbl := table(t, "core.memory", builtin.Field("operation"), entry("core.memory", "get", &stub{}))
-	err := tbl.Add("core.memory", "operation", builtin.Field("operation"),
+	tbl := table(t, "core.memory", []string{"operation"}, entry("core.memory", "get", &stub{}))
+	err := tbl.Add("core.memory", []string{"operation"},
 		[]builtin.Entry{entry("core.memory", "put", &stub{})}, sys.Capability{Name: "core.memory"})
 	if err == nil || !strings.Contains(err.Error(), "served twice") {
 		t.Fatalf("err = %v, want a duplicate-syscall refusal", err)
@@ -177,7 +210,7 @@ func TestDuplicateSyscallIsRefused(t *testing.T) {
 // The index is enumerable — the thing the old capability set could not give,
 // since its operations existed only inside a oneOf schema.
 func TestEntriesAreEnumerable(t *testing.T) {
-	tbl := table(t, "core.memory", builtin.Field("operation"),
+	tbl := table(t, "core.memory", []string{"operation"},
 		entry("core.memory", "put", &stub{}), entry("core.memory", "get", &stub{}))
 
 	got := tbl.Entries()
@@ -193,7 +226,7 @@ func TestEntriesAreEnumerable(t *testing.T) {
 // the discoverable menu.
 func TestHideKeepsOperationsDispatchable(t *testing.T) {
 	served := &stub{}
-	tbl := table(t, "core.memory", builtin.Field("operation"), entry("core.memory", "get", served))
+	tbl := table(t, "core.memory", []string{"operation"}, entry("core.memory", "get", served))
 	tbl.Hide("core.memory")
 
 	if caps := tbl.Capabilities(); len(caps) != 1 || !caps[0].Hidden {
@@ -216,7 +249,7 @@ func TestApprovalIsEnforcedFromTheEntry(t *testing.T) {
 	gated := entry("core.filesystem", "read", served)
 	gated.RequireApproval = true
 	gated.Description = "read a file"
-	tbl := table(t, "core.filesystem", builtin.Field("operation"), gated)
+	tbl := table(t, "core.filesystem", []string{"operation"}, gated)
 	dispatcher := builtin.New[struct{}](tbl)
 
 	pending, err := dispatcher.Dispatch(context.Background(), struct{}{},
@@ -248,11 +281,11 @@ func TestCapabilityIsProjectedFromTheEntries(t *testing.T) {
 	get.Labels = []string{"stored"}
 	put := entry("core.memory", "put", &stub{})
 	put.Forbid = []string{"untrusted_web"}
-	tbl := table(t, "core.memory", builtin.Field("operation"), get, put)
+	tbl := table(t, "core.memory", []string{"operation"}, get, put)
 
 	published := tbl.Capabilities()[0]
-	if published.Discriminator != "operation" {
-		t.Fatalf("discriminator = %q, want operation", published.Discriminator)
+	if len(published.Discriminator) != 1 || published.Discriminator[0] != "operation" {
+		t.Fatalf("discriminator = %v, want [operation]", published.Discriminator)
 	}
 	if len(published.Operations) != 2 {
 		t.Fatalf("operations = %+v, want two", published.Operations)

@@ -141,7 +141,7 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 			Handler:         handler,
 		})
 	}
-	return out.Add(HTTPTemplateSyscall, "operation", builtin.Field("operation"), entries, sys.Capability{
+	return out.Add(HTTPTemplateSyscall, []string{"operation"}, entries, sys.Capability{
 		Name:        HTTPTemplateSyscall,
 		Description: templateDescription(config),
 		InputSchema: OneOfSchema(branches),

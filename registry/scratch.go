@@ -103,16 +103,21 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 			Taints:          taints,
 		}},
 	}
+	// Scratch is one anonymous mount, so a case is the operation with an empty
+	// selector — the same shape core.memory uses, with nothing to disambiguate.
 	entries := make([]builtin.Entry, 0, len(grants))
 	for i, grant := range grants {
 		entries = append(entries, builtin.Entry{
-			Key:         builtin.Key{Syscall: ScratchCapability, Operation: grant.Operation},
-			Description: memoryOperations[grant.Operation].description,
-			Input:       branches[i],
-			Handler:     handler,
+			Key:             builtin.Key{Syscall: ScratchCapability, Operation: caseName(grant.Operation, "", "")},
+			Description:     memoryOperations[grant.Operation].description,
+			Input:           branches[i],
+			Labels:          labels,
+			Forbid:          sinkTaints(grant.Operation, taints),
+			RequireApproval: requireApproval && isMemorySink(grant.Operation),
+			Handler:         handler,
 		})
 	}
-	return out.Add(ScratchCapability, "operation", builtin.Field("operation"), entries, sys.Capability{
+	return out.Add(ScratchCapability, []string{"operation", "scope", "space"}, entries, sys.Capability{
 		Name: ScratchCapability,
 		Description: fmt.Sprintf("Process-local scratch memory — ephemeral and private to this process, cleared when it ends, never written to shared storage. Keys are relative slash-paths. Stash large content here and query it with search rather than carrying it in the conversation. Choose an operation:\n- %s.",
 			strings.Join(names, "\n- ")),
