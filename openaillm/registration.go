@@ -8,9 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // SyscallType is the manifest `syscall` for an OpenAI-compatible cognition
@@ -74,21 +73,21 @@ func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, e
 // granted operations — and the handler that serves them. The grant is kept off
 // the discoverable menu via the manifest `hidden` flag (the agent calls the LLM
 // itself; the model never sees it).
-func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (builtin.Contribution, error) {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
 	config, grants, err := parseGrantConfig(raw)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 	normalized, err := normalizeSettings(config.Settings)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 	// Resolve the credential host-side (activation): a missing referenced secret
 	// fails the build here, never silently at call time. The value is never
 	// persisted — Normalize keeps only the reference.
 	apiKey, err := config.Settings.APIKey.Resolve(services.Secrets)
 	if err != nil {
-		return builtin.Contribution{}, fmt.Errorf("core.openaiApi api_key: %w", err)
+		return capability.Family{}, fmt.Errorf("core.openaiApi api_key: %w", err)
 	}
 	normalized.apiKey = apiKey
 	// One handler backs every operation of this grant. The table refuses a
@@ -102,17 +101,17 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	handler := NewHandler(client)
 	handler.connection = connectionFor(normalized)
 
-	entries := make([]builtin.Entry, 0, len(grants))
+	entries := make([]capability.Entry, 0, len(grants))
 	branches := make([]json.RawMessage, 0, len(grants))
 	descriptions := make([]string, 0, len(grants))
 	for _, grant := range grants {
 		handler.AddOperation(grant.Operation, normalized, grant)
 		branch, err := registry.OperationBranch(grant.Operation, openaiOperations[grant.Operation].schema)
 		if err != nil {
-			return builtin.Contribution{}, err
+			return capability.Family{}, err
 		}
-		entries = append(entries, builtin.Entry{
-			Key:         builtin.Key{Syscall: SyscallType, Operation: grant.Operation},
+		entries = append(entries, capability.Entry{
+			Key:         capability.Key{Syscall: SyscallType, Operation: grant.Operation},
 			Description: openaiOperations[grant.Operation].description,
 			Input:       branch,
 			Handler:     handler,
@@ -120,12 +119,11 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		branches = append(branches, branch)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
-	return builtin.Contribution{Discriminator: "operation", Entries: entries, Capability: sys.Capability{
-		Name: SyscallType,
+	return capability.Family{Discriminator: "operation", Entries: entries,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
 			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),
-		InputSchema: registry.OneOfSchema(branches),
-	}}, nil
+		Input: registry.OneOfSchema(branches),
+	}, nil
 }
 
 func modelScope(settings normalizedSettings) string {

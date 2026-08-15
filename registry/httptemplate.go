@@ -10,10 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // HTTPTemplateSyscall is the manifest `syscall` for a templated-request grant and
@@ -93,10 +92,10 @@ func (HTTPTemplateRegistration) Normalize(_ string, raw json.RawMessage) (json.R
 	return json.Marshal(config)
 }
 
-func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (builtin.Contribution, error) {
+func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
 	config, err := parseTemplateConfig(raw)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 	operations := make(map[string]httptemplate.Operation, len(config.Capabilities))
 	branches := make([]json.RawMessage, 0, len(config.Capabilities))
@@ -105,11 +104,11 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 		// referenced secret fails the build here, never silently at request time.
 		headers, credentialLabels, err := resolveInjectedHeaders(operation.InjectHeaders, services)
 		if err != nil {
-			return builtin.Contribution{}, fmt.Errorf("core.httpTemplate operation %q: %w", operation.Operation, err)
+			return capability.Family{}, fmt.Errorf("core.httpTemplate operation %q: %w", operation.Operation, err)
 		}
 		compiled, branch, err := compileOperation(operation, headers, credentialLabels)
 		if err != nil {
-			return builtin.Contribution{}, fmt.Errorf("operation %q: %w", operation.Operation, err)
+			return capability.Family{}, fmt.Errorf("operation %q: %w", operation.Operation, err)
 		}
 		operations[operation.Operation] = compiled
 		branches = append(branches, branch)
@@ -128,11 +127,11 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 		Client:     client,
 		Operations: operations,
 	}
-	entries := make([]builtin.Entry, 0, len(config.Capabilities))
+	entries := make([]capability.Entry, 0, len(config.Capabilities))
 	for i, operation := range config.Capabilities {
 		compiled := operations[operation.Operation]
-		entries = append(entries, builtin.Entry{
-			Key:             builtin.Key{Syscall: HTTPTemplateSyscall, Operation: operation.Operation},
+		entries = append(entries, capability.Entry{
+			Key:             capability.Key{Syscall: HTTPTemplateSyscall, Operation: operation.Operation},
 			Description:     operation.Description,
 			Input:           branches[i],
 			Labels:          append(append([]string(nil), compiled.Labels...), compiled.CredentialLabels...),
@@ -141,11 +140,10 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 			Handler:         handler,
 		})
 	}
-	return builtin.Contribution{Discriminator: "operation", Entries: entries, Capability: sys.Capability{
-		Name:        HTTPTemplateSyscall,
+	return capability.Family{Discriminator: "operation", Entries: entries,
 		Description: templateDescription(config),
-		InputSchema: OneOfSchema(branches),
-	}}, nil
+		Input:       OneOfSchema(branches),
+	}, nil
 }
 
 // parseTemplateConfig validates and canonicalizes a template grant: at least one

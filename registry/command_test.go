@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/command"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
@@ -32,9 +32,9 @@ const kubectlGrant = `{"capabilities":[{"operation":"run","commands":[{
   "labels":["k8s"]
 }]}]}`
 
-func configure(t *testing.T, grant string) *builtin.Table {
+func configure(t *testing.T, grant string) *capability.Table {
 	t.Helper()
-	out := builtin.NewTable()
+	out := capability.NewTable()
 	contribution, err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)

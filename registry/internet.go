@@ -11,9 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 var headerNamePattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
@@ -82,16 +81,16 @@ func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMe
 	return json.Marshal(config)
 }
 
-func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (builtin.Contribution, error) {
+func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
 	config, policy, err := parseInternetConfig(raw)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 	// Resolve credential injections host-side. A missing secret fails here — at
 	// driver build / activation — never silently at request time.
 	injections, err := buildInjections(config.Capabilities, services)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 	client := internet.NewConfiguredClient(
 		policy,
@@ -115,11 +114,11 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 		granted = append(granted, method)
 	}
 	sort.Strings(granted)
-	entries := make([]builtin.Entry, 0, len(granted))
+	entries := make([]capability.Entry, 0, len(granted))
 	for _, method := range granted {
 		policy := methods[method]
-		entries = append(entries, builtin.Entry{
-			Key:             builtin.Key{Syscall: internet.Capability, Operation: method},
+		entries = append(entries, capability.Entry{
+			Key:             capability.Key{Syscall: internet.Capability, Operation: method},
 			Description:     fmt.Sprintf("%s request", method),
 			Input:           internetRequestSchema,
 			Labels:          policy.Labels,
@@ -128,11 +127,10 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 			Handler:         handler,
 		})
 	}
-	return builtin.Contribution{Discriminator: "method", Entries: entries, Capability: sys.Capability{
-		Name:        internet.Capability,
+	return capability.Family{Discriminator: "method", Entries: entries,
 		Description: internetDescription(config.Capabilities),
-		InputSchema: internetRequestSchema,
-	}}, nil
+		Input:       internetRequestSchema,
+	}, nil
 }
 
 // parseInternetConfig validates and canonicalizes a core.internet grant's

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/filesystem"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
@@ -17,7 +17,7 @@ func filesystemRegistry() *registry.Registry {
 	return registry.New(registry.FilesystemRegistration{})
 }
 
-func buildFilesystemTable(t *testing.T, config string) *builtin.Table {
+func buildFilesystemTable(t *testing.T, config string) *capability.Table {
 	t.Helper()
 	built, err := filesystemRegistry().Build(context.Background(),
 		[]registry.Entry{{Syscall: "core.filesystem", Config: json.RawMessage(config)}},
@@ -38,7 +38,7 @@ func buildFilesystemTable(t *testing.T, config string) *builtin.Table {
 	return built
 }
 
-func buildFilesystem(t *testing.T, config string) builtin.Handler {
+func buildFilesystem(t *testing.T, config string) capability.Handler {
 	return buildFilesystemTable(t, config).Entries()[0].Handler
 }
 

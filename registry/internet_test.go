@@ -7,9 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 func TestInternetMatchesSyscall(t *testing.T) {
@@ -51,7 +52,7 @@ func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
 
 func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`)
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)
@@ -73,7 +74,7 @@ func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 // reach egress. Enforcement is the monitor's; that it is declared at all is
 // this build's job, and it is the whole of the guarantee.
 func TestInternetPublishesTheEgressFloorPerMethod(t *testing.T) {
-	table := builtin.NewTable()
+	table := capability.NewTable()
 	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(),
 		json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`),
 		registry.Services{})
@@ -83,21 +84,23 @@ func TestInternetPublishesTheEgressFloorPerMethod(t *testing.T) {
 	if err := table.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	published := table.Capabilities()[0]
-	if published.Discriminator != "method" {
-		t.Fatalf("discriminator = %q, want method", published.Discriminator)
+	entries := table.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v, want one per method (GET and POST)", entries)
 	}
-	if len(published.Operations) != 2 {
-		t.Fatalf("operations = %+v, want GET and POST", published.Operations)
-	}
-	for _, operation := range published.Operations {
-		if !slices.Contains(operation.Forbid, "secret") {
+	for _, entry := range entries {
+		if !slices.Contains(entry.Forbid, "secret") {
 			t.Fatalf("SECURITY: %s forbids %v, want the reserved secret class present",
-				operation.Name, operation.Forbid)
+				entry.Key, entry.Forbid)
 		}
 	}
-	// The floor is declared, not applied — an untainted run is unaffected.
-	if _, ok := published.FindOperation(json.RawMessage(`{"method":"GET"}`)); !ok {
-		t.Fatal("GET must resolve to its operation")
+	// The floor is declared, not applied — an untainted run is unaffected, and
+	// the index resolves a GET to exactly the entry carrying that floor.
+	if got := table.Operations(internet.Capability); !slices.Contains(got, "GET") {
+		t.Fatalf("operations = %v, want GET to resolve to its own entry", got)
+	}
+	forbid, sink := table.Forbidden(sys.Syscall{Name: internet.Capability, Args: json.RawMessage(`{"method":"GET"}`)})
+	if sink != internet.Capability+"/GET" || !slices.Contains(forbid, "secret") {
+		t.Fatalf("Forbidden(GET) = %v at %q, want the GET entry's floor", forbid, sink)
 	}
 }

@@ -11,9 +11,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/filesystem"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // filesystemConfig is a core.filesystem grant's driver configuration: the
@@ -62,10 +61,10 @@ func (FilesystemRegistration) Normalize(_ string, raw json.RawMessage) (json.Raw
 	return json.Marshal(config)
 }
 
-func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (builtin.Contribution, error) {
+func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (capability.Family, error) {
 	config, grants, err := parseFilesystemConfig(raw)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 
 	operations := make(map[string]filesystem.Operation, len(grants))
@@ -82,16 +81,16 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		Operations:     operations,
 	}
 
-	entries := make([]builtin.Entry, 0, len(grants))
+	entries := make([]capability.Entry, 0, len(grants))
 	branches := make([]json.RawMessage, 0, len(grants))
 	names := make([]string, 0, len(grants))
 	for _, grant := range grants {
 		branch, err := OperationBranch(grant.Operation, filesystemOperations[grant.Operation].schema)
 		if err != nil {
-			return builtin.Contribution{}, err
+			return capability.Family{}, err
 		}
-		entries = append(entries, builtin.Entry{
-			Key:             builtin.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
+		entries = append(entries, capability.Entry{
+			Key:             capability.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
 			Description:     filesystemOperations[grant.Operation].description,
 			Input:           branch,
 			Labels:          grant.Labels,
@@ -103,12 +102,11 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		names = append(names, filesystemOperations[grant.Operation].description)
 	}
 
-	return builtin.Contribution{Discriminator: "operation", Entries: entries, Capability: sys.Capability{
-		Name: filesystem.Capability,
+	return capability.Family{Discriminator: "operation", Entries: entries,
 		Description: fmt.Sprintf("Read-only filesystem access under %s — paths are absolute or relative to a root, and never escape it. Choose an operation:\n- %s.",
 			strings.Join(config.Roots, ", "), strings.Join(names, "\n- ")),
-		InputSchema: OneOfSchema(branches),
-	}}, nil
+		Input: OneOfSchema(branches),
+	}, nil
 }
 
 // parseFilesystemConfig validates and canonicalizes a core.filesystem grant's

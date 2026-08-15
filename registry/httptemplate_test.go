@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
@@ -65,7 +65,7 @@ func templateConfigJSON() string {
 // operations, and a handler that routes it.
 func TestTemplateConfigurePublishesCapability(t *testing.T) {
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	contribution, err := (registry.HTTPTemplateRegistration{}).Configure(
 		context.Background(), json.RawMessage(templateConfigJSON()), services)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 		`"inject_headers":{"X-Api-Key":{"secret":"WEATHER_KEY"}}}` +
 		`]}`
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc", "WEATHER_KEY": "wk-xyz"}}
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	contribution, err := (registry.HTTPTemplateRegistration{}).Configure(
 		context.Background(), json.RawMessage(raw), services)
 	if err != nil {

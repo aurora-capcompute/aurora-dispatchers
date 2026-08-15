@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -19,7 +19,7 @@ func TestInternetDescriptionIncludesAuthorUsageNote(t *testing.T) {
 		`{"methods":["GET","POST"],"domain":"https://onyx.example.com","description":` + mustJSON(usage) + `},` +
 		`{"methods":["GET"],"domain":"https://docs.example.org"}` +
 		`]}`)
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)
@@ -72,7 +72,7 @@ func TestInternetDescriptionRejectsUnsafeText(t *testing.T) {
 func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"https://onyx.example.com",` +
 		`"description":"Onyx KB.","inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
 	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
 	if err != nil {
@@ -99,7 +99,7 @@ func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
 func TestInternetDescriptionAnnotatesMultipleInjectedHeaders(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://onyx.example.com",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN"},"X-Api-Key":{"secret":"ONYX_KEY"}}}]}`)
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "t", "ONYX_KEY": "k"}}
 	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
 	if err != nil {

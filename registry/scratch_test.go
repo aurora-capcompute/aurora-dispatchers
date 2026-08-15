@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-func buildScratchTable(t *testing.T, config string) *builtin.Table {
+func buildScratchTable(t *testing.T, config string) *capability.Table {
 	t.Helper()
 	// Unlike core.memory, scratch needs no Services — it owns a fresh in-memory
 	// store per build (i.e. per process).
@@ -34,11 +34,11 @@ func buildScratchTable(t *testing.T, config string) *builtin.Table {
 	return built
 }
 
-func buildScratch(t *testing.T, config string) builtin.Handler {
+func buildScratch(t *testing.T, config string) capability.Handler {
 	return buildScratchTable(t, config).Entries()[0].Handler
 }
 
-func scratchCall(t *testing.T, h builtin.Handler, args string) sys.SyscallResult {
+func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallResult {
 	t.Helper()
 	res, err := h.DispatchCall(context.Background(),
 		sys.Syscall{Name: registry.ScratchCapability, Args: json.RawMessage(args)}, sys.Authorization{})

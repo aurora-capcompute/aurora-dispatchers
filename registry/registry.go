@@ -1,6 +1,6 @@
 // Package registry assembles built-in capability drivers: it selects a
 // registration by the granted syscall and lets it publish that driver's handler
-// and one capability into a builtin.Config. The capability is named for the
+// and one capability into a capability.Config. The capability is named for the
 // syscall (core.internet, core.memory, core.openaiApi): a leaf grant is an ADT
 // family whose operations are cases of one capability, discriminated inside the
 // call args — never separate names. The grant's data-flow policy (labels/taints)
@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 )
 
@@ -48,7 +48,7 @@ type Services struct {
 type Registration interface {
 	Matches(syscall string) bool
 	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
-	Configure(ctx context.Context, config json.RawMessage, services Services) (builtin.Contribution, error)
+	Configure(ctx context.Context, config json.RawMessage, services Services) (capability.Family, error)
 }
 
 type Registry struct {
@@ -77,8 +77,8 @@ type Entry struct {
 	Hidden  bool
 }
 
-func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (*builtin.Table, error) {
-	table := builtin.NewTable()
+func (r *Registry) Build(ctx context.Context, entries []Entry, services Services) (*capability.Table, error) {
+	table := capability.NewTable()
 	for _, entry := range entries {
 		selected := r.selectFor(entry.Syscall)
 		if selected == nil {

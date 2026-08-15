@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-capcompute/journaled"
 	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-capcompute/replay"
@@ -252,12 +253,35 @@ func (d tenantChain) Dispatch(ctx context.Context, _ string, call sys.Syscall, a
 	return sys.Result(json.RawMessage(`{"from":"` + call.Name + `"}`)), nil
 }
 
-func (d tenantChain) Capabilities() []sys.Capability {
-	return []sys.Capability{
-		{Name: "net.http", Labels: []string{"untrusted_web"}},
-		{Name: "k8s.delete", Forbid: []string{"untrusted_web"}},
-		{Name: d.handler.Name},
+func (d tenantChain) Capabilities() []sys.Capability { return memTable(d.handler).Capabilities() }
+
+// memTable is the grant index the flow layer reads its policy from: a web
+// source, a protected sink, and the memory handler under test.
+func memTable(handler memory.Handler) *capability.Table {
+	table := capability.NewTable()
+	add := func(name string, labels, forbid []string) {
+		family := capability.Family{Entries: []capability.Entry{{
+			Key:     capability.Key{Syscall: name},
+			Labels:  labels,
+			Forbid:  forbid,
+			Handler: nopHandler{},
+		}}}
+		if err := table.Add(family); err != nil {
+			panic(err)
+		}
 	}
+	add("net.http", []string{"untrusted_web"}, nil)
+	add("k8s.delete", nil, []string{"untrusted_web"})
+	add(handler.Name, nil, nil)
+	return table
+}
+
+// nopHandler stands in where the table is used only for its policy — the test
+// chain does its own routing.
+type nopHandler struct{}
+
+func (nopHandler) DispatchCall(context.Context, sys.Syscall, sys.Authorization) (sys.SyscallResult, error) {
+	return sys.Result(nil), nil
 }
 
 // Memory poisoning surfaces instead of laundering: a value written by a run
@@ -266,10 +290,12 @@ func (d tenantChain) Capabilities() []sys.Capability {
 func TestMemoryPoisoningSurfacesAcrossThreads(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
-	run := func() *monitor.FlowMonitor[string, memPID] {
-		return monitor.NewFlowMonitor(monitor.NewTaints[string](), monitor.NewLabeler[memPID](chainAdapter{tenantChain{handler}}))
+	table := memTable(handler)
+	run := func() sys.Dispatcher[memPID] {
+		flow := monitor.NewFlow[string, memPID](monitor.NewTaints[string](), table)
+		return flow.Guard(flow.Stamp(chainAdapter{tenantChain{handler}}))
 	}
-	dispatchRun := func(t *testing.T, monitor *monitor.FlowMonitor[string, memPID], pid, name, args string) sys.SyscallResult {
+	dispatchRun := func(t *testing.T, monitor sys.Dispatcher[memPID], pid, name, args string) sys.SyscallResult {
 		t.Helper()
 		call := sys.Syscall{Abi: sys.ABIVersion, Name: name}
 		if args != "" {

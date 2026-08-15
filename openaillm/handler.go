@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-var _ builtin.Handler = (*Handler)(nil)
+var _ capability.Handler = (*Handler)(nil)
 
 type capabilityConfig struct {
 	defaultModel    string

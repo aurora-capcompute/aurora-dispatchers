@@ -11,9 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/command"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // CommandOperationGrant is one case of a core.command grant's `capabilities`
@@ -129,10 +128,10 @@ func (CommandRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMes
 	return json.Marshal(config)
 }
 
-func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (builtin.Contribution, error) {
+func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
 	_, grants, err := parseCommandConfig(raw)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 
 	var commands []command.Command
@@ -140,7 +139,7 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		for _, rule := range grant.Commands {
 			built, err := buildCommand(rule, services)
 			if err != nil {
-				return builtin.Contribution{}, fmt.Errorf("command %q: %w", rule.Name, err)
+				return capability.Family{}, fmt.Errorf("command %q: %w", rule.Name, err)
 			}
 			commands = append(commands, built)
 		}
@@ -162,15 +161,15 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 	// that does not match the command actually being called.
 	sorted := append([]command.Command(nil), commands...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-	entries := make([]builtin.Entry, 0, len(sorted))
+	entries := make([]capability.Entry, 0, len(sorted))
 	branches := make([]json.RawMessage, 0, len(sorted))
 	for _, c := range sorted {
 		branch, err := OperationBranch(command.VerbRun, commandCallSchema(c))
 		if err != nil {
-			return builtin.Contribution{}, err
+			return capability.Family{}, err
 		}
-		entries = append(entries, builtin.Entry{
-			Key:             builtin.Key{Syscall: command.Capability, Operation: c.Name},
+		entries = append(entries, capability.Entry{
+			Key:             capability.Key{Syscall: command.Capability, Operation: c.Name},
 			Description:     c.Description,
 			Input:           branch,
 			Labels:          c.Labels,
@@ -180,11 +179,10 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		})
 		branches = append(branches, branch)
 	}
-	return builtin.Contribution{Discriminator: "name", Entries: entries, Capability: sys.Capability{
-		Name:        command.Capability,
+	return capability.Family{Discriminator: "name", Entries: entries,
 		Description: commandDescription(commands),
-		InputSchema: OneOfSchema(branches),
-	}}, nil
+		Input:       OneOfSchema(branches),
+	}, nil
 }
 
 // buildCommand resolves one validated rule into the executable form, resolving

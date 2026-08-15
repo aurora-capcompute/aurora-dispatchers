@@ -8,9 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // ScratchCapability is the syscall/capability name of the process-scoped scratch
@@ -60,10 +59,10 @@ func (ScratchRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMes
 	return json.Marshal(config)
 }
 
-func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (builtin.Contribution, error) {
+func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (capability.Family, error) {
 	_, grants, err := parseScratchConfig(raw)
 	if err != nil {
-		return builtin.Contribution{}, err
+		return capability.Family{}, err
 	}
 
 	ops := make(map[string]struct{}, len(grants))
@@ -80,7 +79,7 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 		taints = unionLabels(taints, grant.Taints)
 		branch, err := OperationBranch(grant.Operation, scratchOperations[grant.Operation].schema)
 		if err != nil {
-			return builtin.Contribution{}, err
+			return capability.Family{}, err
 		}
 		branches = append(branches, branch)
 		names = append(names, scratchOperations[grant.Operation].description)
@@ -105,10 +104,10 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 	}
 	// Scratch is one anonymous mount, so a case is the operation with an empty
 	// selector — the same shape core.memory uses, with nothing to disambiguate.
-	entries := make([]builtin.Entry, 0, len(grants))
+	entries := make([]capability.Entry, 0, len(grants))
 	for i, grant := range grants {
-		entries = append(entries, builtin.Entry{
-			Key:             builtin.Key{Syscall: ScratchCapability, Operation: grant.Operation},
+		entries = append(entries, capability.Entry{
+			Key:             capability.Key{Syscall: ScratchCapability, Operation: grant.Operation},
 			Description:     scratchOperations[grant.Operation].description,
 			Input:           branches[i],
 			Labels:          labels,
@@ -117,12 +116,11 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 			Handler:         handler,
 		})
 	}
-	return builtin.Contribution{Discriminator: "operation", Entries: entries, Capability: sys.Capability{
-		Name: ScratchCapability,
+	return capability.Family{Discriminator: "operation", Entries: entries,
 		Description: fmt.Sprintf("Process-local scratch memory — ephemeral and private to this process, cleared when it ends, never written to shared storage. Keys are relative slash-paths. Stash large content here and query it with search rather than carrying it in the conversation. Choose an operation:\n- %s.",
 			strings.Join(names, "\n- ")),
-		InputSchema: OneOfSchema(branches),
-	}}, nil
+		Input: OneOfSchema(branches),
+	}, nil
 }
 
 // parseScratchConfig validates and canonicalizes a core.scratch grant — the

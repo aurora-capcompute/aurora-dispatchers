@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
@@ -76,7 +76,7 @@ func TestInjectHeadersConfigureResolvesReference(t *testing.T) {
 		Secrets:  mapResolver{"ONYX_TOKEN": "tok-abc"},
 		AuditKey: []byte("audit-key"),
 	}
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
 	if err != nil {
 		t.Fatalf("configure: %v", err)

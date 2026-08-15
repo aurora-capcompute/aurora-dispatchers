@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -32,7 +32,7 @@ func TestMatchesSyscall(t *testing.T) {
 // syscall, whose input schema is a oneOf over the granted operations.
 func TestConfigurePublishesOneCapability(t *testing.T) {
 	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test","capabilities":[{"operation":"chat"},{"operation":"models"}]}`)
-	config := builtin.NewTable()
+	config := capability.NewTable()
 	contribution, err := (Registration{}).Configure(context.Background(), raw, registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)
