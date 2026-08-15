@@ -128,7 +128,7 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 			Handler:         handler,
 		})
 	}
-	return builtin.Contribution{Discriminator: []string{"method"}, Entries: entries, Capability: sys.Capability{
+	return builtin.Contribution{Discriminator: "method", Entries: entries, Capability: sys.Capability{
 		Name:        internet.Capability,
 		Description: internetDescription(config.Capabilities),
 		InputSchema: internetRequestSchema,

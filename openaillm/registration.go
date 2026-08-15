@@ -120,7 +120,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		branches = append(branches, branch)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
-	return builtin.Contribution{Discriminator: []string{"operation"}, Entries: entries, Capability: sys.Capability{
+	return builtin.Contribution{Discriminator: "operation", Entries: entries, Capability: sys.Capability{
 		Name: SyscallType,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
 			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),

@@ -103,7 +103,7 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		names = append(names, filesystemOperations[grant.Operation].description)
 	}
 
-	return builtin.Contribution{Discriminator: []string{"operation"}, Entries: entries, Capability: sys.Capability{
+	return builtin.Contribution{Discriminator: "operation", Entries: entries, Capability: sys.Capability{
 		Name: filesystem.Capability,
 		Description: fmt.Sprintf("Read-only filesystem access under %s — paths are absolute or relative to a root, and never escape it. Choose an operation:\n- %s.",
 			strings.Join(config.Roots, ", "), strings.Join(names, "\n- ")),

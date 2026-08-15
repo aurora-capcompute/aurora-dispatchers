@@ -84,8 +84,8 @@ func TestInternetPublishesTheEgressFloorPerMethod(t *testing.T) {
 		t.Fatalf("add: %v", err)
 	}
 	published := table.Capabilities()[0]
-	if len(published.Discriminator) != 1 || published.Discriminator[0] != "method" {
-		t.Fatalf("discriminator = %v, want [method]", published.Discriminator)
+	if published.Discriminator != "method" {
+		t.Fatalf("discriminator = %q, want method", published.Discriminator)
 	}
 	if len(published.Operations) != 2 {
 		t.Fatalf("operations = %+v, want GET and POST", published.Operations)

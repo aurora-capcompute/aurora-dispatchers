@@ -141,7 +141,7 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 			Handler:         handler,
 		})
 	}
-	return builtin.Contribution{Discriminator: []string{"operation"}, Entries: entries, Capability: sys.Capability{
+	return builtin.Contribution{Discriminator: "operation", Entries: entries, Capability: sys.Capability{
 		Name:        HTTPTemplateSyscall,
 		Description: templateDescription(config),
 		InputSchema: OneOfSchema(branches),

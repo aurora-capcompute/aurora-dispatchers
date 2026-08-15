@@ -180,7 +180,7 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		})
 		branches = append(branches, branch)
 	}
-	return builtin.Contribution{Discriminator: []string{"name"}, Entries: entries, Capability: sys.Capability{
+	return builtin.Contribution{Discriminator: "name", Entries: entries, Capability: sys.Capability{
 		Name:        command.Capability,
 		Description: commandDescription(commands),
 		InputSchema: OneOfSchema(branches),

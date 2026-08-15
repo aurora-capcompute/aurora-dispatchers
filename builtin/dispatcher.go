@@ -64,24 +64,20 @@ type Entry struct {
 	Handler         Handler
 }
 
-// discriminator reads the case name out of a call's arguments: the named
-// properties, read in order and joined. It is the same read sys.OperationName
-// does, so the dispatcher below the journal and the monitor above it resolve one
-// call to one case — a divergence there would apply no policy at all.
-//
-// A property that is absent reads as empty, which is a case in its own right:
-// core.memory's bare selector on a single-mount grant names that mount. Nothing
-// is canonicalized, so a near miss is a refusal naming the alternatives rather
-// than a silent correction.
-type discriminator []string
+// discriminator is the argument property whose value names the case. It is read
+// by sys.OperationName — the same read the monitor above the journal does, so
+// both resolve one call to one case; a divergence there would apply no policy at
+// all. Nothing is canonicalized, so a near miss is a refusal naming the
+// alternatives rather than a silent correction.
+type discriminator string
 
 func (d discriminator) caseName(args json.RawMessage) (string, error) {
-	if len(d) == 0 {
+	if d == "" {
 		return "", nil // a syscall that is one operation
 	}
-	name, ok := sys.OperationName(d, args)
+	name, ok := sys.OperationName(string(d), args)
 	if !ok {
-		return "", fmt.Errorf("arguments must be an object with string %s", strings.Join(d, ", "))
+		return "", fmt.Errorf("arguments must be an object with a string %q", string(d))
 	}
 	return name, nil
 }
@@ -94,9 +90,9 @@ func (d discriminator) caseName(args json.RawMessage) (string, error) {
 // they add up to. A family returns this and touches nothing else — the table is
 // the assembler's, so no family can reach past its own grant.
 type Contribution struct {
-	// Discriminator names the argument properties that select a case, in order.
+	// Discriminator names the argument property whose value selects a case.
 	// Empty means the syscall is one operation.
-	Discriminator []string
+	Discriminator string
 	Entries       []Entry
 	Capability    sys.Capability
 }
@@ -147,7 +143,7 @@ func (t *Table) Add(contribution Contribution) error {
 		}
 		t.entries[entry.Key] = entry
 	}
-	t.discriminators[syscall] = contribution.Discriminator
+	t.discriminators[syscall] = discriminator(contribution.Discriminator)
 	// The capability's ADT is the entries, projected: the operation list, its
 	// per-case schema, and its per-case policy all come from one place, so the
 	// menu cannot drift from what is dispatchable.
