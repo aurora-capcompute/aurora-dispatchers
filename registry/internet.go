@@ -82,16 +82,16 @@ func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMe
 	return json.Marshal(config)
 }
 
-func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
+func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (builtin.Contribution, error) {
 	config, policy, err := parseInternetConfig(raw)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 	// Resolve credential injections host-side. A missing secret fails here — at
 	// driver build / activation — never silently at request time.
 	injections, err := buildInjections(config.Capabilities, services)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 	client := internet.NewConfiguredClient(
 		policy,
@@ -128,11 +128,11 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 			Handler:         handler,
 		})
 	}
-	return out.Add(internet.Capability, []string{"method"}, entries, sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"method"}, Entries: entries, Capability: sys.Capability{
 		Name:        internet.Capability,
 		Description: internetDescription(config.Capabilities),
 		InputSchema: internetRequestSchema,
-	})
+	}}, nil
 }
 
 // parseInternetConfig validates and canonicalizes a core.internet grant's

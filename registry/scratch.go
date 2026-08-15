@@ -60,10 +60,10 @@ func (ScratchRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMes
 	return json.Marshal(config)
 }
 
-func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Table) error {
+func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (builtin.Contribution, error) {
 	_, grants, err := parseScratchConfig(raw)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 
 	ops := make(map[string]struct{}, len(grants))
@@ -80,7 +80,7 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 		taints = unionLabels(taints, grant.Taints)
 		branch, err := OperationBranch(grant.Operation, memoryOperations[grant.Operation].schema)
 		if err != nil {
-			return err
+			return builtin.Contribution{}, err
 		}
 		branches = append(branches, branch)
 		names = append(names, memoryOperations[grant.Operation].description)
@@ -117,12 +117,12 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 			Handler:         handler,
 		})
 	}
-	return out.Add(ScratchCapability, []string{"operation", "scope", "space"}, entries, sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"operation", "scope", "space"}, Entries: entries, Capability: sys.Capability{
 		Name: ScratchCapability,
 		Description: fmt.Sprintf("Process-local scratch memory — ephemeral and private to this process, cleared when it ends, never written to shared storage. Keys are relative slash-paths. Stash large content here and query it with search rather than carrying it in the conversation. Choose an operation:\n- %s.",
 			strings.Join(names, "\n- ")),
 		InputSchema: OneOfSchema(branches),
-	})
+	}}, nil
 }
 
 // parseScratchConfig validates and canonicalizes a core.scratch grant — the

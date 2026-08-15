@@ -52,8 +52,12 @@ func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
 func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`)
 	config := builtin.NewTable()
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, config); err != nil {
+	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != internet.Capability {
 		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities(), internet.Capability)
@@ -70,10 +74,14 @@ func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 // this build's job, and it is the whole of the guarantee.
 func TestInternetPublishesTheEgressFloorPerMethod(t *testing.T) {
 	table := builtin.NewTable()
-	if err := (registry.InternetRegistration{}).Configure(context.Background(),
+	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(),
 		json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`),
-		registry.Services{}, table); err != nil {
+		registry.Services{})
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := table.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	published := table.Capabilities()[0]
 	if len(published.Discriminator) != 1 || published.Discriminator[0] != "method" {

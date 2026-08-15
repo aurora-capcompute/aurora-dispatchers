@@ -53,7 +53,6 @@ type Entry struct {
 	Key         Key
 	Description string
 	Input       json.RawMessage
-	Output      json.RawMessage
 	// Labels are the source classes this operation's results carry; Forbid are
 	// the labels barred from flowing into its arguments. Both are published on
 	// the capability and enforced by the runtime's monitor — never here.
@@ -65,63 +64,81 @@ type Entry struct {
 	Handler         Handler
 }
 
-// Discriminator reads the operation out of a call's arguments. It belongs to
-// the family that defines the syscall — core.internet reads `method`,
-// core.command reads `name`, the rest read `operation` — and returns an empty
-// string for a syscall that has none. It does not canonicalize: what it returns
-// is matched exactly against the table, so what the guest sent is what is
-// looked up, and a near miss is a refusal that names the alternatives rather
-// than a silent correction.
-type Discriminator func(args json.RawMessage) (string, error)
-
-// SingleOperation is the Discriminator of a syscall that is one operation.
-func SingleOperation(json.RawMessage) (string, error) { return "", nil }
-
-// Fields builds the Discriminator that reads the named string properties and
-// joins them into the case name. It is the same read sys.OperationName does, so
-// the dispatcher below the journal and the monitor above it resolve one call to
-// one case — a divergence there would apply no policy at all.
+// discriminator reads the case name out of a call's arguments: the named
+// properties, read in order and joined. It is the same read sys.OperationName
+// does, so the dispatcher below the journal and the monitor above it resolve one
+// call to one case — a divergence there would apply no policy at all.
 //
 // A property that is absent reads as empty, which is a case in its own right:
-// core.memory's bare selector on a single-mount grant names that mount.
-func Fields(names ...string) Discriminator {
-	return func(args json.RawMessage) (string, error) {
-		name, ok := sys.OperationName(names, args)
-		if !ok {
-			return "", fmt.Errorf("arguments must be an object with string %s", strings.Join(names, ", "))
-		}
-		return name, nil
-	}
-}
+// core.memory's bare selector on a single-mount grant names that mount. Nothing
+// is canonicalized, so a near miss is a refusal naming the alternatives rather
+// than a silent correction.
+type discriminator []string
 
-// Field is the one-property case of Fields.
-func Field(name string) Discriminator { return Fields(name) }
+func (d discriminator) caseName(args json.RawMessage) (string, error) {
+	if len(d) == 0 {
+		return "", nil // a syscall that is one operation
+	}
+	name, ok := sys.OperationName(d, args)
+	if !ok {
+		return "", fmt.Errorf("arguments must be an object with string %s", strings.Join(d, ", "))
+	}
+	return name, nil
+}
 
 // Table is one process's whole leaf surface: every operation it may reach, how
 // to find the operation in a call, and the capabilities those operations add up
 // to.
+// Contribution is everything one family has to say about one syscall: the
+// argument properties that name a case, the case it grants, and the capability
+// they add up to. A family returns this and touches nothing else — the table is
+// the assembler's, so no family can reach past its own grant.
+type Contribution struct {
+	// Discriminator names the argument properties that select a case, in order.
+	// Empty means the syscall is one operation.
+	Discriminator []string
+	Entries       []Entry
+	Capability    sys.Capability
+}
+
+// syscall is the one this contribution is for, taken from the entries rather
+// than passed alongside them — there is then no way for the two to disagree.
+func (c Contribution) syscall() (string, error) {
+	if len(c.Entries) == 0 {
+		return "", fmt.Errorf("a contribution must grant at least one operation")
+	}
+	syscall := c.Entries[0].Key.Syscall
+	for _, entry := range c.Entries {
+		if entry.Key.Syscall != syscall {
+			return "", fmt.Errorf("contribution mixes syscalls %q and %q", syscall, entry.Key.Syscall)
+		}
+	}
+	return syscall, nil
+}
+
 type Table struct {
 	entries        map[Key]Entry
-	discriminators map[string]Discriminator
+	discriminators map[string]discriminator
 	capabilities   []sys.Capability
 }
 
 func NewTable() *Table {
-	return &Table{entries: make(map[Key]Entry), discriminators: make(map[string]Discriminator)}
+	return &Table{entries: make(map[Key]Entry), discriminators: make(map[string]discriminator)}
 }
 
 // Add indexes one family's entries under its discriminator. A duplicate key is
 // an error rather than a silent first-wins: two grants serving one operation is
 // a manifest that means two things at once, and the old linear scan answered
 // that by picking whichever was appended first.
-func (t *Table) Add(syscall string, discriminator []string, entries []Entry, capability sys.Capability) error {
+func (t *Table) Add(contribution Contribution) error {
+	syscall, err := contribution.syscall()
+	if err != nil {
+		return err
+	}
 	if _, taken := t.discriminators[syscall]; taken {
 		return fmt.Errorf("syscall %q is served twice", syscall)
 	}
-	for _, entry := range entries {
-		if entry.Key.Syscall != syscall {
-			return fmt.Errorf("entry %s does not belong to syscall %q", entry.Key, syscall)
-		}
+	for _, entry := range contribution.Entries {
 		if entry.Handler == nil {
 			return fmt.Errorf("entry %s has no handler", entry.Key)
 		}
@@ -130,12 +147,13 @@ func (t *Table) Add(syscall string, discriminator []string, entries []Entry, cap
 		}
 		t.entries[entry.Key] = entry
 	}
-	t.discriminators[syscall] = Fields(discriminator...)
+	t.discriminators[syscall] = contribution.Discriminator
 	// The capability's ADT is the entries, projected: the operation list, its
 	// per-case schema, and its per-case policy all come from one place, so the
 	// menu cannot drift from what is dispatchable.
-	capability.Discriminator = discriminator
-	capability.Operations = operationsOf(entries)
+	capability := contribution.Capability
+	capability.Discriminator = contribution.Discriminator
+	capability.Operations = operationsOf(contribution.Entries)
 	t.capabilities = append(t.capabilities, capability)
 	return nil
 }
@@ -217,11 +235,11 @@ func (d *Dispatcher[K]) Capabilities() []sys.Capability {
 // reads the operation out of the arguments, and the pair indexes the table. A
 // miss is a denial rather than a routing failure — the table is the grant.
 func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	discriminator, served := d.table.discriminators[call.Name]
+	names, served := d.table.discriminators[call.Name]
 	if !served {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("capability %q is not granted", call.Name)), nil
 	}
-	operation, err := discriminator(call.Args)
+	operation, err := names.caseName(call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("%s: %v", call.Name, err)), nil
 	}

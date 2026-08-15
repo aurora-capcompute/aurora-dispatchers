@@ -80,20 +80,20 @@ func (MemoryRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMess
 	return json.Marshal(config)
 }
 
-func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
+func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (builtin.Contribution, error) {
 	config, err := parseMemoryConfig(raw)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 	if services.MemoryStore == nil {
-		return errors.New("core.memory requires Services.MemoryStore")
+		return builtin.Contribution{}, errors.New("core.memory requires Services.MemoryStore")
 	}
 	if services.Tenant == "" {
-		return errors.New("core.memory requires Services.Tenant")
+		return builtin.Contribution{}, errors.New("core.memory requires Services.Tenant")
 	}
 	mounts, err := buildMemoryMounts(config, services)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 	handler := memory.Handler{
 		Name:   memory.Capability,
@@ -136,11 +136,11 @@ func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, serv
 			}
 		}
 	}
-	return out.Add(memory.Capability, []string{"operation", "scope", "space"}, entries, sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"operation", "scope", "space"}, Entries: entries, Capability: sys.Capability{
 		Name:        memory.Capability,
 		Description: memoryDescription(config),
 		InputSchema: OneOfSchema(branches),
-	})
+	}}, nil
 }
 
 // buildMemoryMounts resolves each mount's scope to its physical key prefix inside

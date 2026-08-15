@@ -20,8 +20,12 @@ func TestInternetDescriptionIncludesAuthorUsageNote(t *testing.T) {
 		`{"methods":["GET"],"domain":"https://docs.example.org"}` +
 		`]}`)
 	config := builtin.NewTable()
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, config); err != nil {
+	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	got := config.Capabilities()[0].Description
 	for _, want := range []string{"onyx.example.com", "GET/POST", usage, "docs.example.org"} {
@@ -70,8 +74,12 @@ func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
 		`"description":"Onyx KB.","inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
 	config := builtin.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err != nil {
+	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	got := config.Capabilities()[0].Description
 	for _, want := range []string{"Onyx KB.", "Authorization", "attached automatically", "do not set it"} {
@@ -93,8 +101,12 @@ func TestInternetDescriptionAnnotatesMultipleInjectedHeaders(t *testing.T) {
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN"},"X-Api-Key":{"secret":"ONYX_KEY"}}}]}`)
 	config := builtin.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "t", "ONYX_KEY": "k"}}
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err != nil {
+	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	got := config.Capabilities()[0].Description
 	for _, want := range []string{"Authorization, X-Api-Key", "do not set them"} {

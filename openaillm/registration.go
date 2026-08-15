@@ -74,21 +74,21 @@ func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, e
 // granted operations — and the handler that serves them. The grant is kept off
 // the discoverable menu via the manifest `hidden` flag (the agent calls the LLM
 // itself; the model never sees it).
-func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services, out *builtin.Table) error {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (builtin.Contribution, error) {
 	config, grants, err := parseGrantConfig(raw)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 	normalized, err := normalizeSettings(config.Settings)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 	// Resolve the credential host-side (activation): a missing referenced secret
 	// fails the build here, never silently at call time. The value is never
 	// persisted — Normalize keeps only the reference.
 	apiKey, err := config.Settings.APIKey.Resolve(services.Secrets)
 	if err != nil {
-		return fmt.Errorf("core.openaiApi api_key: %w", err)
+		return builtin.Contribution{}, fmt.Errorf("core.openaiApi api_key: %w", err)
 	}
 	normalized.apiKey = apiKey
 	// One handler backs every operation of this grant. The table refuses a
@@ -109,7 +109,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		handler.AddOperation(grant.Operation, normalized, grant)
 		branch, err := registry.OperationBranch(grant.Operation, openaiOperations[grant.Operation].schema)
 		if err != nil {
-			return err
+			return builtin.Contribution{}, err
 		}
 		entries = append(entries, builtin.Entry{
 			Key:         builtin.Key{Syscall: SyscallType, Operation: grant.Operation},
@@ -120,12 +120,12 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		branches = append(branches, branch)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
-	return out.Add(SyscallType, []string{"operation"}, entries, sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"operation"}, Entries: entries, Capability: sys.Capability{
 		Name: SyscallType,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
 			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),
 		InputSchema: registry.OneOfSchema(branches),
-	})
+	}}, nil
 }
 
 func modelScope(settings normalizedSettings) string {

@@ -66,8 +66,13 @@ func templateConfigJSON() string {
 func TestTemplateConfigurePublishesCapability(t *testing.T) {
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
 	config := builtin.NewTable()
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, config); err != nil {
+	contribution, err := (registry.HTTPTemplateRegistration{}).Configure(
+		context.Background(), json.RawMessage(templateConfigJSON()), services)
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != "core.httpTemplate" {
 		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Capabilities())
@@ -104,8 +109,13 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 		`]}`
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc", "WEATHER_KEY": "wk-xyz"}}
 	config := builtin.NewTable()
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(raw), services, config); err != nil {
+	contribution, err := (registry.HTTPTemplateRegistration{}).Configure(
+		context.Background(), json.RawMessage(raw), services)
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	handler, ok := config.Entries()[0].Handler.(httptemplate.Handler)
 	if !ok {
@@ -130,12 +140,11 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 // A referenced secret the resolver cannot supply fails the driver build — at
 // activation — never at request time.
 func TestTemplateConfigureFailsClosedOnMissingSecret(t *testing.T) {
-	config := builtin.NewTable()
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), registry.Services{}, config); err == nil {
+	if _, err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), registry.Services{}); err == nil {
 		t.Fatal("Configure built a handler referencing a secret with no resolver")
 	}
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
-	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services, config); err == nil {
+	if _, err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services); err == nil {
 		t.Fatal("Configure built a handler referencing an unknown secret")
 	}
 }

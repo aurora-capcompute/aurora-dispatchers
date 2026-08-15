@@ -62,10 +62,10 @@ func (FilesystemRegistration) Normalize(_ string, raw json.RawMessage) (json.Raw
 	return json.Marshal(config)
 }
 
-func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services, out *builtin.Table) error {
+func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (builtin.Contribution, error) {
 	config, grants, err := parseFilesystemConfig(raw)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 
 	operations := make(map[string]filesystem.Operation, len(grants))
@@ -88,7 +88,7 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 	for _, grant := range grants {
 		branch, err := OperationBranch(grant.Operation, filesystemOperations[grant.Operation].schema)
 		if err != nil {
-			return err
+			return builtin.Contribution{}, err
 		}
 		entries = append(entries, builtin.Entry{
 			Key:             builtin.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
@@ -103,12 +103,12 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		names = append(names, filesystemOperations[grant.Operation].description)
 	}
 
-	return out.Add(filesystem.Capability, []string{"operation"}, entries, sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"operation"}, Entries: entries, Capability: sys.Capability{
 		Name: filesystem.Capability,
 		Description: fmt.Sprintf("Read-only filesystem access under %s — paths are absolute or relative to a root, and never escape it. Choose an operation:\n- %s.",
 			strings.Join(config.Roots, ", "), strings.Join(names, "\n- ")),
 		InputSchema: OneOfSchema(branches),
-	})
+	}}, nil
 }
 
 // parseFilesystemConfig validates and canonicalizes a core.filesystem grant's

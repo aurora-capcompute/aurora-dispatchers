@@ -93,10 +93,10 @@ func (HTTPTemplateRegistration) Normalize(_ string, raw json.RawMessage) (json.R
 	return json.Marshal(config)
 }
 
-func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
+func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (builtin.Contribution, error) {
 	config, err := parseTemplateConfig(raw)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 	operations := make(map[string]httptemplate.Operation, len(config.Capabilities))
 	branches := make([]json.RawMessage, 0, len(config.Capabilities))
@@ -105,11 +105,11 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 		// referenced secret fails the build here, never silently at request time.
 		headers, credentialLabels, err := resolveInjectedHeaders(operation.InjectHeaders, services)
 		if err != nil {
-			return fmt.Errorf("core.httpTemplate operation %q: %w", operation.Operation, err)
+			return builtin.Contribution{}, fmt.Errorf("core.httpTemplate operation %q: %w", operation.Operation, err)
 		}
 		compiled, branch, err := compileOperation(operation, headers, credentialLabels)
 		if err != nil {
-			return fmt.Errorf("operation %q: %w", operation.Operation, err)
+			return builtin.Contribution{}, fmt.Errorf("operation %q: %w", operation.Operation, err)
 		}
 		operations[operation.Operation] = compiled
 		branches = append(branches, branch)
@@ -141,11 +141,11 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 			Handler:         handler,
 		})
 	}
-	return out.Add(HTTPTemplateSyscall, []string{"operation"}, entries, sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"operation"}, Entries: entries, Capability: sys.Capability{
 		Name:        HTTPTemplateSyscall,
 		Description: templateDescription(config),
 		InputSchema: OneOfSchema(branches),
-	})
+	}}, nil
 }
 
 // parseTemplateConfig validates and canonicalizes a template grant: at least one

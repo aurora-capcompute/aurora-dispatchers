@@ -77,8 +77,12 @@ func TestInjectHeadersConfigureResolvesReference(t *testing.T) {
 		AuditKey: []byte("audit-key"),
 	}
 	config := builtin.NewTable()
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err != nil {
+	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	handler, ok := config.Entries()[0].Handler.(internet.Handler)
 	if !ok {
@@ -112,14 +116,13 @@ func TestInjectHeadersConfigureResolvesReference(t *testing.T) {
 func TestInjectHeadersConfigureFailsClosedOnMissingSecret(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://onyx.example.com",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
-	config := builtin.NewTable()
 	// No resolver configured at all.
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}, config); err == nil {
+	if _, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}); err == nil {
 		t.Fatal("Configure built a driver referencing a secret with no resolver")
 	}
 	// Resolver present but the name is unknown.
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
-	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, config); err == nil {
+	if _, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services); err == nil {
 		t.Fatal("Configure built a driver referencing an unknown secret")
 	}
 }

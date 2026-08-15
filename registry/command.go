@@ -129,10 +129,10 @@ func (CommandRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMes
 	return json.Marshal(config)
 }
 
-func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services, out *builtin.Table) error {
+func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (builtin.Contribution, error) {
 	_, grants, err := parseCommandConfig(raw)
 	if err != nil {
-		return err
+		return builtin.Contribution{}, err
 	}
 
 	var commands []command.Command
@@ -140,7 +140,7 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		for _, rule := range grant.Commands {
 			built, err := buildCommand(rule, services)
 			if err != nil {
-				return fmt.Errorf("command %q: %w", rule.Name, err)
+				return builtin.Contribution{}, fmt.Errorf("command %q: %w", rule.Name, err)
 			}
 			commands = append(commands, built)
 		}
@@ -167,7 +167,7 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 	for _, c := range sorted {
 		branch, err := OperationBranch(command.VerbRun, commandCallSchema(c))
 		if err != nil {
-			return err
+			return builtin.Contribution{}, err
 		}
 		entries = append(entries, builtin.Entry{
 			Key:             builtin.Key{Syscall: command.Capability, Operation: c.Name},
@@ -180,11 +180,11 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		})
 		branches = append(branches, branch)
 	}
-	return out.Add(command.Capability, []string{"name"}, entries, sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"name"}, Entries: entries, Capability: sys.Capability{
 		Name:        command.Capability,
 		Description: commandDescription(commands),
 		InputSchema: OneOfSchema(branches),
-	})
+	}}, nil
 }
 
 // buildCommand resolves one validated rule into the executable form, resolving

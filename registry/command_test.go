@@ -35,8 +35,12 @@ const kubectlGrant = `{"capabilities":[{"operation":"run","commands":[{
 func configure(t *testing.T, grant string) *builtin.Table {
 	t.Helper()
 	out := builtin.NewTable()
-	if err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{}, out); err != nil {
+	contribution, err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{})
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := out.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	return out
 }
@@ -182,9 +186,8 @@ func TestNormalizeRoundTrips(t *testing.T) {
 func TestEnvSecretFailsClosed(t *testing.T) {
 	grant := `{"capabilities":[{"operation":"run","commands":[{
 	  "name":"a","path":"/bin/echo","env":{"TOKEN":{"secret":"absent"}}}]}]}`
-	out := builtin.NewTable()
-	err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{}, out)
-	if err == nil {
+	if _, err := (registry.CommandRegistration{}).Configure(
+		context.Background(), json.RawMessage(grant), registry.Services{}); err == nil {
 		t.Fatal("a grant referencing an unknown secret must fail to build")
 	}
 }

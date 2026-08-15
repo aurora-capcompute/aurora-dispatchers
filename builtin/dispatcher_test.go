@@ -32,7 +32,9 @@ func call(name, args string) sys.Syscall {
 func table(t *testing.T, syscall string, discriminator []string, entries ...builtin.Entry) *builtin.Table {
 	t.Helper()
 	tbl := builtin.NewTable()
-	if err := tbl.Add(syscall, discriminator, entries, sys.Capability{Name: syscall}); err != nil {
+	if err := tbl.Add(builtin.Contribution{
+		Discriminator: discriminator, Entries: entries, Capability: sys.Capability{Name: syscall},
+	}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	return tbl
@@ -188,10 +190,14 @@ func TestSingleOperationSyscall(t *testing.T) {
 // The old linear scan answered it by picking whichever was appended first.
 func TestDuplicateOperationIsRefused(t *testing.T) {
 	tbl := builtin.NewTable()
-	err := tbl.Add("core.memory", []string{"operation"}, []builtin.Entry{
-		entry("core.memory", "get", &stub{}),
-		entry("core.memory", "get", &stub{}),
-	}, sys.Capability{Name: "core.memory"})
+	err := tbl.Add(builtin.Contribution{
+		Discriminator: []string{"operation"},
+		Entries: []builtin.Entry{
+			entry("core.memory", "get", &stub{}),
+			entry("core.memory", "get", &stub{}),
+		},
+		Capability: sys.Capability{Name: "core.memory"},
+	})
 	if err == nil || !strings.Contains(err.Error(), "granted twice") {
 		t.Fatalf("err = %v, want a duplicate refusal", err)
 	}
@@ -200,8 +206,11 @@ func TestDuplicateOperationIsRefused(t *testing.T) {
 // The same syscall cannot be served by two families.
 func TestDuplicateSyscallIsRefused(t *testing.T) {
 	tbl := table(t, "core.memory", []string{"operation"}, entry("core.memory", "get", &stub{}))
-	err := tbl.Add("core.memory", []string{"operation"},
-		[]builtin.Entry{entry("core.memory", "put", &stub{})}, sys.Capability{Name: "core.memory"})
+	err := tbl.Add(builtin.Contribution{
+		Discriminator: []string{"operation"},
+		Entries:       []builtin.Entry{entry("core.memory", "put", &stub{})},
+		Capability:    sys.Capability{Name: "core.memory"},
+	})
 	if err == nil || !strings.Contains(err.Error(), "served twice") {
 		t.Fatalf("err = %v, want a duplicate-syscall refusal", err)
 	}

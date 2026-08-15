@@ -33,8 +33,12 @@ func TestMatchesSyscall(t *testing.T) {
 func TestConfigurePublishesOneCapability(t *testing.T) {
 	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test","capabilities":[{"operation":"chat"},{"operation":"models"}]}`)
 	config := builtin.NewTable()
-	if err := (Registration{}).Configure(context.Background(), raw, registry.Services{}, config); err != nil {
+	contribution, err := (Registration{}).Configure(context.Background(), raw, registry.Services{})
+	if err != nil {
 		t.Fatalf("configure: %v", err)
+	}
+	if err := config.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 	if len(config.Capabilities()) != 1 || config.Capabilities()[0].Name != SyscallType {
 		t.Fatalf("capabilities = %+v, want one named %s", config.Capabilities(), SyscallType)
@@ -50,12 +54,11 @@ func TestConfigurePublishesOneCapability(t *testing.T) {
 
 func TestConfigureRequiresOperations(t *testing.T) {
 	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test"}`)
-	config := builtin.NewTable()
-	if err := (Registration{}).Configure(context.Background(), raw, registry.Services{}, config); err == nil {
+	if _, err := (Registration{}).Configure(context.Background(), raw, registry.Services{}); err == nil {
 		t.Fatal("expected error when no operations are granted")
 	}
 	bad := json.RawMessage(`{"api_key":"sk-test","capabilities":[{"operation":"nope"}]}`)
-	if err := (Registration{}).Configure(context.Background(), bad, registry.Services{}, config); err == nil {
+	if _, err := (Registration{}).Configure(context.Background(), bad, registry.Services{}); err == nil {
 		t.Fatal("expected error for an unknown operation")
 	}
 }
@@ -82,8 +85,7 @@ func TestConfigureResolvesAPIKeyReference(t *testing.T) {
 	}
 
 	services := registry.Services{Secrets: mapResolver{"OPENAI_KEY": "sk-real"}}
-	config := builtin.NewTable()
-	if err := (Registration{}).Configure(context.Background(), raw, services, config); err != nil {
+	if _, err := (Registration{}).Configure(context.Background(), raw, services); err != nil {
 		t.Fatalf("configure with resolvable api_key: %v", err)
 	}
 }
@@ -92,14 +94,13 @@ func TestConfigureResolvesAPIKeyReference(t *testing.T) {
 // activation — never silently at call time.
 func TestConfigureFailsClosedOnMissingAPIKeySecret(t *testing.T) {
 	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":{"secret":"OPENAI_KEY"},"capabilities":[{"operation":"chat"}]}`)
-	config := builtin.NewTable()
 	// No resolver at all.
-	if err := (Registration{}).Configure(context.Background(), raw, registry.Services{}, config); err == nil {
+	if _, err := (Registration{}).Configure(context.Background(), raw, registry.Services{}); err == nil {
 		t.Fatal("Configure built a client referencing an api_key secret with no resolver")
 	}
 	// Resolver present, name unknown.
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
-	if err := (Registration{}).Configure(context.Background(), raw, services, config); err == nil {
+	if _, err := (Registration{}).Configure(context.Background(), raw, services); err == nil {
 		t.Fatal("Configure built a client referencing an unknown api_key secret")
 	}
 }

@@ -40,13 +40,15 @@ type Services struct {
 }
 
 // Registration builds a leaf I/O driver for one syscall. A registration is
-// selected by the granted syscall, and contributes one indexed operation per
-// case of that syscall's ADT — plus the discriminator that finds the case in a
-// call's arguments, and the one capability the operations add up to.
+// selected by the granted syscall and returns what it contributes: one entry per
+// case of that syscall's ADT, the argument properties that name a case, and the
+// one capability they add up to. It never sees the table — the assembler folds
+// the contributions, which is what makes a duplicate a refusal rather than a
+// first-wins.
 type Registration interface {
 	Matches(syscall string) bool
 	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
-	Configure(ctx context.Context, config json.RawMessage, services Services, out *builtin.Table) error
+	Configure(ctx context.Context, config json.RawMessage, services Services) (builtin.Contribution, error)
 }
 
 type Registry struct {
@@ -82,8 +84,18 @@ func (r *Registry) Build(ctx context.Context, entries []Entry, services Services
 		if selected == nil {
 			return nil, fmt.Errorf("unsupported syscall %q", entry.Syscall)
 		}
-		if err := selected.Configure(ctx, entry.Config, services, table); err != nil {
+		contribution, err := selected.Configure(ctx, entry.Config, services)
+		if err != nil {
 			return nil, err
+		}
+		if err := table.Add(contribution); err != nil {
+			return nil, err
+		}
+		// A family serves the syscall it was selected for and no other.
+		for _, granted := range contribution.Entries {
+			if granted.Key.Syscall != entry.Syscall {
+				return nil, fmt.Errorf("%q contributed an operation on %q", entry.Syscall, granted.Key.Syscall)
+			}
 		}
 		// A hidden grant keeps the capability it just contributed off the
 		// discoverable menu; its operations stay dispatchable.
