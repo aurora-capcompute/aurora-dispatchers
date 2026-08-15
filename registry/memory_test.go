@@ -29,7 +29,7 @@ func buildMemory(t *testing.T, config string) builtin.Handler {
 func buildMemoryWith(t *testing.T, store memory.Store, services registry.Services, config string) builtin.Handler {
 	t.Helper()
 	services.MemoryStore = store
-	built, err := registry.Default().Build(context.Background(),
+	built, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Build(context.Background(),
 		[]registry.Entry{{Syscall: memory.Capability, Config: json.RawMessage(config)}}, services)
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -99,18 +99,18 @@ func TestMemoryPublishesOneCapability(t *testing.T) {
 func TestMemoryRequiresServices(t *testing.T) {
 	config := `{"capabilities":[{"scope":"shared","space":"team","operations":["get"]}]}`
 	entries := []registry.Entry{{Syscall: "core.memory", Config: json.RawMessage(config)}}
-	if _, err := registry.Default().Build(context.Background(), entries,
+	if _, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Build(context.Background(), entries,
 		registry.Services{MemoryStore: memory.NewMapStore()}); err == nil || !strings.Contains(err.Error(), "Tenant") {
 		t.Fatalf("err = %v, want missing-tenant error", err)
 	}
-	if _, err := registry.Default().Build(context.Background(), entries,
+	if _, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Build(context.Background(), entries,
 		registry.Services{Tenant: "acme"}); err == nil || !strings.Contains(err.Error(), "MemoryStore") {
 		t.Fatalf("err = %v, want missing-store error", err)
 	}
 	// The self-scopes need the process credential; a build without it fails closed
 	// rather than silently collapsing everyone's session scope into one prefix.
 	sessionCfg := []registry.Entry{{Syscall: "core.memory", Config: json.RawMessage(`{"capabilities":[{"scope":"session","operations":["get"]}]}`)}}
-	if _, err := registry.Default().Build(context.Background(), sessionCfg,
+	if _, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Build(context.Background(), sessionCfg,
 		registry.Services{Tenant: "acme", MemoryStore: memory.NewMapStore()}); err == nil || !strings.Contains(err.Error(), "session") {
 		t.Fatalf("err = %v, want a missing session-identity error", err)
 	}
@@ -146,7 +146,7 @@ func TestMemoryRejectsBadConfig(t *testing.T) {
 		`{"capabilities":[{"operation":"get"}]}`,
 	}
 	for _, config := range bad {
-		if _, err := registry.Default().Normalize("core.memory", json.RawMessage(config)); err == nil {
+		if _, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Normalize("core.memory", json.RawMessage(config)); err == nil {
 			t.Fatalf("bad config accepted: %s", config)
 		}
 	}
@@ -157,7 +157,7 @@ func TestMemoryRejectsBadConfig(t *testing.T) {
 		{"scope":"shared","space":"team-kb","operations":["get"]},
 		{"scope":"shared","space":"handoff","operations":["put"]}
 	]}`
-	if _, err := registry.Default().Normalize("core.memory", json.RawMessage(good)); err != nil {
+	if _, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Normalize("core.memory", json.RawMessage(good)); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 }
@@ -276,7 +276,7 @@ func TestMemoryGrantsOnlySelectedOperations(t *testing.T) {
 func TestMemorySchemaListsSharedSpaces(t *testing.T) {
 	store := memory.NewMapStore()
 	services := registry.Services{Tenant: "acme", SessionID: "s", ProcessID: "p", MemoryStore: store}
-	built, err := registry.Default().Build(context.Background(),
+	built, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Build(context.Background(),
 		[]registry.Entry{{Syscall: memory.Capability, Config: json.RawMessage(
 			`{"capabilities":[{"scope":"session","operations":["get"]},{"scope":"shared","space":"team-kb","operations":["get"]}]}`)}}, services)
 	if err != nil {

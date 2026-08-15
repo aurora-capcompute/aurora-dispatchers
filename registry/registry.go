@@ -57,22 +57,6 @@ func New(registrations ...Registration) *Registry {
 	return &Registry{registrations: append([]Registration(nil), registrations...)}
 }
 
-// Default is the credential-free built-in set: the internet and memory drivers.
-// Network-credentialed drivers (e.g. openaillm) are added explicitly by the
-// assembly.
-//
-// Try-Confirm/Cancel is deliberately not a driver. A reservation is a real
-// write to the participant that owns the resource — the third-party system
-// every reader treats as the source of truth — so it is an ordinary dispatch:
-// reserve, then confirm as the last call before sys.commit; a section that
-// aborts re-runs from its sys.begin, so releasing the reservation is the
-// program's own business. Pending state, and any expiry policy, belong to the resource
-// owner (Pardon & Pautasso's RESTful TCC puts them on the participant); an
-// orchestrator-side hold table would be a reservation no other booker can see.
-func Default() *Registry {
-	return New(InternetRegistration{}, MemoryRegistration{})
-}
-
 func (r *Registry) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
 	if selected := r.selectFor(syscall); selected != nil {
 		return selected.Normalize(syscall, config)
