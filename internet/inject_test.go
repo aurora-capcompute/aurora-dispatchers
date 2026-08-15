@@ -1,4 +1,4 @@
-package builtin_test
+package internet_test
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -19,10 +18,10 @@ import (
 // floor is inert for an untainted run.
 func TestInternetSinkGuardEnforcesEgressFloor(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := builtin.InternetHandler{
+	handler := internet.Handler{
 		Name:   "core.internet",
 		Client: client,
-		Methods: map[string]builtin.InternetMethodPolicy{
+		Methods: map[string]internet.MethodPolicy{
 			"GET": {Taints: registry.WithEgressFloor(nil)}, // only the floor, no manifest taints
 		},
 	}
@@ -61,12 +60,12 @@ func internetCallWithHeaders(method, url string, headers map[string]string) sys.
 	return sys.Syscall{Abi: sys.ABIVersion, Name: "core.internet", Args: args}
 }
 
-func injectingHandler(client builtin.InternetClient) builtin.InternetHandler {
-	return builtin.InternetHandler{
+func injectingHandler(client internet.Doer) internet.Handler {
+	return internet.Handler{
 		Name:    "core.internet",
-		Methods: map[string]builtin.InternetMethodPolicy{"*": {}},
+		Methods: map[string]internet.MethodPolicy{"*": {}},
 		Client:  client,
-		Injections: []builtin.CredentialInjection{{
+		Injections: []internet.CredentialInjection{{
 			Methods: []string{"*"},
 			Host:    "onyx.example.com",
 			Headers: map[string]string{"Authorization": "Bearer tok-abc"},
@@ -161,11 +160,11 @@ func TestInjectRefusesPlaintextHTTP(t *testing.T) {
 // ride http, since there is no wire to sniff.
 func TestInjectAllowsLoopbackHTTP(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := builtin.InternetHandler{
+	handler := internet.Handler{
 		Name:    "core.internet",
-		Methods: map[string]builtin.InternetMethodPolicy{"*": {}},
+		Methods: map[string]internet.MethodPolicy{"*": {}},
 		Client:  client,
-		Injections: []builtin.CredentialInjection{{
+		Injections: []internet.CredentialInjection{{
 			Methods: []string{"*"},
 			Host:    "localhost:8080",
 			Headers: map[string]string{"Authorization": "Bearer dev"},
@@ -201,11 +200,11 @@ func TestInjectScopedToHost(t *testing.T) {
 // the bound host.
 func TestInjectScopedToMethod(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := builtin.InternetHandler{
+	handler := internet.Handler{
 		Name:    "core.internet",
-		Methods: map[string]builtin.InternetMethodPolicy{"*": {}},
+		Methods: map[string]internet.MethodPolicy{"*": {}},
 		Client:  client,
-		Injections: []builtin.CredentialInjection{{
+		Injections: []internet.CredentialInjection{{
 			Methods: []string{"GET"},
 			Host:    "onyx.example.com",
 			Headers: map[string]string{"Authorization": "Bearer tok-abc"},

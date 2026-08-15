@@ -1,4 +1,4 @@
-package builtin_test
+package httptemplate_test
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -29,18 +29,18 @@ func templateCall(operation string, fields map[string]any) sys.Syscall {
 	return sys.Syscall{Abi: sys.ABIVersion, Name: "core.httpTemplate", Args: raw}
 }
 
-func searchHandler(t *testing.T, client builtin.InternetClient) builtin.TemplateHandler {
-	return builtin.TemplateHandler{
+func searchHandler(t *testing.T, client internet.Doer) httptemplate.Handler {
+	return httptemplate.Handler{
 		Name:   "core.httpTemplate",
 		Client: client,
-		Operations: map[string]builtin.TemplateOperation{
+		Operations: map[string]httptemplate.Operation{
 			"search": {
 				Name:             "search",
 				Method:           "POST",
 				BaseURL:          "https://onyx.example.com",
 				Path:             "/api/chat/send-message-simple-api",
 				Body:             mustParse(t, `{"message":"{{query}}","persona_id":0}`),
-				Params:           map[string]builtin.TemplateParam{"query": {Type: "string", Required: true}},
+				Params:           map[string]httptemplate.Param{"query": {Type: "string", Required: true}},
 				Headers:          map[string]string{"Authorization": "Bearer tok-abc"},
 				CredentialLabels: []string{"credential:ONYX_TOKEN@abc123def456"},
 			},
@@ -50,6 +50,18 @@ func searchHandler(t *testing.T, client builtin.InternetClient) builtin.Template
 
 // The guest fills only {query}; the host builds the exact request — method, host,
 // path, and body shape fixed — and attaches the credential the guest never sees.
+// recordingClient captures the request that actually reached the network, so a
+// test can assert on what the template rendered.
+type recordingClient struct {
+	seen     internet.Request
+	response internet.Response
+}
+
+func (c *recordingClient) Do(_ context.Context, req internet.Request) (internet.Response, error) {
+	c.seen = req
+	return c.response, nil
+}
+
 func TestTemplateRendersRequestAndInjectsCredential(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200, Body: "ok"}}
 	handler := searchHandler(t, client)
@@ -114,17 +126,17 @@ func TestTemplateBodySubstitutionIsInjectionSafe(t *testing.T) {
 // path or smuggle extra query parameters.
 func TestTemplatePathAndQueryAreEncoded(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := builtin.TemplateHandler{
+	handler := httptemplate.Handler{
 		Name:   "core.httpTemplate",
 		Client: client,
-		Operations: map[string]builtin.TemplateOperation{
+		Operations: map[string]httptemplate.Operation{
 			"doc": {
 				Name:    "doc",
 				Method:  "GET",
 				BaseURL: "https://onyx.example.com",
 				Path:    "/api/docs/{{id}}",
 				Query:   map[string]string{"q": "{{term}}"},
-				Params: map[string]builtin.TemplateParam{
+				Params: map[string]httptemplate.Param{
 					"id":   {Type: "string", Required: true},
 					"term": {Type: "string", Required: true},
 				},
@@ -147,17 +159,17 @@ func TestTemplatePathAndQueryAreEncoded(t *testing.T) {
 // A typed parameter is substituted as its JSON type (a number, not a string).
 func TestTemplateTypedParamSubstitution(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := builtin.TemplateHandler{
+	handler := httptemplate.Handler{
 		Name:   "core.httpTemplate",
 		Client: client,
-		Operations: map[string]builtin.TemplateOperation{
+		Operations: map[string]httptemplate.Operation{
 			"search": {
 				Name:    "search",
 				Method:  "POST",
 				BaseURL: "https://onyx.example.com",
 				Path:    "/s",
 				Body:    mustParse(t, `{"top_k":"{{k}}"}`),
-				Params:  map[string]builtin.TemplateParam{"k": {Type: "integer", Required: true}},
+				Params:  map[string]httptemplate.Param{"k": {Type: "integer", Required: true}},
 			},
 		},
 	}
@@ -194,10 +206,10 @@ func TestTemplateRejectsBadCalls(t *testing.T) {
 // A templated operation carries the same flow and approval policy as core.internet.
 func TestTemplateSinkGuardAndApproval(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := builtin.TemplateHandler{
+	handler := httptemplate.Handler{
 		Name:   "core.httpTemplate",
 		Client: client,
-		Operations: map[string]builtin.TemplateOperation{
+		Operations: map[string]httptemplate.Operation{
 			"write": {
 				Name: "write", Method: "POST", BaseURL: "https://onyx.example.com", Path: "/w",
 				Taints: []string{"secret"}, RequireApproval: true,

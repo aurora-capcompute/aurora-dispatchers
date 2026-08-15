@@ -6,9 +6,30 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
+
+// unionLabels concatenates two already-normalized label sets, dropping
+// duplicates. Order is not significant for flow decisions or result labels
+// (WithLabels re-sorts).
+func unionLabels(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, label := range append(append([]string(nil), a...), b...) {
+		if _, dup := seen[label]; dup {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	return out
+}
 
 // EgressForbidFloor is the reserved taint every network-egress sink refuses by
 // default, unioned on top of a manifest's declared per-operation taints. It
@@ -24,10 +45,10 @@ var EgressForbidFloor = []string{"secret"}
 // WithEgressFloor unions the egress forbid floor onto an operation's declared
 // sink taints. Applied at every network-egress driver's build so a sink is never
 // a fully open channel for the reserved secret class. Returns a fresh slice: for
-// an op with no declared taints, UnionLabels would otherwise return the shared
+// an op with no declared taints, unionLabels would otherwise return the shared
 // EgressForbidFloor backing array, so every such sink would alias one slice.
 func WithEgressFloor(taints []string) []string {
-	return append([]string(nil), builtin.UnionLabels(taints, EgressForbidFloor)...)
+	return append([]string(nil), unionLabels(taints, EgressForbidFloor)...)
 }
 
 // FlowPolicy is the per-operation data-flow declaration carried on a leaf grant's

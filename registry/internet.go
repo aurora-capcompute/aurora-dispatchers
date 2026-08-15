@@ -101,7 +101,7 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	)
 	// SSRF guard on unless the grant explicitly opted into private networks.
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
-	out.Handlers = append(out.Handlers, builtin.InternetHandler{
+	out.Handlers = append(out.Handlers, internet.Handler{
 		Name:       internet.Capability,
 		Methods:    internetMethodPolicies(config.Capabilities),
 		Client:     client,
@@ -220,8 +220,8 @@ func validateInjection(domain string, headers map[string]HeaderInjection) error 
 // Configure (activation), so a missing/unknown secret fails the driver build —
 // recorded there — rather than silently at request time. The resolved value is
 // never persisted (Normalize keeps only the reference).
-func buildInjections(permissions []InternetPermission, services Services) ([]builtin.CredentialInjection, error) {
-	var out []builtin.CredentialInjection
+func buildInjections(permissions []InternetPermission, services Services) ([]internet.CredentialInjection, error) {
+	var out []internet.CredentialInjection
 	for i := range permissions {
 		permission := permissions[i]
 		if len(permission.InjectHeaders) == 0 {
@@ -235,7 +235,7 @@ func buildInjections(permissions []InternetPermission, services Services) ([]bui
 		if err != nil {
 			return nil, fmt.Errorf("permission %d: %w", i, err)
 		}
-		out = append(out, builtin.CredentialInjection{
+		out = append(out, internet.CredentialInjection{
 			Methods: permission.Methods,
 			Host:    strings.ToLower(origin.Host),
 			Headers: headers,
@@ -278,19 +278,19 @@ func resolveInjectedHeaders(inject map[string]HeaderInjection, services Services
 // internetMethodPolicies aggregates the grant's per-permission flow and approval
 // into a per-method policy the handler reads by the request's method ("*" is the
 // wildcard bucket, merged with the specific method at dispatch).
-func internetMethodPolicies(permissions []InternetPermission) map[string]builtin.InternetMethodPolicy {
-	methods := make(map[string]builtin.InternetMethodPolicy)
+func internetMethodPolicies(permissions []InternetPermission) map[string]internet.MethodPolicy {
+	methods := make(map[string]internet.MethodPolicy)
 	for _, permission := range permissions {
 		approval := permission.RequireApproval != nil && *permission.RequireApproval
 		for _, method := range permission.Methods {
 			existing := methods[method]
-			methods[method] = builtin.InternetMethodPolicy{
+			methods[method] = internet.MethodPolicy{
 				RequireApproval: existing.RequireApproval || approval,
-				Labels:          builtin.UnionLabels(existing.Labels, permission.Labels),
+				Labels:          unionLabels(existing.Labels, permission.Labels),
 				// Every internet request is egress — the URL, query, headers, and
 				// body all leave the host — so floor the reserved secret class into
 				// the sink guard regardless of the method or the manifest's taints.
-				Taints: WithEgressFloor(builtin.UnionLabels(existing.Taints, permission.Taints)),
+				Taints: WithEgressFloor(unionLabels(existing.Taints, permission.Taints)),
 			}
 		}
 	}

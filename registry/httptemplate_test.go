@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -106,9 +107,9 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 	if err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(raw), services, &config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	handler, ok := config.Handlers[0].(builtin.TemplateHandler)
+	handler, ok := config.Handlers[0].(httptemplate.Handler)
 	if !ok {
-		t.Fatalf("handler = %T, want builtin.TemplateHandler", config.Handlers[0])
+		t.Fatalf("handler = %T, want httptemplate.Handler", config.Handlers[0])
 	}
 	search, weather := handler.Operations["search"], handler.Operations["weather"]
 	if search.BaseURL != "https://onyx.example.com" || weather.BaseURL != "https://api.weather.example.com" {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
@@ -97,7 +98,7 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	if err != nil {
 		return err
 	}
-	operations := make(map[string]builtin.TemplateOperation, len(config.Capabilities))
+	operations := make(map[string]httptemplate.Operation, len(config.Capabilities))
 	branches := make([]json.RawMessage, 0, len(config.Capabilities))
 	for _, operation := range config.Capabilities {
 		// Resolve this operation's host-held credential at activation. A missing
@@ -122,7 +123,7 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	)
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 
-	out.Handlers = append(out.Handlers, builtin.TemplateHandler{
+	out.Handlers = append(out.Handlers, httptemplate.Handler{
 		Name:       HTTPTemplateSyscall,
 		Client:     client,
 		Operations: operations,
@@ -272,18 +273,18 @@ func placeholderRefs(operation *templateOperation) []string {
 
 // compileOperation builds the handler-side operation (with its resolved headers
 // and audit labels) and its published input schema branch.
-func compileOperation(operation templateOperation, headers map[string]string, credentialLabels []string) (builtin.TemplateOperation, json.RawMessage, error) {
+func compileOperation(operation templateOperation, headers map[string]string, credentialLabels []string) (httptemplate.Operation, json.RawMessage, error) {
 	var body any
 	if len(operation.Body) > 0 {
 		if err := json.Unmarshal(operation.Body, &body); err != nil {
-			return builtin.TemplateOperation{}, nil, err
+			return httptemplate.Operation{}, nil, err
 		}
 	}
-	params := make(map[string]builtin.TemplateParam, len(operation.Params))
+	params := make(map[string]httptemplate.Param, len(operation.Params))
 	for name, param := range operation.Params {
-		params[name] = builtin.TemplateParam{Type: param.Type, Required: param.Required}
+		params[name] = httptemplate.Param{Type: param.Type, Required: param.Required}
 	}
-	compiled := builtin.TemplateOperation{
+	compiled := httptemplate.Operation{
 		Name:             operation.Operation,
 		Method:           operation.Method,
 		BaseURL:          operation.BaseURL,
@@ -301,7 +302,7 @@ func compileOperation(operation templateOperation, headers map[string]string, cr
 	}
 	branch, err := OperationBranch(operation.Operation, operationParamSchema(operation))
 	if err != nil {
-		return builtin.TemplateOperation{}, nil, err
+		return httptemplate.Operation{}, nil, err
 	}
 	return compiled, branch, nil
 }

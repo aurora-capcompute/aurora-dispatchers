@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/builtin"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -79,9 +80,9 @@ func TestInjectHeadersConfigureResolvesReference(t *testing.T) {
 	if err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services, &config); err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	handler, ok := config.Handlers[0].(builtin.InternetHandler)
+	handler, ok := config.Handlers[0].(internet.Handler)
 	if !ok {
-		t.Fatalf("handler = %T, want builtin.InternetHandler", config.Handlers[0])
+		t.Fatalf("handler = %T, want internet.Handler", config.Handlers[0])
 	}
 	if len(handler.Injections) != 1 {
 		t.Fatalf("injections = %+v, want one", handler.Injections)

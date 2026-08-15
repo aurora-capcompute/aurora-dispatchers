@@ -1,4 +1,9 @@
-package builtin
+// Package httptemplate serves core.httpTemplate: a manifest-defined family of
+// fixed HTTP operations whose method, host, path, headers, and body shape the
+// guest cannot change — it only fills named holes. It is the operation-level
+// least-privilege counterpart to core.internet, and it makes its requests
+// through the same client.
+package httptemplate
 
 import (
 	"context"
@@ -14,7 +19,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// TemplateHandler serves a manifest-defined family of HTTP operations whose
+// Handler serves a manifest-defined family of HTTP operations whose
 // method, host, path, headers, and body shape are fixed by the manifest — the
 // guest supplies only the declared parameters. It is the operation-level
 // least-privilege counterpart to InternetHandler: where core.internet hands the
@@ -24,20 +29,20 @@ import (
 // enter the request only through encoding-safe substitution — percent-encoded in
 // the path/query, structurally in the JSON body — so a value can never break out
 // of its slot to alter the method, host, path, or JSON shape.
-type TemplateHandler struct {
+type Handler struct {
 	Name   string
-	Client InternetClient
+	Client internet.Doer
 	// Operations is the published operation set, keyed by name. Each operation
 	// carries its own origin and its own host-held credential, so one grant can
 	// front several APIs — the ADT over `operation` is the menu.
-	Operations map[string]TemplateOperation
+	Operations map[string]Operation
 }
 
-// TemplateOperation is one fixed request the guest may invoke by name, with the
+// Operation is one fixed request the guest may invoke by name, with the
 // declared parameters substituted into its path, query, and body. Each operation
 // is self-contained: its own origin, its own host-attached credential, and its
 // own flow policy — so operations in one grant may target different hosts.
-type TemplateOperation struct {
+type Operation struct {
 	Name   string
 	Method string
 	// BaseURL is this operation's fixed scheme://host.
@@ -53,7 +58,7 @@ type TemplateOperation struct {
 	// {{param}} is replaced by its string form. Substitution is structural, so a
 	// value cannot inject JSON syntax.
 	Body   any
-	Params map[string]TemplateParam
+	Params map[string]Param
 	// Headers are the host-held request headers (e.g. an injected Authorization)
 	// attached to this operation only, bound to its origin. The guest can neither
 	// supply nor read them.
@@ -68,17 +73,17 @@ type TemplateOperation struct {
 	RequireApproval bool
 }
 
-// TemplateParam is one guest-fillable parameter's contract.
-type TemplateParam struct {
+// Param is one guest-fillable parameter's contract.
+type Param struct {
 	Type     string // "string" | "integer" | "number" | "boolean"
 	Required bool
 }
 
-var templatePlaceholder = regexp.MustCompile(`\{\{(\w+)\}\}`)
+var placeholder = regexp.MustCompile(`\{\{(\w+)\}\}`)
 
-func (h TemplateHandler) Handles(name string) bool { return name == h.Name }
+func (h Handler) Handles(name string) bool { return name == h.Name }
 
-func (h TemplateHandler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	if h.Client == nil {
 		return sys.FailCode(sys.ErrnoNotFound, "template client is not configured"), nil
 	}
@@ -155,7 +160,7 @@ func credentialHeaderNames(headers map[string]string) []string {
 // the validated parameters. Every guest value is placed through an encoding that
 // keeps it inside its slot: PathEscape in the path, query-encoding in the query,
 // and structural JSON substitution in the body.
-func (h TemplateHandler) render(operation TemplateOperation, params map[string]any) (internet.Request, error) {
+func (h Handler) render(operation Operation, params map[string]any) (internet.Request, error) {
 	target := operation.BaseURL + expandString(operation.Path, params, url.PathEscape)
 	if len(operation.Query) > 0 {
 		values := url.Values{}
@@ -195,8 +200,8 @@ func (h TemplateHandler) render(operation TemplateOperation, params map[string]a
 // for a query value, which url.Values encodes on its own). A placeholder for an
 // absent parameter is left intact.
 func expandString(text string, params map[string]any, escape func(string) string) string {
-	return templatePlaceholder.ReplaceAllStringFunc(text, func(match string) string {
-		name := templatePlaceholder.FindStringSubmatch(match)[1]
+	return placeholder.ReplaceAllStringFunc(text, func(match string) string {
+		name := placeholder.FindStringSubmatch(match)[1]
 		value, ok := params[name]
 		if !ok {
 			return match
@@ -244,7 +249,7 @@ func substituteJSON(node any, params map[string]any) any {
 // wholePlaceholder reports whether s is exactly one "{{param}}" and returns the
 // parameter name.
 func wholePlaceholder(s string) (string, bool) {
-	match := templatePlaceholder.FindStringSubmatch(s)
+	match := placeholder.FindStringSubmatch(s)
 	if match != nil && match[0] == s {
 		return match[1], true
 	}
@@ -270,7 +275,7 @@ func valueString(v any) string {
 // declared parameters and coerces them to typed Go values for substitution. The
 // kernel already validates the args against the published schema; this is the
 // driver's own defensive check.
-func extractParams(operation TemplateOperation, raw json.RawMessage) (map[string]any, error) {
+func extractParams(operation Operation, raw json.RawMessage) (map[string]any, error) {
 	var all map[string]any
 	if err := json.Unmarshal(raw, &all); err != nil {
 		return nil, fmt.Errorf("decode parameters: %w", err)
@@ -315,4 +320,12 @@ func coerceParam(name, kind string, value any) (any, error) {
 		return value, nil
 	}
 	return nil, fmt.Errorf("parameter %q must be %s", name, strings.TrimSpace(kind))
+}
+
+func marshalResult(value any) (sys.SyscallResult, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return sys.SyscallResult{}, err
+	}
+	return sys.Result(raw), nil
 }

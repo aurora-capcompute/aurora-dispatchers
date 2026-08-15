@@ -76,8 +76,8 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 		if grant.RequireApproval != nil && *grant.RequireApproval {
 			requireApproval = true
 		}
-		labels = builtin.UnionLabels(labels, grant.Labels)
-		taints = builtin.UnionLabels(taints, grant.Taints)
+		labels = unionLabels(labels, grant.Labels)
+		taints = unionLabels(taints, grant.Taints)
 		branch, err := OperationBranch(grant.Operation, memoryOperations[grant.Operation].schema)
 		if err != nil {
 			return err
