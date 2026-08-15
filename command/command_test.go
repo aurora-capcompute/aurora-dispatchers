@@ -334,54 +334,7 @@ func TestRelativeExecutableIsRefusedAtRunTime(t *testing.T) {
 	}
 }
 
-// A command marked for approval yields until it is approved, and nothing runs
-// in the meantime.
-func TestApprovalGate(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "ran")
-	script := filepath.Join(t.TempDir(), "touch.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o700); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	h := Handler{Name: Capability, Commands: []Command{{
-		Name: "guarded", Path: "/bin/sh", Args: []string{script}, RequireApproval: true,
-	}}}
-	result, err := h.DispatchCall(context.Background(), sys.Syscall{
-		Name: Capability,
-		Args: json.RawMessage(`{"operation":"run","name":"guarded","params":{}}`),
-	}, sys.Authorization{})
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	if result.Status() != sys.StatusYield {
-		t.Fatalf("an unapproved command must yield, got %v", result.Status())
-	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("the command ran before it was approved")
-	}
-}
-
-// A run whose taint the command forbids is refused before anything executes.
-func TestFlowTaintBlocksTheRun(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "ran")
-	script := filepath.Join(t.TempDir(), "touch.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o700); err != nil {
-		t.Fatalf("write script: %v", err)
-	}
-	h := Handler{Name: Capability, Commands: []Command{{
-		Name: "guarded", Path: "/bin/sh", Args: []string{script}, Taints: []string{"untrusted_web"},
-	}}}
-	ctx := sys.WithTaint(context.Background(), []string{"untrusted_web"})
-	result, err := h.DispatchCall(ctx, sys.Syscall{
-		Name: Capability,
-		Args: json.RawMessage(`{"operation":"run","name":"guarded","params":{}}`),
-	}, sys.Authorization{Decision: sys.Approved})
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	if result.Status() != sys.StatusFailed {
-		t.Fatalf("a tainted run must be refused, got %v", result.Status())
-	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("the command ran despite the flow policy")
-	}
-}
+// Approval and the sink guard used to be enforced here and are now the entry's:
+// approval in builtin's dispatcher, flow policy in the runtime's monitor. They
+// are tested where they are enforced — builtin/dispatcher_test.go and
+// monitor/provenance_test.go — so this package tests only the effect.

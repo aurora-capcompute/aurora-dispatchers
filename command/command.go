@@ -201,18 +201,9 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
 
-	// Sink guard: refuse before running if the run has observed a label this
-	// command forbids — a command is an effect, and this is where tainted data is
-	// barred from steering one.
-	if blocked := sys.BlockedBy(sys.Taint(ctx), command.Taints); len(blocked) > 0 {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"flow policy: this run has observed %v, which may not flow into %q", blocked, command.Name)), nil
-	}
-
+	// Flow policy and approval are this command's entry's, enforced by the
+	// runtime above and below the replay tape. This handler runs the effect.
 	summary := summarize(command, request.Params)
-	if command.RequireApproval && auth.Decision != sys.Approved {
-		return sys.Yield("Approve " + summary), nil
-	}
 
 	response, err := execCommand(ctx, command, argv)
 	if err != nil {
@@ -229,19 +220,19 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 		if errors.As(err, &timedOut) {
 			errno = sys.ErrnoTransient
 		}
-		return sys.FailCode(errno, fmt.Sprintf("%s: %v", summary, err)).WithLabels(command.Labels...), nil
+		return sys.FailCode(errno, fmt.Sprintf("%s: %v", summary, err)), nil
 	}
 	if response.ExitCode != 0 {
 		// A non-zero exit is the command's own verdict, not an infrastructure
 		// failure. Surface it as a failure the model can read and react to, with
 		// the command's own stderr as the message.
-		return sys.FailCode(sys.ErrnoInvalidArgs, failureMessage(summary, response)).WithLabels(command.Labels...), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, failureMessage(summary, response)), nil
 	}
 	encoded, err := json.Marshal(response)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInternal, fmt.Sprintf("encode run result: %v", err)), nil
 	}
-	return sys.Result(encoded).WithLabels(command.Labels...), nil
+	return sys.Result(encoded), nil
 }
 
 func (h Handler) lookup(name string) (Command, bool) {

@@ -3,6 +3,7 @@ package registry_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,5 +60,36 @@ func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 	}
 	if len(config.Operations(internet.Capability)) == 0 {
 		t.Fatalf("handler must route by the capability name %s", internet.Capability)
+	}
+}
+
+// The egress forbid floor makes a sink fail closed on omission: an internet
+// grant that declared NO taints still publishes the reserved secret class as
+// forbidden on every one of its methods, so a source labeled "secret" cannot
+// reach egress. Enforcement is the monitor's; that it is declared at all is
+// this build's job, and it is the whole of the guarantee.
+func TestInternetPublishesTheEgressFloorPerMethod(t *testing.T) {
+	table := builtin.NewTable()
+	if err := (registry.InternetRegistration{}).Configure(context.Background(),
+		json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`),
+		registry.Services{}, table); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	published := table.Capabilities()[0]
+	if published.Discriminator != "method" {
+		t.Fatalf("discriminator = %q, want method", published.Discriminator)
+	}
+	if len(published.Operations) != 2 {
+		t.Fatalf("operations = %+v, want GET and POST", published.Operations)
+	}
+	for _, operation := range published.Operations {
+		if !slices.Contains(operation.Forbid, "secret") {
+			t.Fatalf("SECURITY: %s forbids %v, want the reserved secret class present",
+				operation.Name, operation.Forbid)
+		}
+	}
+	// The floor is declared, not applied — an untainted run is unaffected.
+	if _, ok := published.FindOperation(json.RawMessage(`{"method":"GET"}`)); !ok {
+		t.Fatal("GET must resolve to its operation")
 	}
 }

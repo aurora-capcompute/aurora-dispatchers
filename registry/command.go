@@ -170,10 +170,13 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 			return err
 		}
 		entries = append(entries, builtin.Entry{
-			Key:         builtin.Key{Syscall: command.Capability, Operation: c.Name},
-			Description: c.Description,
-			Input:       branch,
-			Handler:     handler,
+			Key:             builtin.Key{Syscall: command.Capability, Operation: c.Name},
+			Description:     c.Description,
+			Input:           branch,
+			Labels:          c.Labels,
+			Forbid:          c.Taints,
+			RequireApproval: c.RequireApproval,
+			Handler:         handler,
 		})
 		branches = append(branches, branch)
 	}

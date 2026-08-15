@@ -8,38 +8,8 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
-
-// The egress forbid floor makes a sink fail closed on omission: an internet op
-// whose manifest declared NO taints still refuses a run that has observed the
-// reserved secret class, so a source labeled "secret" cannot reach egress. The
-// floor is inert for an untainted run.
-func TestInternetSinkGuardEnforcesEgressFloor(t *testing.T) {
-	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := internet.Handler{
-		Name:   "core.internet",
-		Client: client,
-		Methods: map[string]internet.MethodPolicy{
-			"GET": {Taints: registry.WithEgressFloor(nil)}, // only the floor, no manifest taints
-		},
-	}
-	tainted := sys.WithTaint(context.Background(), []string{"secret"})
-	result, err := handler.DispatchCall(tainted, internetCall("GET", "https://example.com/x"), sys.Authorization{})
-	if err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("secret-tainted egress = %v/%v, want failed/denied by the floor", result.Status(), result.Errno())
-	}
-	if client.seen.URL != "" {
-		t.Fatal("SECURITY: a secret-tainted request reached the network")
-	}
-	if r, err := handler.DispatchCall(context.Background(), internetCall("GET", "https://example.com/x"), sys.Authorization{}); err != nil || r.Status() != sys.StatusResult {
-		t.Fatalf("untainted egress = %v (err %v), want result — the floor must be inert without the label", r.Status(), err)
-	}
-}
 
 // recordingClient captures the request that actually reached the network, so a
 // test can assert on the headers the host attached (or refused to).
@@ -62,9 +32,8 @@ func internetCallWithHeaders(method, url string, headers map[string]string) sys.
 
 func injectingHandler(client internet.Doer) internet.Handler {
 	return internet.Handler{
-		Name:    "core.internet",
-		Methods: map[string]internet.MethodPolicy{"*": {}},
-		Client:  client,
+		Name:   "core.internet",
+		Client: client,
 		Injections: []internet.CredentialInjection{{
 			Methods: []string{"*"},
 			Host:    "onyx.example.com",
@@ -161,9 +130,8 @@ func TestInjectRefusesPlaintextHTTP(t *testing.T) {
 func TestInjectAllowsLoopbackHTTP(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := internet.Handler{
-		Name:    "core.internet",
-		Methods: map[string]internet.MethodPolicy{"*": {}},
-		Client:  client,
+		Name:   "core.internet",
+		Client: client,
 		Injections: []internet.CredentialInjection{{
 			Methods: []string{"*"},
 			Host:    "localhost:8080",
@@ -201,9 +169,8 @@ func TestInjectScopedToHost(t *testing.T) {
 func TestInjectScopedToMethod(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := internet.Handler{
-		Name:    "core.internet",
-		Methods: map[string]internet.MethodPolicy{"*": {}},
-		Client:  client,
+		Name:   "core.internet",
+		Client: client,
 		Injections: []internet.CredentialInjection{{
 			Methods: []string{"GET"},
 			Host:    "onyx.example.com",

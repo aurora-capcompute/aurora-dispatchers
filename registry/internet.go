@@ -104,7 +104,6 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	methods := internetMethodPolicies(config.Capabilities)
 	handler := internet.Handler{
 		Name:       internet.Capability,
-		Methods:    methods,
 		Client:     client,
 		Injections: injections,
 	}
@@ -118,11 +117,15 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	sort.Strings(granted)
 	entries := make([]builtin.Entry, 0, len(granted))
 	for _, method := range granted {
+		policy := methods[method]
 		entries = append(entries, builtin.Entry{
-			Key:         builtin.Key{Syscall: internet.Capability, Operation: method},
-			Description: fmt.Sprintf("%s request", method),
-			Input:       internetRequestSchema,
-			Handler:     handler,
+			Key:             builtin.Key{Syscall: internet.Capability, Operation: method},
+			Description:     fmt.Sprintf("%s request", method),
+			Input:           internetRequestSchema,
+			Labels:          policy.Labels,
+			Forbid:          policy.Taints,
+			RequireApproval: policy.RequireApproval,
+			Handler:         handler,
 		})
 	}
 	return out.Add(internet.Capability, "method", builtin.Field("method"), entries, sys.Capability{

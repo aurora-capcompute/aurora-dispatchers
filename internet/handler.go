@@ -28,11 +28,8 @@ type Doer interface {
 // approval declaration, resolved from the call's HTTP method — the method is the
 // ADT discriminator of a single net capability.
 type Handler struct {
-	Name string
-	// Methods is the per-method policy keyed by uppercase HTTP method, with "*"
-	// applying to every method; the two are merged for the request's method.
-	Methods map[string]MethodPolicy
-	Client  Doer
+	Name   string
+	Client Doer
 	// Injections attach host-held credential headers to matching (method, host)
 	// requests. The header values are resolved host-side and are never supplied
 	// by, visible to, or overridable by the guest.
@@ -64,7 +61,9 @@ func (c CredentialInjection) applies(method, host string) bool {
 	return false
 }
 
-// MethodPolicy is one HTTP method's grant policy: whether the request
+// MethodPolicy is one HTTP method's grant policy, carried from the manifest to
+// that method's entry. Nothing here enforces it — the runtime does, above and
+// below the replay tape: whether the request
 // needs human approval, the source classes its response carries (Labels), and
 // the labels barred from flowing into the request (Taints, the sink guard).
 type MethodPolicy struct {
@@ -83,17 +82,10 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
-	method := strings.ToUpper(strings.TrimSpace(request.Method))
-	policy := h.methodPolicy(method)
-	// Sink guard: refuse before the request leaves if the run has observed a
-	// label this method forbids.
-	if blocked := sys.BlockedBy(sys.Taint(ctx), policy.Taints); len(blocked) > 0 {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"flow policy: this run has observed %v, which may not flow into a %s request", blocked, method)), nil
-	}
-	if policy.RequireApproval && auth.Decision != sys.Approved {
-		return sys.Yield(fmt.Sprintf("Approve %s %s", request.Method, request.URL)), nil
-	}
+	// The method is read as sent: the entry this call resolved to was keyed on
+	// exactly this value, and flow policy and approval are that entry's,
+	// enforced by the runtime above and below the replay tape.
+	method := request.Method
 
 	// Attach any host-held credential for this (method, host). Host wins over a
 	// guest header of the same name, so the guest can neither read nor override
@@ -122,16 +114,16 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 		// attempted read of a labeled source taints, closing an error-channel
 		// launder where a failed fetch's message flows to a forbidding sink
 		// untainted.
-		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(
-			append(append([]string(nil), policy.Labels...), credentialLabels...)...), nil
+		// The credential provenance is dynamic — which injection matched depends
+		// on the request's host — so it is stamped here rather than declared on
+		// the entry. The method's own source labels are the entry's.
+		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(credentialLabels...), nil
 	}
 	result, err := marshalResult(response)
 	if err != nil {
 		return result, err
 	}
-	// The response derives from the network: stamp the method's source labels and
-	// the credential provenance.
-	return result.WithLabels(append(append([]string(nil), policy.Labels...), credentialLabels...)...), nil
+	return result.WithLabels(credentialLabels...), nil
 }
 
 // inject attaches matching credential headers to the request (host wins over a
@@ -191,40 +183,6 @@ func (h Handler) inject(request *Request, method string) ([]string, credentialBi
 		binding = credentialBinding{origin: OriginOf(parsed), headers: injected}
 	}
 	return labels, binding, nil
-}
-
-// methodPolicy merges the wildcard ("*") policy with the request method's own —
-// the union of their approval requirement and label sets.
-func (h Handler) methodPolicy(method string) MethodPolicy {
-	wild := h.Methods["*"]
-	specific := h.Methods[method]
-	return MethodPolicy{
-		RequireApproval: wild.RequireApproval || specific.RequireApproval,
-		Labels:          unionLabels(wild.Labels, specific.Labels),
-		Taints:          unionLabels(wild.Taints, specific.Taints),
-	}
-}
-
-// unionLabels concatenates two already-normalized label sets, dropping
-// duplicates. Order is not significant for flow decisions or result labels
-// (WithLabels re-sorts).
-func unionLabels(a, b []string) []string {
-	if len(a) == 0 {
-		return b
-	}
-	if len(b) == 0 {
-		return a
-	}
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, label := range append(append([]string(nil), a...), b...) {
-		if _, dup := seen[label]; dup {
-			continue
-		}
-		seen[label] = struct{}{}
-		out = append(out, label)
-	}
-	return out
 }
 
 func marshalResult(value any) (sys.SyscallResult, error) {

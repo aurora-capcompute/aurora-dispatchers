@@ -130,11 +130,15 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	}
 	entries := make([]builtin.Entry, 0, len(config.Capabilities))
 	for i, operation := range config.Capabilities {
+		compiled := operations[operation.Operation]
 		entries = append(entries, builtin.Entry{
-			Key:         builtin.Key{Syscall: HTTPTemplateSyscall, Operation: operation.Operation},
-			Description: operation.Description,
-			Input:       branches[i],
-			Handler:     handler,
+			Key:             builtin.Key{Syscall: HTTPTemplateSyscall, Operation: operation.Operation},
+			Description:     operation.Description,
+			Input:           branches[i],
+			Labels:          append(append([]string(nil), compiled.Labels...), compiled.CredentialLabels...),
+			Forbid:          compiled.Taints,
+			RequireApproval: compiled.RequireApproval,
+			Handler:         handler,
 		})
 	}
 	return out.Add(HTTPTemplateSyscall, "operation", builtin.Field("operation"), entries, sys.Capability{

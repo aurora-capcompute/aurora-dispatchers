@@ -66,8 +66,9 @@ type Operation struct {
 	// CredentialLabels name this operation's injected credential(s) for the journal
 	// — the keyed fingerprint, never the value — stamped on its result.
 	CredentialLabels []string
-	// Labels/Taints/RequireApproval are this operation's flow and approval policy,
-	// enforced exactly as for core.internet.
+	// Labels/Taints/RequireApproval are this operation's flow and approval
+	// policy. They are read here only to be published on the operation's entry;
+	// enforcement is the runtime's, above and below the replay tape.
 	Labels          []string
 	Taints          []string
 	RequireApproval bool
@@ -101,15 +102,8 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	// Sink guard: refuse before the request leaves if the run has observed a label
-	// this operation forbids.
-	if blocked := sys.BlockedBy(sys.Taint(ctx), operation.Taints); len(blocked) > 0 {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"flow policy: this run has observed %v, which may not flow into %s", blocked, operation.Name)), nil
-	}
-	if operation.RequireApproval && auth.Decision != sys.Approved {
-		return sys.Yield(fmt.Sprintf("Approve %s", operation.Name)), nil
-	}
+	// Flow policy and approval are the operation's entry's, enforced by the
+	// runtime above and below the replay tape. This handler renders and sends.
 
 	request, err := h.render(operation, params)
 	if err != nil {
@@ -133,14 +127,13 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 		// credential provenance): the error is derived from a request to a labeled
 		// origin, so taint the run as if the read happened rather than let a failed
 		// call's message reach a forbidding sink untainted.
-		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(
-			append(append([]string(nil), operation.Labels...), operation.CredentialLabels...)...), nil
+		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
 	}
 	result, err := marshalResult(response)
 	if err != nil {
 		return result, err
 	}
-	return result.WithLabels(append(append([]string(nil), operation.Labels...), operation.CredentialLabels...)...), nil
+	return result, nil
 }
 
 // credentialHeaderNames returns the host-held header names bound to an

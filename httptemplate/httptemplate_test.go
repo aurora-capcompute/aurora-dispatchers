@@ -3,7 +3,6 @@ package httptemplate_test
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
@@ -90,9 +89,6 @@ func TestTemplateRendersRequestAndInjectsCredential(t *testing.T) {
 	}
 	if body["message"] != "What is Hwaas?" || body["persona_id"] != float64(0) {
 		t.Fatalf("body = %v, want {message:the question, persona_id:0}", body)
-	}
-	if !slices.Contains(result.Labels(), "credential:ONYX_TOKEN@abc123def456") {
-		t.Fatalf("labels = %v, want the credential provenance", result.Labels())
 	}
 }
 
@@ -203,29 +199,7 @@ func TestTemplateRejectsBadCalls(t *testing.T) {
 	}
 }
 
-// A templated operation carries the same flow and approval policy as core.internet.
-func TestTemplateSinkGuardAndApproval(t *testing.T) {
-	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := httptemplate.Handler{
-		Name:   "core.httpTemplate",
-		Client: client,
-		Operations: map[string]httptemplate.Operation{
-			"write": {
-				Name: "write", Method: "POST", BaseURL: "https://onyx.example.com", Path: "/w",
-				Taints: []string{"secret"}, RequireApproval: true,
-			},
-		},
-	}
-	// Sink guard: a run that observed "secret" may not invoke this operation.
-	ctx := sys.WithTaint(context.Background(), []string{"secret"})
-	if r, _ := handler.DispatchCall(ctx, templateCall("write", nil), sys.Authorization{}); r.Errno() != sys.ErrnoDenied {
-		t.Fatalf("tainted call errno = %v, want denied", r.Errno())
-	}
-	if client.seen.Method != "" {
-		t.Fatal("a tainted call reached the network")
-	}
-	// Approval: without it the call parks.
-	if r, _ := handler.DispatchCall(context.Background(), templateCall("write", nil), sys.Authorization{}); r.Status() != sys.StatusYield {
-		t.Fatalf("unapproved call status = %v, want yield", r.Status())
-	}
-}
+// Flow policy and approval used to be enforced here and are now the operation's
+// entry's — the sink guard in the runtime's monitor, approval in builtin's
+// dispatcher — so they are tested there. Credential provenance is published as
+// the entry's labels; registry/httptemplate_test.go covers it.
