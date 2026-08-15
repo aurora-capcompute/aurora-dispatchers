@@ -271,44 +271,12 @@ func TestReadUngrantedOperation(t *testing.T) {
 	}
 }
 
-func TestReadRequiresApproval(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "f", "secret\n")
-	h := handler(dir)
-	h.Operations = map[string]filesystem.Operation{"read": {RequireApproval: true}}
-
-	pending := dispatch(t, h, `{"path":"f"}`)
-	if pending.Status() != sys.StatusYield {
-		t.Fatalf("status = %q, want yield awaiting approval", pending.Status())
-	}
-	approved := dispatchCtx(t, context.Background(), h, `{"path":"f"}`, sys.Authorization{Decision: sys.Approved})
-	if got := decodeRead(t, approved); got.Content != "secret\n" {
-		t.Fatalf("approved read = %q, want the file content", got.Content)
-	}
-}
-
-func TestReadStampsLabels(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "f", "data\n")
-	h := handler(dir)
-	h.Operations = map[string]filesystem.Operation{"read": {Labels: []string{"untrusted_file"}}}
-	result := dispatch(t, h, `{"path":"f"}`)
-	if labels := result.Labels(); len(labels) != 1 || labels[0] != "untrusted_file" {
-		t.Fatalf("labels = %v, want [untrusted_file] — file contents are a tainted source", labels)
-	}
-}
-
-func TestReadSinkGuardBlocksTaint(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "f", "data\n")
-	h := handler(dir)
-	h.Operations = map[string]filesystem.Operation{"read": {Taints: []string{"secret"}}}
-	ctx := sys.WithTaint(context.Background(), []string{"secret"})
-	result := dispatchCtx(t, ctx, h, `{"path":"f"}`, sys.Authorization{})
-	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("a run tainted with a forbidden label must be refused: %q %q", result.Errno(), result.Message())
-	}
-}
+// Approval, source labels and the sink guard used to be enforced here and are
+// now the entry's: approval in builtin's dispatcher (below the replay tape, so
+// the yield is journaled once) and flow policy in the runtime's monitor (above
+// it, so a denial re-derives and is never journaled). They are tested where
+// they are enforced — builtin/dispatcher_test.go and monitor/provenance_test.go
+// — so this package tests only the effect.
 
 func TestReadFollowsAbsolutePathInsideRoot(t *testing.T) {
 	dir := t.TempDir()

@@ -177,7 +177,7 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		})
 		branches = append(branches, branch)
 	}
-	return out.Add(command.Capability, builtin.Field("name"), entries, sys.Capability{
+	return out.Add(command.Capability, "name", builtin.Field("name"), entries, sys.Capability{
 		Name:        command.Capability,
 		Description: commandDescription(commands),
 		InputSchema: OneOfSchema(branches),

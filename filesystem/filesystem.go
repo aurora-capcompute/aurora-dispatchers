@@ -73,14 +73,10 @@ type ReadResponse struct {
 }
 
 // Operation is one granted filesystem case's policy: whether it needs human
-// approval, the source classes its results carry (Labels — file contents are an
-// external source, tainted at entry), and the labels it refuses to let flow in
-// (Taints, the sink guard).
-type Operation struct {
-	RequireApproval bool
-	Labels          []string
-	Taints          []string
-}
+// Operation is a granted case of core.filesystem. Its flow and approval policy
+// lives on the runtime's entry for that case, not here — this type records only
+// that the case was granted.
+type Operation struct{}
 
 // Handler serves one core.filesystem grant: the roots it is chrooted to, the
 // read bounds, and the granted operations. It satisfies builtin.Handler and
@@ -118,30 +114,17 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	op, granted := h.Operations[operation]
-	if !granted {
+	if _, granted := h.Operations[operation]; !granted {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("filesystem operation %q is not granted", operation)), nil
 	}
-	// Sink guard: refuse before the read if the run has observed a label this
-	// operation forbids. Deterministic on replay — the taint is rebuilt from the
-	// journal identically.
-	if blocked := sys.BlockedBy(sys.Taint(ctx), op.Taints); len(blocked) > 0 {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"flow policy: this run has observed %v, which may not flow into filesystem %q", blocked, operation)), nil
-	}
-	var result sys.SyscallResult
+	// Flow policy and approval are the entry's, enforced above and below the
+	// replay tape by the runtime — never here. This handler performs the effect.
 	switch operation {
 	case "read":
-		result, err = h.read(ctx, call, auth, op.RequireApproval)
+		return h.read(ctx, call, auth)
 	default:
 		return sys.FailCode(sys.ErrnoNotFound, "unknown filesystem operation: "+operation), nil
 	}
-	if err != nil || result.Status() != sys.StatusResult {
-		return result, err
-	}
-	// Stamp the operation's source labels so file contents enter the flow
-	// monitor tainted at their origin.
-	return result.WithLabels(op.Labels...), nil
 }
 
 // peekOperation reads the ADT discriminator from a filesystem call's args.
@@ -158,7 +141,7 @@ func peekOperation(args json.RawMessage) (string, error) {
 	return envelope.Operation, nil
 }
 
-func (h Handler) read(ctx context.Context, call sys.Syscall, auth sys.Authorization, requireApproval bool) (sys.SyscallResult, error) {
+func (h Handler) read(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	var request ReadRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
@@ -172,9 +155,6 @@ func (h Handler) read(ctx context.Context, call sys.Syscall, auth sys.Authorizat
 	path, display, err := h.resolve(request.Path)
 	if err != nil {
 		return failure(ctx, err)
-	}
-	if requireApproval && auth.Decision != sys.Approved {
-		return sys.Yield(fmt.Sprintf("Approve reading %s", display)), nil
 	}
 	data, capped, err := readCapped(path, h.MaxReadBytes)
 	if err != nil {

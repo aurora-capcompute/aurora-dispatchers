@@ -42,13 +42,27 @@ type Handler interface {
 }
 
 // Entry is one dispatchable operation: what it is, the shape of its arguments,
-// and the thing that performs it.
+// the flow and approval policy that applies to it alone, and the thing that
+// performs it.
+//
+// The policy lives here rather than on the Handler because one handler may back
+// several entries with different policy — a single internet client serving a
+// labelled GET and a forbidding POST — and because it is the entry, not the
+// handler, that a monitor above the journal can see.
 type Entry struct {
 	Key         Key
 	Description string
 	Input       json.RawMessage
 	Output      json.RawMessage
-	Handler     Handler
+	// Labels are the source classes this operation's results carry; Forbid are
+	// the labels barred from flowing into its arguments. Both are published on
+	// the capability and enforced by the runtime's monitor — never here.
+	Labels []string
+	Forbid []string
+	// RequireApproval parks the call until a human resolves it. It is enforced
+	// here, below the replay tape, so the yield is journaled exactly once.
+	RequireApproval bool
+	Handler         Handler
 }
 
 // Discriminator reads the operation out of a call's arguments. It belongs to
@@ -99,7 +113,7 @@ func NewTable() *Table {
 // an error rather than a silent first-wins: two grants serving one operation is
 // a manifest that means two things at once, and the old linear scan answered
 // that by picking whichever was appended first.
-func (t *Table) Add(syscall string, discriminator Discriminator, entries []Entry, capability sys.Capability) error {
+func (t *Table) Add(syscall, discriminatorField string, discriminator Discriminator, entries []Entry, capability sys.Capability) error {
 	if _, taken := t.discriminators[syscall]; taken {
 		return fmt.Errorf("syscall %q is served twice", syscall)
 	}
@@ -119,8 +133,34 @@ func (t *Table) Add(syscall string, discriminator Discriminator, entries []Entry
 		t.entries[entry.Key] = entry
 	}
 	t.discriminators[syscall] = discriminator
+	// The capability's ADT is the entries, projected: the operation list, its
+	// per-case schema, and its per-case policy all come from one place, so the
+	// menu cannot drift from what is dispatchable.
+	capability.Discriminator = discriminatorField
+	capability.Operations = operationsOf(entries)
 	t.capabilities = append(t.capabilities, capability)
 	return nil
+}
+
+// operationsOf projects the indexed entries into the capability's declared
+// cases, ordered.
+func operationsOf(entries []Entry) []sys.Operation {
+	out := make([]sys.Operation, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Key.Operation == "" {
+			continue
+		}
+		out = append(out, sys.Operation{
+			Name:            entry.Key.Operation,
+			Description:     entry.Description,
+			InputSchema:     entry.Input,
+			Labels:          entry.Labels,
+			Forbid:          entry.Forbid,
+			RequireApproval: entry.RequireApproval,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Hide keeps a syscall's capability dispatchable but off the discoverable menu.
@@ -191,7 +231,21 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, _ K, call sys.Syscall, aut
 	if !granted {
 		return sys.FailCode(sys.ErrnoDenied, refusal(call.Name, operation, d.table.Operations(call.Name))), nil
 	}
+	// Approval is enforced here, in one place, below the replay tape: the yield
+	// and the human's answer are journaled exactly once, and no driver has to
+	// remember to ask.
+	if entry.RequireApproval && auth.Decision != sys.Approved {
+		return sys.Yield(approvalPrompt(entry, call)), nil
+	}
 	return entry.Handler.DispatchCall(ctx, call, auth)
+}
+
+// approvalPrompt is what a human is asked to approve.
+func approvalPrompt(entry Entry, call sys.Syscall) string {
+	if entry.Description != "" {
+		return fmt.Sprintf("Approve %s: %s", entry.Key, entry.Description)
+	}
+	return fmt.Sprintf("Approve %s", entry.Key)
 }
 
 // refusal names what was asked for and what is available, so a caller can tell a

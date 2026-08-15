@@ -32,7 +32,7 @@ func call(name, args string) sys.Syscall {
 func table(t *testing.T, syscall string, d builtin.Discriminator, entries ...builtin.Entry) *builtin.Table {
 	t.Helper()
 	tbl := builtin.NewTable()
-	if err := tbl.Add(syscall, d, entries, sys.Capability{Name: syscall}); err != nil {
+	if err := tbl.Add(syscall, "operation", d, entries, sys.Capability{Name: syscall}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	return tbl
@@ -155,7 +155,7 @@ func TestSingleOperationSyscall(t *testing.T) {
 // The old linear scan answered it by picking whichever was appended first.
 func TestDuplicateOperationIsRefused(t *testing.T) {
 	tbl := builtin.NewTable()
-	err := tbl.Add("core.memory", builtin.Field("operation"), []builtin.Entry{
+	err := tbl.Add("core.memory", "operation", builtin.Field("operation"), []builtin.Entry{
 		entry("core.memory", "get", &stub{}),
 		entry("core.memory", "get", &stub{}),
 	}, sys.Capability{Name: "core.memory"})
@@ -167,7 +167,7 @@ func TestDuplicateOperationIsRefused(t *testing.T) {
 // The same syscall cannot be served by two families.
 func TestDuplicateSyscallIsRefused(t *testing.T) {
 	tbl := table(t, "core.memory", builtin.Field("operation"), entry("core.memory", "get", &stub{}))
-	err := tbl.Add("core.memory", builtin.Field("operation"),
+	err := tbl.Add("core.memory", "operation", builtin.Field("operation"),
 		[]builtin.Entry{entry("core.memory", "put", &stub{})}, sys.Capability{Name: "core.memory"})
 	if err == nil || !strings.Contains(err.Error(), "served twice") {
 		t.Fatalf("err = %v, want a duplicate-syscall refusal", err)
@@ -205,5 +205,63 @@ func TestHideKeepsOperationsDispatchable(t *testing.T) {
 	}
 	if served.called != 1 {
 		t.Fatal("a hidden capability must stay dispatchable")
+	}
+}
+
+// Approval is the entry's and is enforced in one place, below the replay tape,
+// so the yield and the human's answer are journaled exactly once and no driver
+// has to remember to ask. Moved here from filesystem, which used to do it.
+func TestApprovalIsEnforcedFromTheEntry(t *testing.T) {
+	served := &stub{}
+	gated := entry("core.filesystem", "read", served)
+	gated.RequireApproval = true
+	gated.Description = "read a file"
+	tbl := table(t, "core.filesystem", builtin.Field("operation"), gated)
+	dispatcher := builtin.New[struct{}](tbl)
+
+	pending, err := dispatcher.Dispatch(context.Background(), struct{}{},
+		call("core.filesystem", `{"operation":"read"}`), sys.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if pending.Status() != sys.StatusYield {
+		t.Fatalf("status = %q, want a yield awaiting approval", pending.Status())
+	}
+	if served.called != 0 {
+		t.Fatal("an unapproved call reached the handler")
+	}
+	if _, err := dispatcher.Dispatch(context.Background(), struct{}{},
+		call("core.filesystem", `{"operation":"read"}`), sys.Authorization{Decision: sys.Approved}); err != nil {
+		t.Fatalf("approved dispatch: %v", err)
+	}
+	if served.called != 1 {
+		t.Fatal("an approved call did not reach the handler")
+	}
+}
+
+// The capability a table publishes is its entries projected — same operations,
+// same per-case schema and policy — so the menu cannot drift from what is
+// dispatchable, and a monitor above the journal can resolve the same case the
+// dispatcher will.
+func TestCapabilityIsProjectedFromTheEntries(t *testing.T) {
+	get := entry("core.memory", "get", &stub{})
+	get.Labels = []string{"stored"}
+	put := entry("core.memory", "put", &stub{})
+	put.Forbid = []string{"untrusted_web"}
+	tbl := table(t, "core.memory", builtin.Field("operation"), get, put)
+
+	published := tbl.Capabilities()[0]
+	if published.Discriminator != "operation" {
+		t.Fatalf("discriminator = %q, want operation", published.Discriminator)
+	}
+	if len(published.Operations) != 2 {
+		t.Fatalf("operations = %+v, want two", published.Operations)
+	}
+	resolved, ok := published.FindOperation(json.RawMessage(`{"operation":"put"}`))
+	if !ok || len(resolved.Forbid) != 1 || resolved.Forbid[0] != "untrusted_web" {
+		t.Fatalf("resolved = %+v ok=%v, want put with its forbid set", resolved, ok)
+	}
+	if _, ok := published.FindOperation(json.RawMessage(`{"operation":"nope"}`)); ok {
+		t.Fatal("an undeclared operation must not resolve to policy")
 	}
 }

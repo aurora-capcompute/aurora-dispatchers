@@ -70,11 +70,7 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 
 	operations := make(map[string]filesystem.Operation, len(grants))
 	for _, grant := range grants {
-		operations[grant.Operation] = filesystem.Operation{
-			RequireApproval: grant.RequireApproval != nil && *grant.RequireApproval,
-			Labels:          grant.Labels,
-			Taints:          grant.Taints,
-		}
+		operations[grant.Operation] = filesystem.Operation{}
 	}
 	handler := filesystem.Handler{
 		Name:           filesystem.Capability,
@@ -95,16 +91,19 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 			return err
 		}
 		entries = append(entries, builtin.Entry{
-			Key:         builtin.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
-			Description: filesystemOperations[grant.Operation].description,
-			Input:       branch,
-			Handler:     handler,
+			Key:             builtin.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
+			Description:     filesystemOperations[grant.Operation].description,
+			Input:           branch,
+			Labels:          grant.Labels,
+			Forbid:          grant.Taints,
+			RequireApproval: grant.RequireApproval != nil && *grant.RequireApproval,
+			Handler:         handler,
 		})
 		branches = append(branches, branch)
 		names = append(names, filesystemOperations[grant.Operation].description)
 	}
 
-	return out.Add(filesystem.Capability, builtin.Field("operation"), entries, sys.Capability{
+	return out.Add(filesystem.Capability, "operation", builtin.Field("operation"), entries, sys.Capability{
 		Name: filesystem.Capability,
 		Description: fmt.Sprintf("Read-only filesystem access under %s — paths are absolute or relative to a root, and never escape it. Choose an operation:\n- %s.",
 			strings.Join(config.Roots, ", "), strings.Join(names, "\n- ")),

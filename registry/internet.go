@@ -125,7 +125,7 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 			Handler:     handler,
 		})
 	}
-	return out.Add(internet.Capability, builtin.Field("method"), entries, sys.Capability{
+	return out.Add(internet.Capability, "method", builtin.Field("method"), entries, sys.Capability{
 		Name:        internet.Capability,
 		Description: internetDescription(config.Capabilities),
 		InputSchema: internetRequestSchema,

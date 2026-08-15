@@ -111,7 +111,7 @@ func (MemoryRegistration) Configure(_ context.Context, raw json.RawMessage, serv
 			Handler:     handler,
 		})
 	}
-	return out.Add(memory.Capability, builtin.Field("operation"), entries, sys.Capability{
+	return out.Add(memory.Capability, "operation", builtin.Field("operation"), entries, sys.Capability{
 		Name:        memory.Capability,
 		Description: memoryDescription(config),
 		InputSchema: OneOfSchema(branches),
