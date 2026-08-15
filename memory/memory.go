@@ -200,11 +200,9 @@ type Handler struct {
 	Tenant string
 	// Mounts are the compartments this grant may address. A call selects one by
 	// its `scope` (process, session, shared) plus `space` when the scope is
-	// shared; when exactly one mount is granted the call may omit the selector.
-	// Each mount resolves to a physical key prefix within the tenant and carries
-	// the operations and policy allowed on it. There is deliberately no
-	// tenant-wide scope — the most-shared a key can be is a named shared space.
-	Mounts []Mount
+	// Mount is the one compartment this grant addresses: the operations it
+	// allows and the policy the registry publishes for them.
+	Mount Mount
 }
 
 // Mount is one compartment a grant may address: the physical key prefix it
@@ -212,24 +210,14 @@ type Handler struct {
 // operations allowed on it, and the data-flow policy that applies — approval
 // gates writes, Labels stamp reads, Taints guard writes.
 type Mount struct {
-	// Scope is the compartment kind (ScopeProcess, ScopeSession, ScopeShared) and
-	// Space names which shared space when Scope is ScopeShared. They are what a
-	// call's selector is matched against; an empty Scope is the anonymous single
-	// mount of a scope-free grant (core.scratch).
-	Scope string
-	Space string
-	// Prefix is the physical key prefix within the tenant — "s/<sessionID>",
-	// "p/<processID>", or "shared/<name>". Resolved at build time from the scope
-	// and the credential, so it is never guest-influenced.
-	Prefix string
-	// Operations is the set of verbs granted on this mount (get/put/list/search).
+	// Operations is the set of verbs granted (get/put/list/search).
 	Operations map[string]struct{}
-	// RequireApproval gates writes (put) on this mount.
+	// RequireApproval, Labels and Taints are read by the registry to publish the
+	// grant's entries. Nothing here enforces them — the runtime does, above and
+	// below the replay tape.
 	RequireApproval bool
-	// Labels are the source classes reads from this mount carry; Taints are the
-	// labels barred from flowing into a write to it (the sink guard).
-	Labels []string
-	Taints []string
+	Labels          []string
+	Taints          []string
 }
 
 // grants reports whether the mount permits an operation.
@@ -247,16 +235,13 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if h.Tenant == "" {
 		return sys.FailCode(sys.ErrnoInternal, "memory grant has no tenant"), nil
 	}
-	operation, scope, space, err := peekCall(call.Args)
+	operation, err := peekCall(call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	mount, err := h.selectMount(scope, space)
-	if err != nil {
-		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
-	}
+	mount := h.Mount
 	if !mount.grants(operation) {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("memory operation %q is not granted on %s", operation, mount.label())), nil
+		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("operation %q is not granted", operation)), nil
 	}
 	// Flow policy and approval are this (operation, mount) case's entry's,
 	// enforced by the runtime above and below the replay tape. This handler
@@ -282,58 +267,20 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	return result, nil
 }
 
-// selectMount resolves the selector a call names (scope, plus space for shared)
-// to the mount it may use. An empty selector is allowed only when the grant has
-// exactly one mount (e.g. core.scratch), where there is nothing to disambiguate.
-func (h Handler) selectMount(scope, space string) (Mount, error) {
-	if scope == "" {
-		if len(h.Mounts) == 1 {
-			return h.Mounts[0], nil
-		}
-		return Mount{}, fmt.Errorf("a scope is required (this grant has multiple mounts)")
-	}
-	for _, m := range h.Mounts {
-		if m.Scope == scope && m.Space == space {
-			return m, nil
-		}
-	}
-	return Mount{}, fmt.Errorf("memory %s is not granted", Mount{Scope: scope, Space: space}.label())
-}
-
-// label names a mount for error text and denials.
-func (m Mount) label() string {
-	switch {
-	case m.Scope == ScopeShared:
-		return fmt.Sprintf("shared space %q", m.Space)
-	case m.Scope != "":
-		return fmt.Sprintf("scope %q", m.Scope)
-	default:
-		return "this grant"
-	}
-}
-
 // peekCall reads the ADT discriminator and the mount selector from a call's
 // args, and enforces the selector's shape: `space` accompanies exactly the
 // shared scope — the scope tag and the space payload are separate fields.
-func peekCall(args json.RawMessage) (operation, scope, space string, err error) {
+func peekCall(args json.RawMessage) (string, error) {
 	var envelope struct {
 		Operation string `json:"operation"`
-		Scope     string `json:"scope"`
-		Space     string `json:"space"`
 	}
 	if err := json.Unmarshal(args, &envelope); err != nil {
-		return "", "", "", fmt.Errorf("decode call: %v", err)
+		return "", fmt.Errorf("decode call: %v", err)
 	}
 	if envelope.Operation == "" {
-		return "", "", "", fmt.Errorf("operation is required")
+		return "", fmt.Errorf("operation is required")
 	}
-	if envelope.Space != "" && envelope.Scope != ScopeShared {
-		return "", "", "", fmt.Errorf("space applies only to the shared scope")
-	}
-	if envelope.Scope == ScopeShared && envelope.Space == "" {
-		return "", "", "", fmt.Errorf("the shared scope requires a space (the shared space's name)")
-	}
-	return envelope.Operation, envelope.Scope, envelope.Space, nil
+	return envelope.Operation, nil
 }
 
 func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
@@ -341,7 +288,7 @@ func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.Sy
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify(mount.Prefix, request.Key)
+	qualified, err := qualify("", request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -364,7 +311,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify(mount.Prefix, request.Key)
+	qualified, err := qualify("", request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -417,9 +364,9 @@ func (h Handler) list(ctx context.Context, call sys.Syscall, mount Mount) (sys.S
 			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 		}
 	}
-	prefix := mount.Prefix
+	prefix := ""
 	if request.Prefix != "" {
-		qualified, err := qualify(mount.Prefix, request.Prefix)
+		qualified, err := qualify("", request.Prefix)
 		if err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 		}
@@ -437,9 +384,6 @@ func (h Handler) list(ctx context.Context, call sys.Syscall, mount Mount) (sys.S
 	var labels []string
 	for _, entry := range entries {
 		key := entry.Key
-		if mount.Prefix != "" {
-			key = strings.TrimPrefix(strings.TrimPrefix(key, mount.Prefix), "/")
-		}
 		relative = append(relative, key)
 		labels = append(labels, entry.Labels...)
 	}
@@ -456,7 +400,7 @@ func (h Handler) search(ctx context.Context, call sys.Syscall, mount Mount) (sys
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify(mount.Prefix, request.Key)
+	qualified, err := qualify("", request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}

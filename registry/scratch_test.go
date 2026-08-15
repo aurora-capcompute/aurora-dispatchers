@@ -55,8 +55,8 @@ func TestScratchRoutesByNameAndNeedsNoServices(t *testing.T) {
 	if got := table.Operations(registry.ScratchCapability); len(got) != 3 {
 		t.Fatalf("operations = %v, want get/put/search under %s", got, registry.ScratchCapability)
 	}
-	if len(table.Operations("core.memory")) != 0 {
-		t.Fatal("scratch must not answer to core.memory")
+	if len(table.Operations("core.internet")) != 0 {
+		t.Fatal("scratch must answer to its own name alone")
 	}
 }
 

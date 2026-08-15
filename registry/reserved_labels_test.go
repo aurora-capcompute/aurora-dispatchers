@@ -51,15 +51,15 @@ func TestFlowPolicyRejectsReservedLabelNamespace(t *testing.T) {
 // `capabilities` list is refused when the manifest is validated, before any
 // process runs.
 func TestDriverManifestRejectsForgedProvenanceLabel(t *testing.T) {
-	forged := `{"capabilities":[{"scope":"session","operations":["put"],"labels":["` + sys.SyscallLabelPrefix + `internet.read"]}]}`
-	if _, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Normalize("core.memory", json.RawMessage(forged)); err == nil {
+	forged := `{"capabilities":[{"operation":"put","labels":["` + sys.SyscallLabelPrefix + `internet.read"]}]}`
+	if _, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Normalize("core.scratch", json.RawMessage(forged)); err == nil {
 		t.Fatal("core.memory manifest declaring a reserved syscall: label was accepted; want rejection at manifest time")
 	}
 
 	// The identical grant with an honest label normalizes cleanly, proving the
 	// rejection above is specific to the reserved namespace, not a blanket refusal.
-	honest := `{"capabilities":[{"scope":"session","operations":["put"],"labels":["stored"]}]}`
-	if _, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Normalize("core.memory", json.RawMessage(honest)); err != nil {
+	honest := `{"capabilities":[{"operation":"put","labels":["stored"]}]}`
+	if _, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Normalize("core.scratch", json.RawMessage(honest)); err != nil {
 		t.Fatalf("honest core.memory manifest rejected: %v", err)
 	}
 }

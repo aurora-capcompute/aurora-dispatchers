@@ -14,7 +14,7 @@ import (
 // capability, named for that syscall — the operations are cases of its ADT, not
 // separate names.
 func TestBuildPublishesOneCapabilityPerGrant(t *testing.T) {
-	reg := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{})
+	reg := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{})
 	config := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"example.com"}]}`)
 	built, err := reg.Build(context.Background(),
 		[]registry.Entry{{Syscall: "core.internet", Config: config}}, registry.Services{})
@@ -33,7 +33,7 @@ func TestBuildPublishesOneCapabilityPerGrant(t *testing.T) {
 }
 
 func TestBuildRejectsUnknownSyscall(t *testing.T) {
-	reg := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{})
+	reg := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{})
 	_, err := reg.Build(context.Background(), []registry.Entry{{Syscall: "core.bogus"}}, registry.Services{})
 	if err == nil {
 		t.Fatal("expected error for unknown syscall")
@@ -43,9 +43,9 @@ func TestBuildRejectsUnknownSyscall(t *testing.T) {
 // A hidden grant keeps its published capability off the discoverable menu.
 func TestBuildAppliesHidden(t *testing.T) {
 	services := registry.Services{Tenant: "acme", SessionID: "s1", ProcessID: "p1", MemoryStore: memory.NewMapStore()}
-	built, err := registry.New(registry.InternetRegistration{}, registry.MemoryRegistration{}).Build(context.Background(), []registry.Entry{{
-		Syscall: "core.memory",
-		Config:  json.RawMessage(`{"capabilities":[{"scope":"session","operations":["get"]}]}`),
+	built, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Build(context.Background(), []registry.Entry{{
+		Syscall: "core.scratch",
+		Config:  json.RawMessage(`{"capabilities":[{"operation":"get"}]}`),
 		Hidden:  true,
 	}}, services)
 	if err != nil {

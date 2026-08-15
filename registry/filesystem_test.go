@@ -71,7 +71,7 @@ func TestFilesystemMatches(t *testing.T) {
 	if !(registry.FilesystemRegistration{}).Matches("core.filesystem") {
 		t.Fatal("should match core.filesystem")
 	}
-	if (registry.FilesystemRegistration{}).Matches("core.memory") {
+	if (registry.FilesystemRegistration{}).Matches("core.scratch") {
 		t.Fatal("should not match core.memory")
 	}
 }

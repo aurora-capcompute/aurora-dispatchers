@@ -17,7 +17,7 @@ func TestInternetMatchesSyscall(t *testing.T) {
 	if !reg.Matches("core.internet") {
 		t.Fatal("should match core.internet")
 	}
-	if reg.Matches("core.memory") {
+	if reg.Matches("core.scratch") {
 		t.Fatal("must not match another syscall")
 	}
 }

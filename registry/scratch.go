@@ -78,12 +78,12 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 		}
 		labels = unionLabels(labels, grant.Labels)
 		taints = unionLabels(taints, grant.Taints)
-		branch, err := OperationBranch(grant.Operation, memoryOperations[grant.Operation].schema)
+		branch, err := OperationBranch(grant.Operation, scratchOperations[grant.Operation].schema)
 		if err != nil {
 			return builtin.Contribution{}, err
 		}
 		branches = append(branches, branch)
-		names = append(names, memoryOperations[grant.Operation].description)
+		names = append(names, scratchOperations[grant.Operation].description)
 	}
 
 	// A fresh in-memory store per Configure call — i.e. per process. It is never
@@ -96,28 +96,28 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 		Name:   ScratchCapability,
 		Store:  memory.NewMapStore(),
 		Tenant: scratchTenant,
-		Mounts: []memory.Mount{{
+		Mount: memory.Mount{
 			Operations:      ops,
 			RequireApproval: requireApproval,
 			Labels:          labels,
 			Taints:          taints,
-		}},
+		},
 	}
 	// Scratch is one anonymous mount, so a case is the operation with an empty
 	// selector — the same shape core.memory uses, with nothing to disambiguate.
 	entries := make([]builtin.Entry, 0, len(grants))
 	for i, grant := range grants {
 		entries = append(entries, builtin.Entry{
-			Key:             builtin.Key{Syscall: ScratchCapability, Operation: caseName(grant.Operation, "", "")},
-			Description:     memoryOperations[grant.Operation].description,
+			Key:             builtin.Key{Syscall: ScratchCapability, Operation: grant.Operation},
+			Description:     scratchOperations[grant.Operation].description,
 			Input:           branches[i],
 			Labels:          labels,
 			Forbid:          sinkTaints(grant.Operation, taints),
-			RequireApproval: requireApproval && isMemorySink(grant.Operation),
+			RequireApproval: requireApproval && isScratchSink(grant.Operation),
 			Handler:         handler,
 		})
 	}
-	return builtin.Contribution{Discriminator: []string{"operation", "scope", "space"}, Entries: entries, Capability: sys.Capability{
+	return builtin.Contribution{Discriminator: []string{"operation"}, Entries: entries, Capability: sys.Capability{
 		Name: ScratchCapability,
 		Description: fmt.Sprintf("Process-local scratch memory — ephemeral and private to this process, cleared when it ends, never written to shared storage. Keys are relative slash-paths. Stash large content here and query it with search rather than carrying it in the conversation. Choose an operation:\n- %s.",
 			strings.Join(names, "\n- ")),
@@ -149,7 +149,7 @@ func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, e
 	seen := make(map[string]struct{}, len(grants))
 	for i := range grants {
 		operation := strings.TrimSpace(grants[i].Operation)
-		if _, ok := memoryOperations[operation]; !ok {
+		if _, ok := scratchOperations[operation]; !ok {
 			return scratchConfig{}, nil, fmt.Errorf("unknown scratch operation %q (want get, put, list, search)", grants[i].Operation)
 		}
 		if _, dup := seen[operation]; dup {
@@ -163,4 +163,41 @@ func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, e
 	}
 	sortOperationGrants(grants)
 	return config, grants, nil
+}
+
+// scratchOperations is the operation vocabulary: the argument schema and the
+// description of each verb a scratch grant may name.
+var scratchOperations = map[string]struct {
+	schema      json.RawMessage
+	description string
+}{
+	"get": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1}},"required":["key"],"additionalProperties":false}`),
+		description: "get: read one key (the response carries its version for compare-and-set writes)",
+	},
+	"put": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"value":{},"if_version":{"type":"integer","minimum":0}},"required":["key","value"],"additionalProperties":false}`),
+		description: "put: write one key (optional if_version makes it a compare-and-set: 0 = create only, N = replace exactly version N)",
+	},
+	"list": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"prefix":{"type":"string"}},"additionalProperties":false}`),
+		description: "list: list keys under a prefix",
+	},
+	"search": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"pattern":{"type":"string","minLength":1},"ignore_case":{"type":"boolean"},"context":{"type":"integer","minimum":0,"maximum":5},"max_matches":{"type":"integer","minimum":1,"maximum":100}},"required":["key","pattern"],"additionalProperties":false}`),
+		description: "search: grep a stored value with an RE2 regex — returns matching lines with line numbers (and optional surrounding context), bounded, so a large value is queried without reading it whole",
+	},
+}
+
+// isScratchSink is true for the operations that write. Only a write is a sink —
+// a read is a source — so the grant's forbid set and its approval gate apply to
+// those alone.
+func isScratchSink(operation string) bool { return operation == "put" }
+
+// sinkTaints is a grant's forbid set, applied only where it means something.
+func sinkTaints(operation string, taints []string) []string {
+	if !isScratchSink(operation) {
+		return nil
+	}
+	return taints
 }

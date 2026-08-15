@@ -51,18 +51,18 @@ func (j *memJournal) Length() int { return len(j.records) }
 // prefix and write-approval gate. The engine tests dispatch without a selector,
 // so selectMount returns this lone mount for every call — scope/space selection
 // is exercised in the registry package, where mounts resolve from real scopes.
-func mount(prefix string, requireApproval bool, ops ...string) []memory.Mount {
+func mount(_ string, requireApproval bool, ops ...string) memory.Mount {
 	set := make(map[string]struct{}, len(ops))
 	for _, op := range ops {
 		set[op] = struct{}{}
 	}
-	return []memory.Mount{{Prefix: prefix, Operations: set, RequireApproval: requireApproval}}
+	return memory.Mount{Operations: set, RequireApproval: requireApproval}
 }
 
 // allOps grants get/put/list on a single anonymous mount with no approval and no
 // flow policy — the common case for these tests. Operations are ADT cases of one
 // capability selected by the `operation` field; policy is a per-mount property.
-func allOps() []memory.Mount { return mount("", false, "get", "put", "list") }
+func allOps() memory.Mount { return mount("", false, "get", "put", "list") }
 
 // memArgs builds a memory call's args: the `operation` discriminator merged with
 // the operation's fields (a JSON object, or "").
@@ -99,7 +99,7 @@ func dispatchCtx(t *testing.T, ctx context.Context, h memory.Handler, operation,
 // later list, matching get/search.
 func TestListCarriesValueLabels(t *testing.T) {
 	store := memory.NewMapStore()
-	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 
 	tainted := sys.WithTaint(context.Background(), []string{"untrusted_web"})
 	if r := dispatchCtx(t, tainted, h, "put", `{"key":"notes/x","value":"v"}`, sys.Authorization{}); r.Status() != sys.StatusResult {
@@ -123,8 +123,8 @@ func TestListCarriesValueLabels(t *testing.T) {
 func TestMemoryRoundTripAcrossSessions(t *testing.T) {
 	store := memory.NewMapStore()
 	// Two handlers = two grants in two different sessions of one tenant.
-	sessionOne := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
-	sessionTwo := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	sessionOne := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
+	sessionTwo := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 
 	put := dispatch(t, sessionOne, "put", `{"key":"prefs/tone","value":{"formal":true}}`, sys.Authorization{})
 	if put.Status() != sys.StatusResult {
@@ -152,8 +152,8 @@ func TestMemoryRoundTripAcrossSessions(t *testing.T) {
 
 func TestMemoryTenantsAreIsolated(t *testing.T) {
 	store := memory.NewMapStore()
-	acme := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
-	rival := memory.Handler{Name: "mem", Store: store, Tenant: "rival", Mounts: allOps()}
+	acme := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
+	rival := memory.Handler{Name: "mem", Store: store, Tenant: "rival", Mount: allOps()}
 
 	dispatch(t, acme, "put", `{"key":"secret","value":"acme-only"}`, sys.Authorization{})
 
@@ -167,48 +167,23 @@ func TestMemoryTenantsAreIsolated(t *testing.T) {
 	}
 }
 
-// A mount's physical prefix (the scope's resolution, e.g. "s/<sessionID>") is a
-// chroot: guest keys are relative to it and escapes are rejected, not resolved,
-// so no key can reach outside its compartment.
-func TestMemoryMountPrefixChroot(t *testing.T) {
+// The mount prefix (chroot) went with core.memory: a scratch grant is one
+// unprefixed compartment, so there is nothing to scope keys against.
+
+// The prefix chroot went with core.memory — a scratch grant is one unprefixed
+// compartment. Key hygiene did not: a key that tries to climb out, double up a
+// separator, or name a directory is refused rather than resolved.
+func TestMemoryRejectsMalformedKeys(t *testing.T) {
 	store := memory.NewMapStore()
-	full := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
-	dispatch(t, full, "put", `{"key":"secret/root-key","value":"hidden"}`, sys.Authorization{})
-	dispatch(t, full, "put", `{"key":"notes/today","value":"visible"}`, sys.Authorization{})
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 
-	notes := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: mount("notes", false, "get", "put", "list")}
-
-	// Inside the mount: relative keys resolve under its prefix.
-	get := dispatch(t, notes, "get", `{"key":"today"}`, sys.Authorization{})
-	var response memory.GetResponse
-	if err := json.Unmarshal(get.Result(), &response); err != nil {
-		t.Fatalf("decode get: %v", err)
-	}
-	if !response.Found || string(response.Value) != `"visible"` {
-		t.Fatalf("mount get = %+v", response)
-	}
-
-	// Escape attempts are rejected, not resolved.
 	for _, key := range []string{"../secret/root-key", "a/../../secret", "/secret/root-key", "a//b", "."} {
-		result := dispatch(t, notes, "get", `{"key":"`+key+`"}`, sys.Authorization{})
+		result := dispatch(t, handler, "get", `{"key":"`+key+`"}`, sys.Authorization{})
 		if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoInvalidArgs {
 			t.Fatalf("escape %q = %#v, want failed/invalid_args", key, result)
 		}
 	}
-
-	// Listing is confined to the mount and returns relative keys.
-	list := dispatch(t, notes, "list", "", sys.Authorization{})
-	var listed memory.ListResponse
-	if err := json.Unmarshal(list.Result(), &listed); err != nil {
-		t.Fatalf("decode list: %v", err)
-	}
-	if len(listed.Keys) != 1 || listed.Keys[0] != "today" {
-		t.Fatalf("mount list = %+v, want [today]", listed)
-	}
 }
-
-// Approval used to be gated here and is now the (operation, mount) case's
-// entry's, enforced in builtin's dispatcher — tested there.
 
 type handlerDispatcher struct{ handler memory.Handler }
 
@@ -217,11 +192,9 @@ func (d handlerDispatcher) Dispatch(ctx context.Context, _ string, call sys.Sysc
 }
 func (d handlerDispatcher) Capabilities() []sys.Capability { return nil }
 
-// The determinism law applied to shared mutable state: a journaled read is
-// replayed from the journal, not re-read from the (since mutated) store.
 func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 	journal := newMemJournal()
 	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "proc-1"}
 
@@ -292,7 +265,7 @@ func (d tenantChain) Capabilities() []sys.Capability {
 // and the flow policy blocks it from reaching a protected capability there.
 func TestMemoryPoisoningSurfacesAcrossThreads(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 	run := func() *monitor.FlowMonitor[string, memPID] {
 		return monitor.NewFlowMonitor(monitor.NewTaints[string](), monitor.NewLabeler[memPID](chainAdapter{tenantChain{handler}}))
 	}
@@ -351,7 +324,7 @@ func (a chainAdapter) Capabilities() []sys.Capability { return a.next.Capabiliti
 
 func TestMemoryCompareAndSet(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 
 	// Create-only (if_version 0) succeeds on an absent key…
 	result := dispatch(t, handler, "put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{})
@@ -414,7 +387,7 @@ func TestMemoryCompareAndSet(t *testing.T) {
 // answer identically — including the version in the result payload.
 func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
 	store := memory.NewMapStore()
-	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mounts: allOps()}
+	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/3/sha256:put")
 
 	// Create-only makes re-execution detectable: run twice, it would conflict.
@@ -476,7 +449,7 @@ func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
 func TestMemoryPutDedupeReturnsTheRecordedResult(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
-		Mounts: mount("", false, "get", "put", "list")}
+		Mount: mount("", false, "get", "put", "list")}
 	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/5/sha256:put")
 
 	first := dispatchCtx(t, intent, handler, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
@@ -575,7 +548,7 @@ func TestMapStoreActivityMemory(t *testing.T) {
 func TestMemorySearch(t *testing.T) {
 	store := memory.NewMapStore()
 	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
-		Mounts: mount("", false, "put", "search")}
+		Mount: mount("", false, "put", "search")}
 
 	// A document with real newlines, stored as a JSON string value.
 	dispatch(t, h, "put", `{"key":"doc","value":"first line\nAlan Turing was a mathematician\nthird line\nturing test\nlast line"}`, sys.Authorization{})
