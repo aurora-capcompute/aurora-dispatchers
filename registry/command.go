@@ -15,14 +15,10 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/command"
 )
 
-type CommandOperationGrant struct {
-	Operation string        `json:"operation"`
-	Commands  []CommandRule `json:"commands"`
-}
-
+// CommandRule is one allowlisted command — one operation of core.command.
 type CommandRule struct {
-	// Name is what a guest calls this command by.
-	Name string `json:"name"`
+	// Operation is what a guest calls this command by: the ADT case it selects.
+	Operation string `json:"operation"`
 	// Description tells the model what the command does and when to reach for it.
 	Description string `json:"description,omitempty"`
 	// Path is the absolute executable. There is deliberately no PATH lookup:
@@ -87,7 +83,7 @@ func (p CommandParam) MarshalJSON() ([]byte, error) {
 
 // commandConfig is a core.command grant's driver configuration.
 type commandConfig struct {
-	Capabilities []CommandOperationGrant `json:"capabilities,omitempty"`
+	Capabilities []CommandRule `json:"capabilities,omitempty"`
 }
 
 // paramNamePattern is the shape of a slot name — also the shape the {slot}
@@ -97,11 +93,11 @@ var paramNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // commandNamePattern is the shape of a command's guest-facing name.
 var commandNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-// CommandRegistration runs host commands from an author-declared allowlist. It
-// publishes core.command with a single operation — run one allowlisted command —
-// where the host owns the entire command line and the guest fills only the slots
-// that command declared. There is no shell: a command is executed with its
-// argument vector, so a parameter cannot become syntax.
+// CommandRegistration runs host commands from an author-declared allowlist. Each
+// allowlisted command is one operation of core.command: the host owns the entire
+// command line and the guest fills only the slots that command declared. There
+// is no shell — a command is executed with its argument vector, so a parameter
+// cannot become syntax.
 type CommandRegistration struct{}
 
 func (CommandRegistration) Matches(syscall string) bool { return syscall == command.Capability }
@@ -112,15 +108,13 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		return capability.Family{}, err
 	}
 
-	var commands []command.Command
-	for _, grant := range grants {
-		for _, rule := range grant.Commands {
-			built, err := buildCommand(rule, services)
-			if err != nil {
-				return capability.Family{}, fmt.Errorf("command %q: %w", rule.Name, err)
-			}
-			commands = append(commands, built)
+	commands := make([]command.Command, 0, len(grants))
+	for _, rule := range grants {
+		built, err := buildCommand(rule, services)
+		if err != nil {
+			return capability.Family{}, fmt.Errorf("command %q: %w", rule.Operation, err)
 		}
+		commands = append(commands, built)
 	}
 
 	handler := command.Handler{
@@ -128,26 +122,20 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		Commands: commands,
 	}
 
-	// The index keys on the command's name, which is what actually selects the
-	// effect. `operation` was a constant "run" on every branch and discriminated
-	// nothing; it survives in the published schema only so the guest-visible
-	// shape is unchanged.
-	//
-	// One entry per command rather than one listing every name: two commands may
-	// declare the same slot name with different constraints, and a merged params
-	// object would have to pick one of them — silently publishing a constraint
-	// that does not match the command actually being called.
+	// One entry per command: two commands may declare the same slot name with
+	// different constraints, and a merged params object would have to pick one of
+	// them — publishing a constraint that does not match the command being called.
 	sorted := append([]command.Command(nil), commands...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	entries := make([]capability.Entry, 0, len(sorted))
 	for _, c := range sorted {
-		branch, err := OperationBranch(command.VerbRun, commandCallSchema(c))
+		branch, err := OperationBranch(c.Name, commandParamsSchema(c))
 		if err != nil {
 			return capability.Family{}, err
 		}
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: command.Capability, Operation: c.Name},
-			Discriminator:   "name",
+			Discriminator:   "operation",
 			Description:     c.Description,
 			Input:           branch,
 			Labels:          c.Labels,
@@ -181,7 +169,7 @@ func buildCommand(rule CommandRule, services Services) (command.Command, error) 
 		params[name] = built
 	}
 	return command.Command{
-		Name:            rule.Name,
+		Name:            rule.Operation,
 		Description:     rule.Description,
 		Path:            rule.Path,
 		Args:            append([]string(nil), rule.Args...),
@@ -232,7 +220,7 @@ func (p CommandParam) compile(name string) (command.Param, error) {
 }
 
 // parseCommandConfig validates and canonicalizes a core.command grant's config.
-func parseCommandConfig(raw json.RawMessage) (commandConfig, []CommandOperationGrant, error) {
+func parseCommandConfig(raw json.RawMessage) (commandConfig, []CommandRule, error) {
 	var config commandConfig
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -244,41 +232,18 @@ func parseCommandConfig(raw json.RawMessage) (commandConfig, []CommandOperationG
 	if len(config.Capabilities) == 0 {
 		return commandConfig{}, nil, fmt.Errorf("capabilities must grant at least one operation")
 	}
-	seenOperation := make(map[string]struct{}, len(config.Capabilities))
-	grants := make([]CommandOperationGrant, len(config.Capabilities))
-	seenCommand := map[string]struct{}{}
-	for i, grant := range config.Capabilities {
-		operation := strings.ToLower(strings.TrimSpace(grant.Operation))
-		switch operation {
-		case command.VerbRun:
-		case "":
-			return commandConfig{}, nil, fmt.Errorf("capability %d: operation is required", i)
-		default:
-			return commandConfig{}, nil, fmt.Errorf("capability %d: operation %q is not available; this driver is run-only", i, operation)
+	seen := make(map[string]struct{}, len(config.Capabilities))
+	grants := make([]CommandRule, len(config.Capabilities))
+	for i, rule := range config.Capabilities {
+		normalized, err := normalizeCommandRule(rule)
+		if err != nil {
+			return commandConfig{}, nil, fmt.Errorf("capability %d: %w", i, err)
 		}
-		if _, dup := seenOperation[operation]; dup {
-			return commandConfig{}, nil, fmt.Errorf("operation %q is granted more than once", operation)
+		if _, dup := seen[normalized.Operation]; dup {
+			return commandConfig{}, nil, fmt.Errorf("operation %q is granted more than once", normalized.Operation)
 		}
-		seenOperation[operation] = struct{}{}
-		if len(grant.Commands) == 0 {
-			return commandConfig{}, nil, fmt.Errorf("operation %q grants no commands", operation)
-		}
-		rules := make([]CommandRule, len(grant.Commands))
-		for j, rule := range grant.Commands {
-			normalized, err := normalizeCommandRule(rule)
-			if err != nil {
-				return commandConfig{}, nil, fmt.Errorf("command %d: %w", j, err)
-			}
-			if _, dup := seenCommand[normalized.Name]; dup {
-				return commandConfig{}, nil, fmt.Errorf("command %q is granted more than once", normalized.Name)
-			}
-			seenCommand[normalized.Name] = struct{}{}
-			rules[j] = normalized
-		}
-		sort.Slice(rules, func(a, b int) bool { return rules[a].Name < rules[b].Name })
-		grant.Operation = operation
-		grant.Commands = rules
-		grants[i] = grant
+		seen[normalized.Operation] = struct{}{}
+		grants[i] = normalized
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
 	return config, grants, nil
@@ -288,11 +253,11 @@ func parseCommandConfig(raw json.RawMessage) (commandConfig, []CommandOperationG
 // executable, and the agreement between its argument template and its declared
 // slots.
 func normalizeCommandRule(rule CommandRule) (CommandRule, error) {
-	rule.Name = strings.TrimSpace(rule.Name)
+	rule.Operation = strings.ToLower(strings.TrimSpace(rule.Operation))
 	rule.Path = strings.TrimSpace(rule.Path)
 	rule.Dir = strings.TrimSpace(rule.Dir)
-	if !commandNamePattern.MatchString(rule.Name) {
-		return CommandRule{}, fmt.Errorf("name %q must be a lowercase identifier", rule.Name)
+	if !commandNamePattern.MatchString(rule.Operation) {
+		return CommandRule{}, fmt.Errorf("operation %q must be a lowercase identifier", rule.Operation)
 	}
 	if !filepath.IsAbs(rule.Path) || rule.Path != filepath.Clean(rule.Path) {
 		return CommandRule{}, fmt.Errorf("path %q must be an absolute, cleaned path (there is no PATH lookup)", rule.Path)
@@ -347,18 +312,15 @@ func normalizeCommandRule(rule CommandRule) (CommandRule, error) {
 // placeholderPattern mirrors the driver's own placeholder syntax.
 var placeholderPattern = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 
-// commandCallSchema types a call to one command: its name pinned to a const, and
-// a params object carrying exactly that command's slots with their own enum or
-// pattern, all required. The kernel Validator enforces this before dispatch, so
-// an ungranted name, a missing slot, or an out-of-set value is refused before the
-// driver sees it — and the driver checks again.
-func commandCallSchema(c command.Command) json.RawMessage {
-	nameConst, _ := json.Marshal(c.Name)
+// commandParamsSchema types the params object of one command's call: exactly
+// that command's slots with their own enum or pattern, all required.
+// OperationBranch pins the operation itself. The kernel Validator enforces this
+// before dispatch, so a missing slot or an out-of-set value is refused before
+// the driver sees it — and the driver checks again.
+func commandParamsSchema(c command.Command) json.RawMessage {
 	names := c.ParamNames()
 	if len(names) == 0 {
-		return json.RawMessage(fmt.Sprintf(
-			`{"type":"object","properties":{"name":{"const":%s}},"required":["name"],"additionalProperties":false}`,
-			nameConst))
+		return nil
 	}
 	properties := make(map[string]json.RawMessage, len(names))
 	for _, name := range names {
@@ -367,8 +329,8 @@ func commandCallSchema(c command.Command) json.RawMessage {
 	props, _ := json.Marshal(properties)
 	required, _ := json.Marshal(names)
 	return json.RawMessage(fmt.Sprintf(
-		`{"type":"object","properties":{"name":{"const":%s},"params":{"type":"object","properties":%s,"required":%s,"additionalProperties":false}},"required":["name","params"],"additionalProperties":false}`,
-		nameConst, props, required))
+		`{"type":"object","properties":{"params":{"type":"object","properties":%s,"required":%s,"additionalProperties":false}},"required":["params"],"additionalProperties":false}`,
+		props, required))
 }
 
 func paramSchema(param command.Param) json.RawMessage {
@@ -384,7 +346,7 @@ func paramSchema(param command.Param) json.RawMessage {
 // each command the slots it takes and the values they admit.
 func commandDescription(commands []command.Command) string {
 	var b strings.Builder
-	b.WriteString("Run one of the allowlisted host commands. The command line is fixed by the host; you choose a command by name and supply values for its declared parameters. Commands:")
+	b.WriteString("Run one of the allowlisted host commands. The command line is fixed by the host; you choose one with `operation` and supply values for its declared parameters. Commands:")
 	sorted := append([]command.Command(nil), commands...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	for _, c := range sorted {

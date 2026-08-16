@@ -50,12 +50,9 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Capability is the name a core.command grant publishes. run is the only
-// operation (the ADT discriminator inside the call args).
+// Capability is the name a core.command grant publishes. Each allowlisted
+// command is one operation of it, named by the `operation` field in the args.
 const Capability = "core.command"
-
-// VerbRun names the one operation this driver implements.
-const VerbRun = "run"
 
 const (
 	// DefaultTimeout bounds one command's wall-clock run.
@@ -64,11 +61,10 @@ const (
 	DefaultMaxOutputBytes = 64 * 1024
 )
 
-// Request is one command a program asks the host to run: the allowlisted
-// command's name, plus a value for each slot that command declared.
+// Request is one command a program asks the host to run: the operation names
+// the allowlisted command, and Params carries a value for each slot it declared.
 type Request struct {
 	Operation string            `json:"operation"`
-	Name      string            `json:"name"`
 	Params    map[string]string `json:"params,omitempty"`
 }
 
@@ -184,16 +180,10 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
 	}
-	if request.Operation != VerbRun {
-		if request.Operation == "" {
-			return sys.FailCode(sys.ErrnoInvalidArgs, "operation is required"), nil
-		}
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("unknown operation %q (only %s is supported)", request.Operation, VerbRun)), nil
-	}
-	command, ok := h.lookup(request.Name)
+	command, ok := h.lookup(request.Operation)
 	if !ok {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"command %q is not granted (granted: %s)", request.Name, strings.Join(h.names(), ", "))), nil
+			"command %q is not granted (granted: %s)", request.Operation, strings.Join(h.names(), ", "))), nil
 	}
 
 	argv, err := resolve(command, request.Params)

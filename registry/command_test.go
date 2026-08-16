@@ -16,8 +16,8 @@ import (
 // name-shaped pattern on purpose — "[a-z][a-z0-9]*" reads like "a resource" and
 // is one, but it also admits "secrets", and `kubectl get secrets -o json`
 // returns every value.
-const kubectlGrant = `{"capabilities":[{"operation":"run","commands":[{
-  "name":"kubectl-get",
+const kubectlGrant = `{"capabilities":[{
+  "operation":"kubectl-get",
   "description":"List Kubernetes objects in a cluster",
   "path":"/bin/bash",
   "args":["/opt/aurora/bin/kubectl-get.sh","{context}","{resource}","{namespace}"],
@@ -30,7 +30,7 @@ const kubectlGrant = `{"capabilities":[{"operation":"run","commands":[{
   "timeout_ms":10000,
   "require_approval":false,
   "labels":["k8s"]
-}]}]}`
+}]}`
 
 func configure(t *testing.T, grant string) *capability.Table {
 	t.Helper()
@@ -73,15 +73,15 @@ func TestPublishedSchemaCarriesTheClosedSet(t *testing.T) {
 // does not match the command being called, and picking it by map iteration
 // order, so the schema would not even be the same twice.
 func TestPerCommandSchemasDoNotCollide(t *testing.T) {
-	grant := `{"capabilities":[{"operation":"run","commands":[
-	  {"name":"read-eu","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-eu"]}},
-	  {"name":"read-us","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-us"]}}
+	grant := `{"capabilities":[
+	  {"operation":"read-eu","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-eu"]}},
+	  {"operation":"read-us","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-us"]}}
 	]}]}`
 	first := string(configure(t, grant).Descriptors()[0].InputSchema)
 	if !strings.Contains(first, `"prod-eu"`) || !strings.Contains(first, `"prod-us"`) {
 		t.Fatalf("both commands' constraints must survive:\n%s", first)
 	}
-	// Each branch pins its own name, so neither context escapes into the other.
+	// Each branch pins its own operation, so neither context escapes into the other.
 	if strings.Count(first, `"prod-eu"`) != 1 || strings.Count(first, `"prod-us"`) != 1 {
 		t.Fatalf("a constraint leaked across commands:\n%s", first)
 	}
@@ -96,9 +96,9 @@ func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 // An author's pattern is anchored by the loader, so an unanchored one cannot
 // admit more than it appears to.
 func TestPatternsAreAnchored(t *testing.T) {
-	grant := `{"capabilities":[{"operation":"run","commands":[{
-	  "name":"echo","path":"/bin/echo","args":["{env}"],
-	  "params":{"env":"prod"}}]}]}`
+	grant := `{"capabilities":[{
+	  "operation":"echo","path":"/bin/echo","args":["{env}"],
+	  "params":{"env":"prod"}}]}`
 	out := configure(t, grant)
 	handler, ok := out.Entries()[0].Handler.(command.Handler)
 	if !ok {
@@ -119,7 +119,7 @@ func TestPatternsAreAnchored(t *testing.T) {
 // Approval defaults on. This driver runs host commands: an author who wants it
 // unattended says so explicitly.
 func TestApprovalDefaultsOn(t *testing.T) {
-	grant := `{"capabilities":[{"operation":"run","commands":[{"name":"echo","path":"/bin/echo"}]}]}`
+	grant := `{"capabilities":[{"operation":"echo","path":"/bin/echo"}]}`
 	out := configure(t, grant)
 	handler := out.Entries()[0].Handler.(command.Handler)
 	if !handler.Commands[0].RequireApproval {
@@ -136,18 +136,18 @@ func TestCommandConfigErrors(t *testing.T) {
 		want  string
 	}{
 		{"no capabilities", `{}`, "at least one operation"},
-		{"unknown operation", `{"capabilities":[{"operation":"exec","commands":[{"name":"a","path":"/bin/echo"}]}]}`, "run-only"},
-		{"relative path", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"echo"}]}]}`, "absolute"},
-		{"uncleaned path", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/usr/bin/../bin/echo"}]}]}`, "cleaned"},
-		{"relative dir", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo","dir":"work"}]}]}`, "absolute"},
-		{"undeclared placeholder", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo","args":["{ctx}"]}]}]}`, "undeclared parameter"},
-		{"unused parameter", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo","params":{"ctx":["x"]}}]}]}`, "never referenced"},
-		{"flag in permitted value", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":["-o"]}}]}]}`, "flag"},
-		{"empty permitted value", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":[""]}}]}]}`, "empty"},
-		{"bad pattern", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":"("}}]}]}`, "pattern"},
-		{"duplicate command", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo"},{"name":"a","path":"/bin/echo"}]}]}`, "more than once"},
-		{"bad command name", `{"capabilities":[{"operation":"run","commands":[{"name":"Bad Name","path":"/bin/echo"}]}]}`, "lowercase identifier"},
-		{"unknown field", `{"capabilities":[{"operation":"run","commands":[{"name":"a","path":"/bin/echo"}]}],"shell":true}`, "unknown field"},
+		{"no operation", `{"capabilities":[{"path":"/bin/echo"}]}`, "lowercase identifier"},
+		{"relative path", `{"capabilities":[{"operation":"a","path":"echo"}]}`, "absolute"},
+		{"uncleaned path", `{"capabilities":[{"operation":"a","path":"/usr/bin/../bin/echo"}]}`, "cleaned"},
+		{"relative dir", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"work"}]}`, "absolute"},
+		{"undeclared placeholder", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"]}]}`, "undeclared parameter"},
+		{"unused parameter", `{"capabilities":[{"operation":"a","path":"/bin/echo","params":{"ctx":["x"]}}]}`, "never referenced"},
+		{"flag in permitted value", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":["-o"]}}]}`, "flag"},
+		{"empty permitted value", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":[""]}}]}`, "empty"},
+		{"bad pattern", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":"("}}]}`, "pattern"},
+		{"duplicate operation", `{"capabilities":[{"operation":"a","path":"/bin/echo"},{"operation":"a","path":"/bin/echo"}]}`, "more than once"},
+		{"bad operation name", `{"capabilities":[{"operation":"Bad Name","path":"/bin/echo"}]}`, "lowercase identifier"},
+		{"unknown field", `{"capabilities":[{"operation":"a","path":"/bin/echo"}],"shell":true}`, "unknown field"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -166,8 +166,8 @@ func TestCommandConfigErrors(t *testing.T) {
 // An env value may be a secret reference, resolved host-side; a missing one
 // fails the build rather than the call.
 func TestEnvSecretFailsClosed(t *testing.T) {
-	grant := `{"capabilities":[{"operation":"run","commands":[{
-	  "name":"a","path":"/bin/echo","env":{"TOKEN":{"secret":"absent"}}}]}]}`
+	grant := `{"capabilities":[{
+	  "operation":"a","path":"/bin/echo","env":{"TOKEN":{"secret":"absent"}}}]}`
 	if _, err := (registry.CommandRegistration{}).Configure(
 		context.Background(), json.RawMessage(grant), registry.Services{}); err == nil {
 		t.Fatal("a grant referencing an unknown secret must fail to build")

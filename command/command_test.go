@@ -66,7 +66,7 @@ func decode(t *testing.T, result sys.SyscallResult) Response {
 // values substituted — each as one element, never re-parsed.
 func TestRunSubstitutesDeclaredSlots(t *testing.T) {
 	h := Handler{Name: Capability, Commands: []Command{echoCommand(t)}}
-	result := dispatch(t, h, `{"operation":"run","name":"kubectl-get","params":{"context":"prod-eu","resource":"pods"}}`)
+	result := dispatch(t, h, `{"operation":"kubectl-get","params":{"context":"prod-eu","resource":"pods"}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("run => %v (%s)", result.Status(), result.Message())
 	}
@@ -85,13 +85,13 @@ func TestRunSubstitutesDeclaredSlots(t *testing.T) {
 func TestClosedSetAdmitsOnlyItsMembers(t *testing.T) {
 	h := Handler{Name: Capability, Commands: []Command{echoCommand(t)}}
 	for _, context := range []string{"prod-eu", "staging"} {
-		args := `{"operation":"run","name":"kubectl-get","params":{"context":"` + context + `","resource":"pods"}}`
+		args := `{"operation":"kubectl-get","params":{"context":"` + context + `","resource":"pods"}}`
 		if result := dispatch(t, h, args); result.Status() != sys.StatusResult {
 			t.Fatalf("context %q must be admitted: %s", context, result.Message())
 		}
 	}
 	for _, context := range []string{"prod", "prod-eu-evil", "not-prod-eu", "PROD-EU", "", "dev"} {
-		args := `{"operation":"run","name":"kubectl-get","params":{"context":"` + context + `","resource":"pods"}}`
+		args := `{"operation":"kubectl-get","params":{"context":"` + context + `","resource":"pods"}}`
 		if result := dispatch(t, h, args); result.Status() != sys.StatusFailed {
 			t.Fatalf("context %q must be refused, got %v", context, result.Status())
 		}
@@ -111,7 +111,7 @@ func TestParameterMayNotBecomeAFlag(t *testing.T) {
 	h := Handler{Name: Capability, Commands: []Command{free}}
 	// The slot's own pattern admits anything; the flag guard still refuses these.
 	for _, value := range []string{"-o", "--output=json", "-c core.sshCommand=x", "-rf"} {
-		args, _ := json.Marshal(Request{Operation: VerbRun, Name: "echo", Params: map[string]string{"value": value}})
+		args, _ := json.Marshal(Request{Operation: "echo", Params: map[string]string{"value": value}})
 		result := dispatch(t, h, string(args))
 		if result.Status() != sys.StatusFailed {
 			t.Fatalf("value %q must be refused as a flag, got %v", value, result.Status())
@@ -141,7 +141,7 @@ func TestShellMetacharactersAreInert(t *testing.T) {
 		"`whoami`",
 		"*",
 	} {
-		args, _ := json.Marshal(Request{Operation: VerbRun, Name: "echo", Params: map[string]string{"value": value}})
+		args, _ := json.Marshal(Request{Operation: "echo", Params: map[string]string{"value": value}})
 		result := dispatch(t, h, string(args))
 		if result.Status() != sys.StatusResult {
 			t.Fatalf("value %q => %v (%s)", value, result.Status(), result.Message())
@@ -163,7 +163,7 @@ func TestControlCharactersAreRefused(t *testing.T) {
 	}
 	h := Handler{Name: Capability, Commands: []Command{free}}
 	for _, value := range []string{"a\nb", "a\rb", "a\tb", "a\x00b", "a\x1bb"} {
-		args, _ := json.Marshal(Request{Operation: VerbRun, Name: "echo", Params: map[string]string{"value": value}})
+		args, _ := json.Marshal(Request{Operation: "echo", Params: map[string]string{"value": value}})
 		result := dispatch(t, h, string(args))
 		if result.Status() != sys.StatusFailed {
 			t.Fatalf("value %q must be refused, got %v", value, result.Status())
@@ -179,19 +179,20 @@ func TestControlCharactersAreRefused(t *testing.T) {
 func TestAllowlistAndSlotDiscipline(t *testing.T) {
 	h := Handler{Name: Capability, Commands: []Command{echoCommand(t)}}
 	cases := []struct {
-		name string
-		args string
+		name  string
+		args  string
+		errno sys.Errno
 	}{
-		{"ungranted command", `{"operation":"run","name":"rm","params":{}}`},
-		{"undeclared parameter", `{"operation":"run","name":"kubectl-get","params":{"context":"staging","resource":"pods","extra":"x"}}`},
-		{"missing parameter", `{"operation":"run","name":"kubectl-get","params":{"context":"staging"}}`},
-		{"unknown operation", `{"operation":"delete","name":"kubectl-get","params":{}}`},
-		{"missing operation", `{"name":"kubectl-get","params":{}}`},
+		{"ungranted operation", `{"operation":"rm","params":{}}`, sys.ErrnoDenied},
+		{"absent operation", `{"params":{}}`, sys.ErrnoDenied},
+		{"undeclared parameter", `{"operation":"kubectl-get","params":{"context":"staging","resource":"pods","extra":"x"}}`, sys.ErrnoInvalidArgs},
+		{"missing parameter", `{"operation":"kubectl-get","params":{"context":"staging"}}`, sys.ErrnoInvalidArgs},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if result := dispatch(t, h, test.args); result.Status() != sys.StatusFailed {
-				t.Fatalf("expected a refusal, got %v", result.Status())
+			result := dispatch(t, h, test.args)
+			if result.Status() != sys.StatusFailed || result.Errno() != test.errno {
+				t.Fatalf("got %v/%v, want failed/%v: %s", result.Status(), result.Errno(), test.errno, result.Message())
 			}
 		})
 	}
@@ -211,7 +212,7 @@ func TestEnvironmentIsNotInherited(t *testing.T) {
 		Args: []string{script},
 		Env:  map[string]string{"KUBECONFIG": "/etc/aurora/kubeconfig"},
 	}}}
-	result := dispatch(t, h, `{"operation":"run","name":"show-env","params":{}}`)
+	result := dispatch(t, h, `{"operation":"show-env","params":{}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("run => %v (%s)", result.Status(), result.Message())
 	}
@@ -243,7 +244,7 @@ func TestTimeoutKillsTheProcessGroup(t *testing.T) {
 	}}}
 
 	start := time.Now()
-	result := dispatch(t, h, `{"operation":"run","name":"slow","params":{}}`)
+	result := dispatch(t, h, `{"operation":"slow","params":{}}`)
 	elapsed := time.Since(start)
 	if result.Status() != sys.StatusFailed {
 		t.Fatalf("a timed-out command must fail, got %v", result.Status())
@@ -271,7 +272,7 @@ func TestOutputIsBounded(t *testing.T) {
 		Args:           []string{script},
 		MaxOutputBytes: 1024,
 	}}}
-	result := dispatch(t, h, `{"operation":"run","name":"flood","params":{}}`)
+	result := dispatch(t, h, `{"operation":"flood","params":{}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("run => %v (%s)", result.Status(), result.Message())
 	}
@@ -292,7 +293,7 @@ func TestNonZeroExitSurfacesStderr(t *testing.T) {
 		t.Fatalf("write script: %v", err)
 	}
 	h := Handler{Name: Capability, Commands: []Command{{Name: "failing", Path: "/bin/sh", Args: []string{script}}}}
-	result := dispatch(t, h, `{"operation":"run","name":"failing","params":{}}`)
+	result := dispatch(t, h, `{"operation":"failing","params":{}}`)
 	if result.Status() != sys.StatusFailed {
 		t.Fatalf("a non-zero exit must fail, got %v", result.Status())
 	}
@@ -306,14 +307,14 @@ func TestNonZeroExitSurfacesStderr(t *testing.T) {
 func TestTimeoutIsTransientAndStartFailureIsNot(t *testing.T) {
 	slow := Command{Name: "slow", Path: "/bin/sleep", Args: []string{"5"}, Timeout: 150 * time.Millisecond}
 	h := Handler{Name: Capability, Commands: []Command{slow}}
-	result := dispatch(t, h, `{"operation":"run","name":"slow","params":{}}`)
+	result := dispatch(t, h, `{"operation":"slow","params":{}}`)
 	if result.Errno() != sys.ErrnoTransient {
 		t.Fatalf("timeout errno = %v, want transient (a retry may succeed)", result.Errno())
 	}
 
 	missing := Command{Name: "missing", Path: "/nonexistent/aurora/binary"}
 	h = Handler{Name: Capability, Commands: []Command{missing}}
-	result = dispatch(t, h, `{"operation":"run","name":"missing","params":{}}`)
+	result = dispatch(t, h, `{"operation":"missing","params":{}}`)
 	if result.Errno() != sys.ErrnoInternal {
 		t.Fatalf("missing-binary errno = %v, want internal (retrying will not fix it)", result.Errno())
 	}
@@ -325,7 +326,7 @@ func TestTimeoutIsTransientAndStartFailureIsNot(t *testing.T) {
 // checks it too; this is the floor under a Handler built by hand.
 func TestRelativeExecutableIsRefusedAtRunTime(t *testing.T) {
 	h := Handler{Name: Capability, Commands: []Command{{Name: "relative", Path: "echo"}}}
-	result := dispatch(t, h, `{"operation":"run","name":"relative","params":{}}`)
+	result := dispatch(t, h, `{"operation":"relative","params":{}}`)
 	if result.Status() != sys.StatusFailed {
 		t.Fatalf("a relative executable must be refused, got %v", result.Status())
 	}
