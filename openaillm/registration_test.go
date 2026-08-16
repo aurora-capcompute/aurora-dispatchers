@@ -30,7 +30,10 @@ func TestMatchesSyscall(t *testing.T) {
 }
 
 // A core.openaiApi grant publishes exactly one capability, named for the
-// syscall, whose input schema is a oneOf over the granted operations.
+// syscall, whose input schema is a union over the granted operations and no
+// other. The menu is projected from the entries the table routes, so an
+// operation this grant withheld cannot appear in it — the driver knows four, and
+// a grant of two must advertise two.
 func TestConfigurePublishesOneCapability(t *testing.T) {
 	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test","capabilities":[{"operation":"chat"},{"operation":"models"}]}`)
 	config := capability.NewTable()
@@ -45,8 +48,18 @@ func TestConfigurePublishesOneCapability(t *testing.T) {
 		t.Fatalf("capabilities = %+v, want one named %s", config.Descriptors(), SyscallType)
 	}
 	schema := string(config.Descriptors()[0].InputSchema)
-	if !strings.Contains(schema, `"oneOf"`) || !strings.Contains(schema, `"chat"`) || !strings.Contains(schema, `"models"`) {
-		t.Fatalf("input schema is not a oneOf over the granted operations: %s", schema)
+	if !strings.Contains(schema, `"oneOf"`) {
+		t.Fatalf("input schema is not a union over the granted operations: %s", schema)
+	}
+	for _, granted := range []string{"chat", "models"} {
+		if !strings.Contains(schema, `"const":"`+granted+`"`) {
+			t.Fatalf("menu does not offer the granted operation %q: %s", granted, schema)
+		}
+	}
+	for _, withheld := range []string{"embeddings", "responses"} {
+		if strings.Contains(schema, `"const":"`+withheld+`"`) {
+			t.Fatalf("menu offers %q, which this grant did not grant: %s", withheld, schema)
+		}
 	}
 	if len(config.Operations(SyscallType)) == 0 {
 		t.Fatalf("handler must route by the capability name %s", SyscallType)
