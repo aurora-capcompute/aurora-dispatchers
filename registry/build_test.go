@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
-	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -42,7 +41,7 @@ func TestBuildRejectsUnknownSyscall(t *testing.T) {
 
 // A hidden grant keeps its published capability off the discoverable menu.
 func TestBuildAppliesHidden(t *testing.T) {
-	services := registry.Services{Tenant: "acme", SessionID: "s1", ProcessID: "p1", MemoryStore: memory.NewMapStore()}
+	services := registry.Services{}
 	built, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Build(context.Background(), []registry.Entry{{
 		Syscall: "core.scratch",
 		Config:  json.RawMessage(`{"capabilities":[{"operation":"get"}]}`),

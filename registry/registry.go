@@ -13,23 +13,11 @@ import (
 	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 )
 
 // Services are the host-side facts a registration needs to configure a driver —
 // never guest-supplied.
 type Services struct {
-	// Tenant identifies whose memory space core.memory grants open. It is the
-	// absolute isolation boundary — no grant can reach another tenant.
-	Tenant string
-	// SessionID and ProcessID are the calling process's identity, taken from its
-	// credential. They resolve core.memory's session/process scopes to their
-	// physical key prefixes, so they are per-process (unlike the deployment-scoped
-	// fields above) and must be set by the provider on each NewDispatcher.
-	SessionID string
-	ProcessID string
-	// MemoryStore is the durable KV store behind core.memory grants.
-	MemoryStore memory.Store
 	// Secrets resolves manifest secret references (e.g. an injected
 	// Authorization token, an api_key) to their host-held values. Nil means no
 	// references may be used — a grant that references one fails to build.
