@@ -91,6 +91,7 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		}
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
+			Discriminator:   "operation",
 			Description:     filesystemOperations[grant.Operation].description,
 			Input:           branch,
 			Labels:          grant.Labels,
@@ -102,7 +103,7 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 		names = append(names, filesystemOperations[grant.Operation].description)
 	}
 
-	return capability.Family{Discriminator: "operation", Entries: entries,
+	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("Read-only filesystem access under %s — paths are absolute or relative to a root, and never escape it. Choose an operation:\n- %s.",
 			strings.Join(config.Roots, ", "), strings.Join(names, "\n- ")),
 		Input: OneOfSchema(branches),

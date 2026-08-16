@@ -132,6 +132,7 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 		compiled := operations[operation.Operation]
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: HTTPTemplateSyscall, Operation: operation.Operation},
+			Discriminator:   "operation",
 			Description:     operation.Description,
 			Input:           branches[i],
 			Labels:          append(append([]string(nil), compiled.Labels...), compiled.CredentialLabels...),
@@ -140,7 +141,7 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 			Handler:         handler,
 		})
 	}
-	return capability.Family{Discriminator: "operation", Entries: entries,
+	return capability.Family{Entries: entries,
 		Description: templateDescription(config),
 		Input:       OneOfSchema(branches),
 	}, nil

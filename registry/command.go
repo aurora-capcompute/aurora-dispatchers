@@ -170,6 +170,7 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		}
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: command.Capability, Operation: c.Name},
+			Discriminator:   "name",
 			Description:     c.Description,
 			Input:           branch,
 			Labels:          c.Labels,
@@ -179,7 +180,7 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		})
 		branches = append(branches, branch)
 	}
-	return capability.Family{Discriminator: "name", Entries: entries,
+	return capability.Family{Entries: entries,
 		Description: commandDescription(commands),
 		Input:       OneOfSchema(branches),
 	}, nil

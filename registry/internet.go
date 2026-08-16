@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -119,6 +120,7 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 		policy := methods[method]
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: internet.Capability, Operation: method},
+			Discriminator:   "method",
 			Description:     fmt.Sprintf("%s request", method),
 			Input:           internetRequestSchema,
 			Labels:          policy.Labels,
@@ -127,7 +129,7 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 			Handler:         handler,
 		})
 	}
-	return capability.Family{Discriminator: "method", Entries: entries,
+	return capability.Family{Entries: entries,
 		Description: internetDescription(config.Capabilities),
 		Input:       internetRequestSchema,
 	}, nil
@@ -167,11 +169,9 @@ func parseInternetConfig(raw json.RawMessage) (internetConfig, internet.Policy, 
 		// Methods are enumerated, never wildcarded: the granted set is the index,
 		// and an unbounded one cannot be indexed, listed in a refusal, or given
 		// per-method flow policy.
-		for _, method := range methods {
-			if method == internet.AnyMethod {
-				return internetConfig{}, internet.Policy{}, fmt.Errorf(
-					"permission %d: methods must be enumerated; %q is not allowed", i, internet.AnyMethod)
-			}
+		if slices.Contains(methods, internet.AnyMethod) {
+			return internetConfig{}, internet.Policy{}, fmt.Errorf(
+				"permission %d: methods must be enumerated; %q is not allowed", i, internet.AnyMethod)
 		}
 		for _, method := range methods {
 			rule, err := internet.NewRule(method, domain)

@@ -111,10 +111,11 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			return capability.Family{}, err
 		}
 		entries = append(entries, capability.Entry{
-			Key:         capability.Key{Syscall: SyscallType, Operation: grant.Operation},
-			Description: openaiOperations[grant.Operation].description,
-			Input:       branch,
-			Labels:      grant.Labels,
+			Key:           capability.Key{Syscall: SyscallType, Operation: grant.Operation},
+			Discriminator: "operation",
+			Description:   openaiOperations[grant.Operation].description,
+			Input:         branch,
+			Labels:        grant.Labels,
 			// A provider call sends the prompt off-host — egress — so floor the
 			// reserved secret class into the sink guard on top of any declared
 			// taints. Enforcement is the runtime monitor's, above the journal;
@@ -125,7 +126,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		branches = append(branches, branch)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
-	return capability.Family{Discriminator: "operation", Entries: entries,
+	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
 			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),
 		Input: registry.OneOfSchema(branches),
