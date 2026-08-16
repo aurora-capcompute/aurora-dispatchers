@@ -70,7 +70,6 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 	}
 
 	entries := make([]capability.Entry, 0, len(grants))
-	branches := make([]json.RawMessage, 0, len(grants))
 	names := make([]string, 0, len(grants))
 	for _, grant := range grants {
 		branch, err := OperationBranch(grant.Operation, filesystemOperations[grant.Operation].schema)
@@ -87,14 +86,12 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 			RequireApproval: grant.RequireApproval != nil && *grant.RequireApproval,
 			Handler:         handler,
 		})
-		branches = append(branches, branch)
 		names = append(names, filesystemOperations[grant.Operation].description)
 	}
 
 	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("Read-only filesystem access under %s — paths are absolute or relative to a root, and never escape it. Choose an operation:\n- %s.",
 			strings.Join(config.Roots, ", "), strings.Join(names, "\n- ")),
-		Input: OneOfSchema(branches),
 	}, nil
 }
 

@@ -153,7 +153,6 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 	sorted := append([]command.Command(nil), commands...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	entries := make([]capability.Entry, 0, len(sorted))
-	branches := make([]json.RawMessage, 0, len(sorted))
 	for _, c := range sorted {
 		branch, err := OperationBranch(command.VerbRun, commandCallSchema(c))
 		if err != nil {
@@ -169,11 +168,9 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 			RequireApproval: c.RequireApproval,
 			Handler:         handler,
 		})
-		branches = append(branches, branch)
 	}
 	return capability.Family{Entries: entries,
 		Description: commandDescription(commands),
-		Input:       OneOfSchema(branches),
 	}, nil
 }
 

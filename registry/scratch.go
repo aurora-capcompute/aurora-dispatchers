@@ -108,7 +108,6 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("Process-local scratch memory — ephemeral and private to this process, cleared when it ends, never written to shared storage. Keys are relative slash-paths. Stash large content here and query it with search rather than carrying it in the conversation. Choose an operation:\n- %s.",
 			strings.Join(names, "\n- ")),
-		Input: OneOfSchema(branches),
 	}, nil
 }
 

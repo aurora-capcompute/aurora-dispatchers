@@ -142,10 +142,3 @@ func OperationBranch(operation string, opSchema json.RawMessage) (json.RawMessag
 	}
 	return json.Marshal(schema)
 }
-
-// OneOfSchema wraps per-operation branches in a discriminated union — the input
-// schema the guest is shown and the kernel Validator enforces.
-func OneOfSchema(branches []json.RawMessage) json.RawMessage {
-	arr, _ := json.Marshal(branches)
-	return json.RawMessage(fmt.Sprintf(`{"oneOf":%s}`, arr))
-}

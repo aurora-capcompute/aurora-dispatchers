@@ -29,9 +29,7 @@ func buildFilesystemTable(t *testing.T, config string) *capability.Table {
 	if len(built.Descriptors()) != 1 || built.Descriptors()[0].Name != filesystem.Capability {
 		t.Fatalf("capabilities = %+v, want one named %s", built.Descriptors(), filesystem.Capability)
 	}
-	if !strings.Contains(string(built.Descriptors()[0].InputSchema), `"oneOf"`) {
-		t.Fatalf("input schema is not a oneOf ADT: %s", built.Descriptors()[0].InputSchema)
-	}
+	assertMenuIsTheGrant(t, built, filesystem.Capability)
 	if len(built.Entries()) == 0 {
 		t.Fatalf("no operations indexed: %+v", built.Descriptors())
 	}

@@ -86,7 +86,6 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	handler.connection = connectionFor(normalized)
 
 	entries := make([]capability.Entry, 0, len(grants))
-	branches := make([]json.RawMessage, 0, len(grants))
 	descriptions := make([]string, 0, len(grants))
 	for _, grant := range grants {
 		handler.AddOperation(grant.Operation, normalized, grant)
@@ -107,13 +106,11 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			Forbid:  registry.WithEgressFloor(grant.Taints),
 			Handler: handler,
 		})
-		branches = append(branches, branch)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
 	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
 			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),
-		Input: registry.OneOfSchema(branches),
 	}, nil
 }
 

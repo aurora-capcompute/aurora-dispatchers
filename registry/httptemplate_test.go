@@ -61,8 +61,8 @@ func templateConfigJSON() string {
 		`"body":{"message":"{{query}}","persona_id":0},"params":{"query":{"type":"string","required":true,"description":"the question"}}}]}`
 }
 
-// Configure publishes one capability named for the syscall, a oneOf over the
-// operations, and a handler that routes it.
+// Configure publishes one capability named for the syscall, whose menu is the
+// operations it granted, and a handler that routes it.
 func TestTemplateConfigurePublishesCapability(t *testing.T) {
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
 	config := capability.NewTable()
@@ -78,10 +78,9 @@ func TestTemplateConfigurePublishesCapability(t *testing.T) {
 		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Descriptors())
 	}
 	schema := string(config.Descriptors()[0].InputSchema)
-	for _, want := range []string{`"oneOf"`, `"search"`, `"query"`} {
-		if !strings.Contains(schema, want) {
-			t.Fatalf("schema missing %q: %s", want, schema)
-		}
+	assertMenuIsTheGrant(t, config, "core.httpTemplate")
+	if !strings.Contains(schema, `"query"`) {
+		t.Fatalf("schema does not carry the operation's own parameters: %s", schema)
 	}
 	desc := config.Descriptors()[0].Description
 	if !strings.Contains(desc, "search") || !strings.Contains(desc, "Search the KB.") {

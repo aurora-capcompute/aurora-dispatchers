@@ -123,7 +123,6 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	}
 	return capability.Family{Entries: entries,
 		Description: internetDescription(config.Capabilities),
-		Input:       internetRequestSchema,
 	}, nil
 }
 

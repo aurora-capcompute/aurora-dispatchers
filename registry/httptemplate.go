@@ -135,7 +135,6 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	}
 	return capability.Family{Entries: entries,
 		Description: templateDescription(config),
-		Input:       OneOfSchema(branches),
 	}, nil
 }
 
