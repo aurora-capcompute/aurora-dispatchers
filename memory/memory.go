@@ -81,22 +81,6 @@ type ListedKey struct {
 	Labels []string
 }
 
-// Capability is the name a core.memory grant publishes — the syscall's own name.
-// Its operations (get, put, list) are cases of one discriminated ADT, selected
-// by the `operation` field in the call args, not separate capability names.
-const Capability = "core.memory"
-
-// Memory scopes — the compartment kinds a mount may address. A call selects its
-// mount with `scope`; when the scope is shared it also names which space with a
-// separate `space` field (the tag and its payload are distinct fields, never
-// packed into one string). This vocabulary is the call ABI and lives here; the
-// registry validates grants against it.
-const (
-	ScopeProcess = "process"
-	ScopeSession = "session"
-	ScopeShared  = "shared"
-)
-
 const (
 	// PutAny overwrites unconditionally — last writer wins.
 	PutAny int64 = -1
@@ -186,12 +170,10 @@ const (
 )
 
 // Handler serves one memory grant: a tenant plus the mounts the grant opens
-// within it. It satisfies builtin.Handler and publishes the single core.memory
-// capability; its get/put/list operations are ADT cases selected by the
-// `operation` field. Tenant and mount prefixes are host-side grant parameters —
-// the guest only ever sees keys relative to its mount.
+// within it. Its get/put/list/search operations are ADT cases selected by the
+// `operation` field.
 type Handler struct {
-	// Name is the published capability name (core.memory).
+	// Name is the published capability name.
 	Name string
 	// Store is the durable KV store.
 	Store Store
@@ -199,17 +181,13 @@ type Handler struct {
 	// and is host-set from the process credential (never guest-supplied), so no
 	// access can ever cross tenants. Required.
 	Tenant string
-	// Mounts are the compartments this grant may address. A call selects one by
-	// its `scope` (process, session, shared) plus `space` when the scope is
 	// Mount is the one compartment this grant addresses: the operations it
 	// allows and the policy the registry publishes for them.
 	Mount Mount
 }
 
-// Mount is one compartment a grant may address: the physical key prefix it
-// resolves to inside the tenant (host-computed from the process credential), the
-// operations allowed on it, and the data-flow policy that applies — approval
-// gates writes, Labels stamp reads, Taints guard writes.
+// Mount is the compartment a grant addresses: the operations allowed on it and
+// the data-flow policy that applies.
 type Mount struct {
 	// Operations is the set of verbs granted (get/put/list/search).
 	Operations map[string]struct{}
@@ -289,7 +267,7 @@ func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.Sy
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify("", request.Key)
+	qualified, err := qualify(request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -312,7 +290,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify("", request.Key)
+	qualified, err := qualify(request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -367,7 +345,7 @@ func (h Handler) list(ctx context.Context, call sys.Syscall, mount Mount) (sys.S
 	}
 	prefix := ""
 	if request.Prefix != "" {
-		qualified, err := qualify("", request.Prefix)
+		qualified, err := qualify(request.Prefix)
 		if err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 		}
@@ -401,7 +379,7 @@ func (h Handler) search(ctx context.Context, call sys.Syscall, mount Mount) (sys
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify("", request.Key)
+	qualified, err := qualify(request.Key)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -503,11 +481,9 @@ func truncateBytes(s string, max int) string {
 	return s[:cut] + "…"
 }
 
-// qualify validates a guest key and roots it under a mount's physical prefix.
-// Chroot semantics: keys are relative slash-paths; traversal cannot escape
-// because escapes are rejected, not resolved. The prefix is host-computed from
-// the scope, so the returned physical key always stays inside the mount.
-func qualify(prefix, key string) (string, error) {
+// qualify validates a guest key: a relative slash-path whose traversal attempts
+// are rejected rather than resolved.
+func qualify(key string) (string, error) {
 	if key == "" {
 		return "", fmt.Errorf("key is required")
 	}
@@ -520,10 +496,7 @@ func qualify(prefix, key string) (string, error) {
 			return "", fmt.Errorf("key %q contains an invalid path segment", key)
 		}
 	}
-	if prefix == "" {
-		return key, nil
-	}
-	return prefix + "/" + key, nil
+	return key, nil
 }
 
 func storeFailure(ctx context.Context, err error) (sys.SyscallResult, error) {
