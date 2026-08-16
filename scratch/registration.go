@@ -1,4 +1,4 @@
-package registry
+package scratch
 
 import (
 	"bytes"
@@ -10,16 +10,17 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/memory"
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
-// ScratchCapability is the syscall/capability name of the process-scoped scratch
+// Capability is the syscall/capability name of the process-scoped scratch
 // store.
-const ScratchCapability = "core.scratch"
+const Capability = "core.scratch"
 
-// scratchTenant namespaces keys inside a process's scratch map. Every process
+// tenant namespaces keys inside a process's scratch map. Every process
 // gets its own fresh store, so isolation comes from the per-process store, not
 // the tenant — the tenant is a constant.
-const scratchTenant = "scratch"
+const tenant = "scratch"
 
 // scratchConfig is a core.scratch grant's driver configuration: the operations it
 // grants, each an ADT case discriminated by `operation`, with its data-flow
@@ -28,7 +29,7 @@ type scratchConfig struct {
 	Capabilities json.RawMessage `json:"capabilities,omitempty"`
 }
 
-// ScratchRegistration provides core.scratch: a process-local, ephemeral KV
+// Registration provides core.scratch: a process-local, ephemeral KV
 // (get/put/list/search) backed by a fresh in-memory store built per process and
 // discarded when the process ends. It is the right home for large transient content — a fetched
 // page offloaded out of the model's context: private to the process, never
@@ -41,12 +42,12 @@ type scratchConfig struct {
 // reads carry the union of the granted operations' labels, writes are guarded by
 // the union of their taints, and a write requires approval if any grant asks for
 // it. In practice a scratch grant declares bare operations and no policy at all.
-type ScratchRegistration struct{}
+type Registration struct{}
 
-func (ScratchRegistration) Matches(syscall string) bool { return syscall == ScratchCapability }
+func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
-func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (capability.Family, error) {
-	_, grants, err := parseScratchConfig(raw)
+func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry.Services) (capability.Family, error) {
+	_, grants, err := parseConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
 	}
@@ -61,14 +62,14 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 		if grant.RequireApproval != nil && *grant.RequireApproval {
 			requireApproval = true
 		}
-		labels = unionLabels(labels, grant.Labels)
-		taints = unionLabels(taints, grant.Taints)
-		branch, err := OperationBranch(grant.Operation, scratchOperations[grant.Operation].schema)
+		labels = registry.UnionLabels(labels, grant.Labels)
+		taints = registry.UnionLabels(taints, grant.Taints)
+		branch, err := registry.OperationBranch(grant.Operation, operations[grant.Operation].schema)
 		if err != nil {
 			return capability.Family{}, err
 		}
 		branches = append(branches, branch)
-		names = append(names, scratchOperations[grant.Operation].description)
+		names = append(names, operations[grant.Operation].description)
 	}
 
 	// A fresh in-memory store per Configure call — i.e. per process. It is never
@@ -78,9 +79,9 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 	// so its lone mount is anonymous (no scope, empty prefix = the whole
 	// per-process store) and calls address it with no selector.
 	handler := memory.Handler{
-		Name:   ScratchCapability,
+		Name:   Capability,
 		Store:  memory.NewMapStore(),
-		Tenant: scratchTenant,
+		Tenant: tenant,
 		Mount: memory.Mount{
 			Operations:      ops,
 			RequireApproval: requireApproval,
@@ -91,13 +92,13 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 	entries := make([]capability.Entry, 0, len(grants))
 	for i, grant := range grants {
 		entries = append(entries, capability.Entry{
-			Key:             capability.Key{Syscall: ScratchCapability, Operation: grant.Operation},
+			Key:             capability.Key{Syscall: Capability, Operation: grant.Operation},
 			Discriminator:   "operation",
-			Description:     scratchOperations[grant.Operation].description,
+			Description:     operations[grant.Operation].description,
 			Input:           branches[i],
 			Labels:          labels,
 			Forbid:          sinkTaints(grant.Operation, taints),
-			RequireApproval: requireApproval && isScratchSink(grant.Operation),
+			RequireApproval: requireApproval && isSink(grant.Operation),
 			Handler:         handler,
 		})
 	}
@@ -107,11 +108,11 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 	}, nil
 }
 
-// parseScratchConfig validates and canonicalizes a core.scratch grant — the
+// parseConfig validates and canonicalizes a core.scratch grant — the
 // single parse the door check and the build share. It rejects unknown fields,
 // requires at least one known operation (get/put/list/search) with no
 // duplicates, and normalizes each operation's flow policy.
-func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, error) {
+func parseConfig(raw json.RawMessage) (scratchConfig, []registry.OperationGrant, error) {
 	var config scratchConfig
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -120,7 +121,7 @@ func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, e
 			return scratchConfig{}, nil, err
 		}
 	}
-	grants, err := DecodeOperationGrants(config.Capabilities)
+	grants, err := registry.DecodeOperationGrants(config.Capabilities)
 	if err != nil {
 		return scratchConfig{}, nil, err
 	}
@@ -130,7 +131,7 @@ func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, e
 	seen := make(map[string]struct{}, len(grants))
 	for i := range grants {
 		operation := strings.TrimSpace(grants[i].Operation)
-		if _, ok := scratchOperations[operation]; !ok {
+		if _, ok := operations[operation]; !ok {
 			return scratchConfig{}, nil, fmt.Errorf("unknown scratch operation %q (want get, put, list, search)", grants[i].Operation)
 		}
 		if _, dup := seen[operation]; dup {
@@ -142,13 +143,13 @@ func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, e
 			return scratchConfig{}, nil, fmt.Errorf("operation %q: %w", operation, err)
 		}
 	}
-	sortOperationGrants(grants)
+	registry.SortOperationGrants(grants)
 	return config, grants, nil
 }
 
-// scratchOperations is the operation vocabulary: the argument schema and the
+// operations is the operation vocabulary: the argument schema and the
 // description of each verb a scratch grant may name.
-var scratchOperations = map[string]struct {
+var operations = map[string]struct {
 	schema      json.RawMessage
 	description string
 }{
@@ -170,14 +171,14 @@ var scratchOperations = map[string]struct {
 	},
 }
 
-// isScratchSink is true for the operations that write. Only a write is a sink —
+// isSink is true for the operations that write. Only a write is a sink —
 // a read is a source — so the grant's forbid set and its approval gate apply to
 // those alone.
-func isScratchSink(operation string) bool { return operation == "put" }
+func isSink(operation string) bool { return operation == "put" }
 
 // sinkTaints is a grant's forbid set, applied only where it means something.
 func sinkTaints(operation string, taints []string) []string {
-	if !isScratchSink(operation) {
+	if !isSink(operation) {
 		return nil
 	}
 	return taints

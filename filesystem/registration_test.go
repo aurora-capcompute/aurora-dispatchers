@@ -1,4 +1,4 @@
-package registry_test
+package filesystem_test
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 )
 
 func filesystemRegistry() *registry.Registry {
-	return registry.New(registry.FilesystemRegistration{})
+	return registry.New(filesystem.Registration{})
 }
 
 func buildFilesystemTable(t *testing.T, config string) *capability.Table {
@@ -29,7 +29,7 @@ func buildFilesystemTable(t *testing.T, config string) *capability.Table {
 	if len(built.Descriptors()) != 1 || built.Descriptors()[0].Name != filesystem.Capability {
 		t.Fatalf("capabilities = %+v, want one named %s", built.Descriptors(), filesystem.Capability)
 	}
-	assertMenuIsTheGrant(t, built, filesystem.Capability)
+	assertMenuOffers(t, built, filesystem.Capability)
 	if len(built.Entries()) == 0 {
 		t.Fatalf("no operations indexed: %+v", built.Descriptors())
 	}
@@ -66,10 +66,10 @@ func TestFilesystemPublishesOneCapability(t *testing.T) {
 }
 
 func TestFilesystemMatches(t *testing.T) {
-	if !(registry.FilesystemRegistration{}).Matches("core.filesystem") {
+	if !(filesystem.Registration{}).Matches("core.filesystem") {
 		t.Fatal("should match core.filesystem")
 	}
-	if (registry.FilesystemRegistration{}).Matches("core.scratch") {
+	if (filesystem.Registration{}).Matches("core.scratch") {
 		t.Fatal("should not match core.memory")
 	}
 }
@@ -84,7 +84,7 @@ func TestFilesystemGrantResolvesRootsAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot relativize temp dir: %v", err)
 	}
-	family, err := (registry.FilesystemRegistration{}).Configure(context.Background(),
+	family, err := (filesystem.Registration{}).Configure(context.Background(),
 		json.RawMessage(`{"capabilities":[{"operation":"read"}],"roots":["`+filepath.ToSlash(rel)+`"]}`),
 		registry.Services{})
 	if err != nil {
@@ -115,7 +115,7 @@ func TestFilesystemRejectsBadConfig(t *testing.T) {
 	}
 	for name, config := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := registryValidate(registry.FilesystemRegistration{}, "core.filesystem", json.RawMessage(config)); err == nil {
+			if _, err := registryValidate(filesystem.Registration{}, "core.filesystem", json.RawMessage(config)); err == nil {
 				t.Fatalf("expected error for %s", name)
 			}
 		})

@@ -1,4 +1,4 @@
-package registry_test
+package internet_test
 
 import (
 	"context"
@@ -33,7 +33,7 @@ func TestInjectHeadersNormalizeRejectsUnsafeShapes(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(raw)); err == nil {
+			if _, err := registryValidate(internet.Registration{}, "core.internet", json.RawMessage(raw)); err == nil {
 				t.Fatalf("Normalize accepted an unsafe injection (%s)", name)
 			}
 		})
@@ -46,7 +46,7 @@ func TestInjectHeadersNormalizeAcceptsSafeOrigins(t *testing.T) {
 	for _, domain := range []string{"onyx.example.com", "https://onyx.example.com", "http://127.0.0.1:8080", "http://localhost:9000"} {
 		raw := `{"capabilities":[{"methods":["GET"],"domain":"` + domain + `",` +
 			`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`
-		if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(raw)); err != nil {
+		if _, err := registryValidate(internet.Registration{}, "core.internet", json.RawMessage(raw)); err != nil {
 			t.Fatalf("Normalize rejected safe origin %q: %v", domain, err)
 		}
 	}
@@ -57,7 +57,7 @@ func TestInjectHeadersNormalizeAcceptsSafeOrigins(t *testing.T) {
 func TestInjectHeadersNormalizeKeepsReferenceNotValue(t *testing.T) {
 	raw := `{"capabilities":[{"methods":["GET"],"domain":"onyx.example.com",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`
-	normalized, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(raw))
+	normalized, err := registryValidate(internet.Registration{}, "core.internet", json.RawMessage(raw))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestInjectHeadersConfigureResolvesReference(t *testing.T) {
 		AuditKey: []byte("audit-key"),
 	}
 	config := capability.NewTable()
-	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
+	contribution, err := (internet.Registration{}).Configure(context.Background(), raw, services)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -117,12 +117,12 @@ func TestInjectHeadersConfigureFailsClosedOnMissingSecret(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://onyx.example.com",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
 	// No resolver configured at all.
-	if _, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{}); err == nil {
+	if _, err := (internet.Registration{}).Configure(context.Background(), raw, registry.Services{}); err == nil {
 		t.Fatal("Configure built a driver referencing a secret with no resolver")
 	}
 	// Resolver present but the name is unknown.
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
-	if _, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services); err == nil {
+	if _, err := (internet.Registration{}).Configure(context.Background(), raw, services); err == nil {
 		t.Fatal("Configure built a driver referencing an unknown secret")
 	}
 }

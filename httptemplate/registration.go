@@ -1,4 +1,4 @@
-package registry
+package httptemplate
 
 import (
 	"bytes"
@@ -11,15 +11,15 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
-// HTTPTemplateSyscall is the manifest `syscall` for a templated-request grant and
+// Capability is the manifest `syscall` for a templated-request grant and
 // the name of the single capability it publishes. Its operations are cases of one
 // discriminated ADT, selected by the `operation` field in the call args — and
 // each operation is self-contained, so one grant can front several APIs.
-const HTTPTemplateSyscall = "core.httpTemplate"
+const Capability = "core.httpTemplate"
 
 // templatePlaceholderName matches a {{param}} placeholder and captures the name.
 var templatePlaceholderName = regexp.MustCompile(`\{\{(\w+)\}\}`)
@@ -66,9 +66,9 @@ type templateOperation struct {
 	// InjectHeaders attaches host-held headers (e.g. an Authorization bearer
 	// token) to this operation's request, bound to its origin. Per-operation so a
 	// credential is never sent to another operation's host.
-	InjectHeaders   map[string]HeaderInjection `json:"inject_headers,omitempty"`
-	RequireApproval *bool                      `json:"require_approval,omitempty"`
-	FlowPolicy
+	InjectHeaders   map[string]internet.HeaderInjection `json:"inject_headers,omitempty"`
+	RequireApproval *bool                               `json:"require_approval,omitempty"`
+	registry.FlowPolicy
 }
 
 // templateParam is one guest-fillable parameter's contract, published into the
@@ -80,21 +80,21 @@ type templateParam struct {
 	Enum        []string `json:"enum,omitempty"`
 }
 
-type HTTPTemplateRegistration struct{}
+type Registration struct{}
 
-func (HTTPTemplateRegistration) Matches(syscall string) bool { return syscall == HTTPTemplateSyscall }
+func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
-func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
 	config, err := parseTemplateConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
 	}
-	operations := make(map[string]httptemplate.Operation, len(config.Capabilities))
+	operations := make(map[string]Operation, len(config.Capabilities))
 	branches := make([]json.RawMessage, 0, len(config.Capabilities))
 	for _, operation := range config.Capabilities {
 		// Resolve this operation's host-held credential at activation. A missing
 		// referenced secret fails the build here, never silently at request time.
-		headers, credentialLabels, err := resolveInjectedHeaders(operation.InjectHeaders, services)
+		headers, credentialLabels, err := internet.ResolveInjectedHeaders(operation.InjectHeaders, services)
 		if err != nil {
 			return capability.Family{}, fmt.Errorf("core.httpTemplate operation %q: %w", operation.Operation, err)
 		}
@@ -114,8 +114,8 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	)
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 
-	handler := httptemplate.Handler{
-		Name:       HTTPTemplateSyscall,
+	handler := Handler{
+		Name:       Capability,
 		Client:     client,
 		Operations: operations,
 	}
@@ -123,7 +123,7 @@ func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage
 	for i, operation := range config.Capabilities {
 		compiled := operations[operation.Operation]
 		entries = append(entries, capability.Entry{
-			Key:             capability.Key{Syscall: HTTPTemplateSyscall, Operation: operation.Operation},
+			Key:             capability.Key{Syscall: Capability, Operation: operation.Operation},
 			Discriminator:   "operation",
 			Description:     operation.Description,
 			Input:           branches[i],
@@ -183,7 +183,7 @@ func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 		operation.BaseURL = origin
 		// A credential must be bound to this operation's specific origin.
 		if len(operation.InjectHeaders) > 0 {
-			if err := validateInjection(origin, operation.InjectHeaders); err != nil {
+			if err := internet.ValidateInjection(origin, operation.InjectHeaders); err != nil {
 				return templateConfig{}, fmt.Errorf("operation %d: %w", i, err)
 			}
 		}
@@ -275,18 +275,18 @@ func placeholderRefs(operation *templateOperation) []string {
 
 // compileOperation builds the handler-side operation (with its resolved headers
 // and audit labels) and its published input schema branch.
-func compileOperation(operation templateOperation, headers map[string]string, credentialLabels []string) (httptemplate.Operation, json.RawMessage, error) {
+func compileOperation(operation templateOperation, headers map[string]string, credentialLabels []string) (Operation, json.RawMessage, error) {
 	var body any
 	if len(operation.Body) > 0 {
 		if err := json.Unmarshal(operation.Body, &body); err != nil {
-			return httptemplate.Operation{}, nil, err
+			return Operation{}, nil, err
 		}
 	}
-	params := make(map[string]httptemplate.Param, len(operation.Params))
+	params := make(map[string]Param, len(operation.Params))
 	for name, param := range operation.Params {
-		params[name] = httptemplate.Param{Type: param.Type, Required: param.Required}
+		params[name] = Param{Type: param.Type, Required: param.Required}
 	}
-	compiled := httptemplate.Operation{
+	compiled := Operation{
 		Name:             operation.Operation,
 		Method:           operation.Method,
 		BaseURL:          operation.BaseURL,
@@ -299,12 +299,12 @@ func compileOperation(operation templateOperation, headers map[string]string, cr
 		Labels:           operation.FlowPolicy.Labels,
 		// A template operation issues an HTTP request — egress — so floor the
 		// reserved secret class into its sink guard on top of any declared taints.
-		Taints:          WithEgressFloor(operation.FlowPolicy.Taints),
+		Taints:          registry.WithEgressFloor(operation.FlowPolicy.Taints),
 		RequireApproval: operation.RequireApproval != nil && *operation.RequireApproval,
 	}
-	branch, err := OperationBranch(operation.Operation, operationParamSchema(operation))
+	branch, err := registry.OperationBranch(operation.Operation, operationParamSchema(operation))
 	if err != nil {
-		return httptemplate.Operation{}, nil, err
+		return Operation{}, nil, err
 	}
 	return compiled, branch, nil
 }

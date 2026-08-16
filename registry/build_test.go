@@ -7,13 +7,14 @@ import (
 
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/aurora-dispatchers/scratch"
 )
 
 // Build selects a registration by the granted syscall and publishes exactly one
 // capability, named for that syscall — the operations are cases of its ADT, not
 // separate names.
 func TestBuildPublishesOneCapabilityPerGrant(t *testing.T) {
-	reg := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{})
+	reg := registry.New(internet.Registration{}, scratch.Registration{})
 	config := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"example.com"}]}`)
 	built, err := reg.Build(context.Background(),
 		[]registry.Entry{{Syscall: "core.internet", Config: config}}, registry.Services{})
@@ -32,7 +33,7 @@ func TestBuildPublishesOneCapabilityPerGrant(t *testing.T) {
 }
 
 func TestBuildRejectsUnknownSyscall(t *testing.T) {
-	reg := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{})
+	reg := registry.New(internet.Registration{}, scratch.Registration{})
 	_, err := reg.Build(context.Background(), []registry.Entry{{Syscall: "core.bogus"}}, registry.Services{})
 	if err == nil {
 		t.Fatal("expected error for unknown syscall")
@@ -42,7 +43,7 @@ func TestBuildRejectsUnknownSyscall(t *testing.T) {
 // A hidden grant keeps its published capability off the discoverable menu.
 func TestBuildAppliesHidden(t *testing.T) {
 	services := registry.Services{}
-	built, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Build(context.Background(), []registry.Entry{{
+	built, err := registry.New(internet.Registration{}, scratch.Registration{}).Build(context.Background(), []registry.Entry{{
 		Syscall: "core.scratch",
 		Config:  json.RawMessage(`{"capabilities":[{"operation":"get"}]}`),
 		Hidden:  true,

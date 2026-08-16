@@ -1,4 +1,4 @@
-package registry_test
+package scratch_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/aurora-dispatchers/scratch"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -15,17 +16,17 @@ func buildScratchTable(t *testing.T, config string) *capability.Table {
 	t.Helper()
 	// Unlike core.memory, scratch needs no Services — it owns a fresh in-memory
 	// store per build (i.e. per process).
-	built, err := registry.New(registry.ScratchRegistration{}).Build(context.Background(),
-		[]registry.Entry{{Syscall: registry.ScratchCapability, Config: json.RawMessage(config)}},
+	built, err := registry.New(scratch.Registration{}).Build(context.Background(),
+		[]registry.Entry{{Syscall: scratch.Capability, Config: json.RawMessage(config)}},
 		registry.Services{},
 	)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if len(built.Descriptors()) != 1 || built.Descriptors()[0].Name != registry.ScratchCapability {
-		t.Fatalf("capabilities = %+v, want one named %s", built.Descriptors(), registry.ScratchCapability)
+	if len(built.Descriptors()) != 1 || built.Descriptors()[0].Name != scratch.Capability {
+		t.Fatalf("capabilities = %+v, want one named %s", built.Descriptors(), scratch.Capability)
 	}
-	assertMenuIsTheGrant(t, built, registry.ScratchCapability)
+	assertMenuOffers(t, built, scratch.Capability)
 	if len(built.Entries()) == 0 {
 		t.Fatalf("no operations indexed: %+v", built.Descriptors())
 	}
@@ -39,7 +40,7 @@ func buildScratch(t *testing.T, config string) capability.Handler {
 func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallResult {
 	t.Helper()
 	res, err := h.DispatchCall(context.Background(),
-		sys.Syscall{Name: registry.ScratchCapability, Args: json.RawMessage(args)}, sys.Authorization{})
+		sys.Syscall{Name: scratch.Capability, Args: json.RawMessage(args)}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch %s: %v", args, err)
 	}
@@ -50,8 +51,8 @@ func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallRes
 // no host Services.
 func TestScratchRoutesByNameAndNeedsNoServices(t *testing.T) {
 	table := buildScratchTable(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`)
-	if got := table.Operations(registry.ScratchCapability); len(got) != 3 {
-		t.Fatalf("operations = %v, want get/put/search under %s", got, registry.ScratchCapability)
+	if got := table.Operations(scratch.Capability); len(got) != 3 {
+		t.Fatalf("operations = %v, want get/put/search under %s", got, scratch.Capability)
 	}
 	if len(table.Operations("core.internet")) != 0 {
 		t.Fatal("scratch must answer to its own name alone")

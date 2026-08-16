@@ -1,4 +1,4 @@
-package registry
+package filesystem
 
 import (
 	"bytes"
@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-dispatchers/filesystem"
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
 // filesystemConfig is a core.filesystem grant's driver configuration: the
@@ -42,25 +42,25 @@ var filesystemOperations = map[string]struct {
 	},
 }
 
-// FilesystemRegistration provides read-only host filesystem access — a
+// Registration provides read-only host filesystem access — a
 // root-chrooted, journaled capability whose reads carry the grant's provenance
 // labels (see the filesystem package). It grants no writes.
-type FilesystemRegistration struct{}
+type Registration struct{}
 
-func (FilesystemRegistration) Matches(syscall string) bool { return syscall == filesystem.Capability }
+func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
-func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (capability.Family, error) {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry.Services) (capability.Family, error) {
 	config, grants, err := parseFilesystemConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
 	}
 
-	operations := make(map[string]filesystem.Operation, len(grants))
+	operations := make(map[string]Operation, len(grants))
 	for _, grant := range grants {
-		operations[grant.Operation] = filesystem.Operation{}
+		operations[grant.Operation] = Operation{}
 	}
-	handler := filesystem.Handler{
-		Name:           filesystem.Capability,
+	handler := Handler{
+		Name:           Capability,
 		Roots:          config.Roots,
 		Extensions:     config.Extensions,
 		MaxReadBytes:   config.MaxReadBytes,
@@ -72,12 +72,12 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 	entries := make([]capability.Entry, 0, len(grants))
 	names := make([]string, 0, len(grants))
 	for _, grant := range grants {
-		branch, err := OperationBranch(grant.Operation, filesystemOperations[grant.Operation].schema)
+		branch, err := registry.OperationBranch(grant.Operation, filesystemOperations[grant.Operation].schema)
 		if err != nil {
 			return capability.Family{}, err
 		}
 		entries = append(entries, capability.Entry{
-			Key:             capability.Key{Syscall: filesystem.Capability, Operation: grant.Operation},
+			Key:             capability.Key{Syscall: Capability, Operation: grant.Operation},
 			Discriminator:   "operation",
 			Description:     filesystemOperations[grant.Operation].description,
 			Input:           branch,
@@ -100,10 +100,10 @@ func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, 
 // top-level fields, requires at least one granted operation from the known set
 // with no duplicates, normalizes each operation's flow policy, validates roots,
 // and applies the default read bounds.
-func parseFilesystemConfig(raw json.RawMessage) (filesystemConfig, []OperationGrant, error) {
+func parseFilesystemConfig(raw json.RawMessage) (filesystemConfig, []registry.OperationGrant, error) {
 	config := filesystemConfig{
-		MaxReadBytes: filesystem.DefaultMaxReadBytes,
-		MaxLines:     filesystem.DefaultMaxLines,
+		MaxReadBytes: DefaultMaxReadBytes,
+		MaxLines:     DefaultMaxLines,
 	}
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -112,7 +112,7 @@ func parseFilesystemConfig(raw json.RawMessage) (filesystemConfig, []OperationGr
 			return filesystemConfig{}, nil, err
 		}
 	}
-	grants, err := DecodeOperationGrants(config.Capabilities)
+	grants, err := registry.DecodeOperationGrants(config.Capabilities)
 	if err != nil {
 		return filesystemConfig{}, nil, err
 	}
@@ -134,7 +134,7 @@ func parseFilesystemConfig(raw json.RawMessage) (filesystemConfig, []OperationGr
 			return filesystemConfig{}, nil, fmt.Errorf("operation %q: %w", operation, err)
 		}
 	}
-	sortOperationGrants(grants)
+	registry.SortOperationGrants(grants)
 
 	if config.Roots, err = normalizeRoots(config.Roots); err != nil {
 		return filesystemConfig{}, nil, err

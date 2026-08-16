@@ -1,4 +1,4 @@
-package registry
+package command
 
 import (
 	"bytes"
@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-dispatchers/command"
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
-// CommandRule is one allowlisted command — one operation of core.command.
+// CommandRule is one allowlisted command — one operation of core.
 type CommandRule struct {
 	// Operation is what a guest calls this command by: the ADT case it selects.
 	Operation string `json:"operation"`
@@ -30,7 +30,7 @@ type CommandRule struct {
 	Dir string `json:"dir,omitempty"`
 	// Env is the child's entire environment — it inherits nothing. Values may be
 	// secret references ({"secret":"NAME"}) resolved host-side.
-	Env map[string]Secret `json:"env,omitempty"`
+	Env map[string]registry.Secret `json:"env,omitempty"`
 	// Params declares each slot Args may reference. A value is either a JSON
 	// array (the closed set of permitted values) or a string (a regular
 	// expression, anchored by the loader).
@@ -40,7 +40,7 @@ type CommandRule struct {
 	MaxOutputBytes int64 `json:"max_output_bytes,omitempty"`
 
 	RequireApproval *bool `json:"require_approval,omitempty"`
-	FlowPolicy
+	registry.FlowPolicy
 }
 
 // CommandParam declares one slot: a closed set of values, or a pattern. Prefer
@@ -93,22 +93,22 @@ var paramNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // commandNamePattern is the shape of a command's guest-facing name.
 var commandNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-// CommandRegistration runs host commands from an author-declared allowlist. Each
+// Registration runs host commands from an author-declared allowlist. Each
 // allowlisted command is one operation of core.command: the host owns the entire
 // command line and the guest fills only the slots that command declared. There
 // is no shell — a command is executed with its argument vector, so a parameter
 // cannot become syntax.
-type CommandRegistration struct{}
+type Registration struct{}
 
-func (CommandRegistration) Matches(syscall string) bool { return syscall == command.Capability }
+func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
-func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
 	_, grants, err := parseCommandConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
 	}
 
-	commands := make([]command.Command, 0, len(grants))
+	commands := make([]Command, 0, len(grants))
 	for _, rule := range grants {
 		built, err := buildCommand(rule, services)
 		if err != nil {
@@ -117,24 +117,24 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 		commands = append(commands, built)
 	}
 
-	handler := command.Handler{
-		Name:     command.Capability,
+	handler := Handler{
+		Name:     Capability,
 		Commands: commands,
 	}
 
 	// One entry per command: two commands may declare the same slot name with
 	// different constraints, and a merged params object would have to pick one of
 	// them — publishing a constraint that does not match the command being called.
-	sorted := append([]command.Command(nil), commands...)
+	sorted := append([]Command(nil), commands...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	entries := make([]capability.Entry, 0, len(sorted))
 	for _, c := range sorted {
-		branch, err := OperationBranch(c.Name, commandParamsSchema(c))
+		branch, err := registry.OperationBranch(c.Name, commandParamsSchema(c))
 		if err != nil {
 			return capability.Family{}, err
 		}
 		entries = append(entries, capability.Entry{
-			Key:             capability.Key{Syscall: command.Capability, Operation: c.Name},
+			Key:             capability.Key{Syscall: Capability, Operation: c.Name},
 			Discriminator:   "operation",
 			Description:     c.Description,
 			Input:           branch,
@@ -151,24 +151,24 @@ func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, ser
 
 // buildCommand resolves one validated rule into the executable form, resolving
 // secret-referencing environment values host-side.
-func buildCommand(rule CommandRule, services Services) (command.Command, error) {
+func buildCommand(rule CommandRule, services registry.Services) (Command, error) {
 	env := make(map[string]string, len(rule.Env))
 	for key, secret := range rule.Env {
 		value, err := secret.Resolve(services.Secrets)
 		if err != nil {
-			return command.Command{}, fmt.Errorf("env %q: %w", key, err)
+			return Command{}, fmt.Errorf("env %q: %w", key, err)
 		}
 		env[key] = value
 	}
-	params := make(map[string]command.Param, len(rule.Params))
+	params := make(map[string]Param, len(rule.Params))
 	for name, declared := range rule.Params {
 		built, err := declared.compile(name)
 		if err != nil {
-			return command.Command{}, err
+			return Command{}, err
 		}
 		params[name] = built
 	}
-	return command.Command{
+	return Command{
 		Name:            rule.Operation,
 		Description:     rule.Description,
 		Path:            rule.Path,
@@ -189,16 +189,16 @@ func buildCommand(rule CommandRule, services Services) (command.Command, error) 
 // expression matches anywhere in the value, so "prod" would admit
 // "not-prod-really" — the classic way a regular expression admits more than the
 // author read it as admitting.
-func (p CommandParam) compile(name string) (command.Param, error) {
+func (p CommandParam) compile(name string) (Param, error) {
 	if len(p.oneOf) > 0 {
 		values := make([]string, 0, len(p.oneOf))
 		seen := make(map[string]struct{}, len(p.oneOf))
 		for _, value := range p.oneOf {
 			if value == "" {
-				return command.Param{}, fmt.Errorf("parameter %q: a permitted value is empty", name)
+				return Param{}, fmt.Errorf("parameter %q: a permitted value is empty", name)
 			}
 			if strings.HasPrefix(value, "-") {
-				return command.Param{}, fmt.Errorf("parameter %q: permitted value %q begins with %q and would be read as a flag", name, value, "-")
+				return Param{}, fmt.Errorf("parameter %q: permitted value %q begins with %q and would be read as a flag", name, value, "-")
 			}
 			if _, dup := seen[value]; dup {
 				continue
@@ -207,16 +207,16 @@ func (p CommandParam) compile(name string) (command.Param, error) {
 			values = append(values, value)
 		}
 		sort.Strings(values)
-		return command.Param{OneOf: values}, nil
+		return Param{OneOf: values}, nil
 	}
 	if strings.TrimSpace(p.pattern) == "" {
-		return command.Param{}, fmt.Errorf("parameter %q declares neither permitted values nor a pattern", name)
+		return Param{}, fmt.Errorf("parameter %q declares neither permitted values nor a pattern", name)
 	}
 	compiled, err := regexp.Compile(`\A(?:` + p.pattern + `)\z`)
 	if err != nil {
-		return command.Param{}, fmt.Errorf("parameter %q pattern: %w", name, err)
+		return Param{}, fmt.Errorf("parameter %q pattern: %w", name, err)
 	}
-	return command.Param{Pattern: compiled, Source: p.pattern}, nil
+	return Param{Pattern: compiled, Source: p.pattern}, nil
 }
 
 // parseCommandConfig validates and canonicalizes a core.command grant's config.
@@ -317,7 +317,7 @@ var placeholderPattern = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 // OperationBranch pins the operation itself. The kernel Validator enforces this
 // before dispatch, so a missing slot or an out-of-set value is refused before
 // the driver sees it — and the driver checks again.
-func commandParamsSchema(c command.Command) json.RawMessage {
+func commandParamsSchema(c Command) json.RawMessage {
 	names := c.ParamNames()
 	if len(names) == 0 {
 		return nil
@@ -333,7 +333,7 @@ func commandParamsSchema(c command.Command) json.RawMessage {
 		props, required))
 }
 
-func paramSchema(param command.Param) json.RawMessage {
+func paramSchema(param Param) json.RawMessage {
 	if len(param.OneOf) > 0 {
 		values, _ := json.Marshal(param.OneOf)
 		return json.RawMessage(fmt.Sprintf(`{"enum":%s}`, values))
@@ -344,10 +344,10 @@ func paramSchema(param command.Param) json.RawMessage {
 
 // commandDescription composes the published tool doc: what may be run, and for
 // each command the slots it takes and the values they admit.
-func commandDescription(commands []command.Command) string {
+func commandDescription(commands []Command) string {
 	var b strings.Builder
 	b.WriteString("Run one of the allowlisted host commands. The command line is fixed by the host; you choose one with `operation` and supply values for its declared parameters. Commands:")
-	sorted := append([]command.Command(nil), commands...)
+	sorted := append([]Command(nil), commands...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	for _, c := range sorted {
 		fmt.Fprintf(&b, "\n- %q", c.Name)

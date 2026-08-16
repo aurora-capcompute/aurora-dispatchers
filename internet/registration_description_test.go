@@ -1,4 +1,4 @@
-package registry_test
+package internet_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -20,7 +21,7 @@ func TestInternetDescriptionIncludesAuthorUsageNote(t *testing.T) {
 		`{"methods":["GET"],"domain":"https://docs.example.org"}` +
 		`]}`)
 	config := capability.NewTable()
-	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
+	contribution, err := (internet.Registration{}).Configure(context.Background(), raw, registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -40,7 +41,7 @@ func TestInternetDescriptionIncludesAuthorUsageNote(t *testing.T) {
 func TestInternetDescriptionRoundTripsThroughNormalize(t *testing.T) {
 	usage := "Weather API; GET /v1/forecast?city=NAME."
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://api.weather.example.com","description":` + mustJSON(usage) + `}]}`)
-	normalized, err := registryValidate(registry.InternetRegistration{}, "core.internet", raw)
+	normalized, err := registryValidate(internet.Registration{}, "core.internet", raw)
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestInternetDescriptionRejectsUnsafeText(t *testing.T) {
 	controlChar := `{"capabilities":[{"methods":["GET"],"domain":"example.com","description":` + mustJSON(withNUL) + `}]}`
 	for name, bad := range map[string]string{"oversize": oversize, "control char": controlChar} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(bad)); err == nil {
+			if _, err := registryValidate(internet.Registration{}, "core.internet", json.RawMessage(bad)); err == nil {
 				t.Fatalf("Normalize accepted an unsafe description (%s)", name)
 			}
 		})
@@ -74,7 +75,7 @@ func TestInternetDescriptionAnnotatesInjectedHeaders(t *testing.T) {
 		`"description":"Onyx KB.","inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`)
 	config := capability.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
-	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
+	contribution, err := (internet.Registration{}).Configure(context.Background(), raw, services)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestInternetDescriptionAnnotatesMultipleInjectedHeaders(t *testing.T) {
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN"},"X-Api-Key":{"secret":"ONYX_KEY"}}}]}`)
 	config := capability.NewTable()
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "t", "ONYX_KEY": "k"}}
-	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, services)
+	contribution, err := (internet.Registration{}).Configure(context.Background(), raw, services)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}

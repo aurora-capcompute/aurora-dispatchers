@@ -1,6 +1,11 @@
 // Package registry assembles built-in capability drivers: it selects a
 // registration by the granted syscall and folds what that registration
 // publishes into one capability.Table.
+//
+// Each driver's registration lives with its driver — internet.Registration,
+// command.Registration, and so on — and depends on this package, never the
+// reverse. What is here is only what every one of them shares: the assembler,
+// the grant vocabulary (adt.go) and secret resolution (secret.go).
 package registry
 
 import (

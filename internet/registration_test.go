@@ -1,4 +1,4 @@
-package registry_test
+package internet_test
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 )
 
 func TestInternetMatchesSyscall(t *testing.T) {
-	reg := registry.InternetRegistration{}
+	reg := internet.Registration{}
 	if !reg.Matches("core.internet") {
 		t.Fatal("should match core.internet")
 	}
@@ -23,7 +23,7 @@ func TestInternetMatchesSyscall(t *testing.T) {
 }
 
 func TestInternetNormalizeRequiresCapabilities(t *testing.T) {
-	if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(`{}`)); err == nil {
+	if _, err := registryValidate(internet.Registration{}, "core.internet", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected error when capabilities is empty")
 	}
 }
@@ -35,7 +35,7 @@ func TestInternetNormalizeRequiresCapabilities(t *testing.T) {
 // still produce the DELETE entry a guest reaches.
 func TestInternetGrantIndexesCanonicalMethods(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["POST","delete"],"domain":"example.com"}]}`)
-	family, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
+	family, err := (internet.Registration{}).Configure(context.Background(), raw, registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestInternetGrantIndexesCanonicalMethods(t *testing.T) {
 
 func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"  "}]}`)
-	if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", raw); err == nil {
+	if _, err := registryValidate(internet.Registration{}, "core.internet", raw); err == nil {
 		t.Fatal("expected error for empty domain")
 	}
 }
@@ -61,7 +61,7 @@ func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
 func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`)
 	config := capability.NewTable()
-	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
+	contribution, err := (internet.Registration{}).Configure(context.Background(), raw, registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestInternetConfigurePublishesOneCapability(t *testing.T) {
 // this build's job, and it is the whole of the guarantee.
 func TestInternetPublishesTheEgressFloorPerMethod(t *testing.T) {
 	table := capability.NewTable()
-	contribution, err := (registry.InternetRegistration{}).Configure(context.Background(),
+	contribution, err := (internet.Registration{}).Configure(context.Background(),
 		json.RawMessage(`{"capabilities":[{"methods":["GET","POST"],"domain":"example.com"}]}`),
 		registry.Services{})
 	if err != nil {

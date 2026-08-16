@@ -8,7 +8,9 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 
+	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/aurora-dispatchers/scratch"
 )
 
 // A manifest must not be able to declare a label in the kernel's reserved
@@ -53,14 +55,14 @@ func TestFlowPolicyRejectsReservedLabelNamespace(t *testing.T) {
 // process runs.
 func TestDriverManifestRejectsForgedProvenanceLabel(t *testing.T) {
 	forged := `{"capabilities":[{"operation":"put","labels":["` + capability.SyscallLabelPrefix + `internet.read"]}]}`
-	if err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).ValidateConfig(context.Background(), "core.scratch", json.RawMessage(forged), registry.Services{}); err == nil {
+	if err := registry.New(internet.Registration{}, scratch.Registration{}).ValidateConfig(context.Background(), "core.scratch", json.RawMessage(forged), registry.Services{}); err == nil {
 		t.Fatal("core.memory manifest declaring a reserved syscall: label was accepted; want rejection at manifest time")
 	}
 
 	// The identical grant with an honest label normalizes cleanly, proving the
 	// rejection above is specific to the reserved namespace, not a blanket refusal.
 	honest := `{"capabilities":[{"operation":"put","labels":["stored"]}]}`
-	if err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).ValidateConfig(context.Background(), "core.scratch", json.RawMessage(honest), registry.Services{}); err != nil {
+	if err := registry.New(internet.Registration{}, scratch.Registration{}).ValidateConfig(context.Background(), "core.scratch", json.RawMessage(honest), registry.Services{}); err != nil {
 		t.Fatalf("honest core.memory manifest rejected: %v", err)
 	}
 }

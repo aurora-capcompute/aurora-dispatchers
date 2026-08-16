@@ -1,4 +1,4 @@
-package registry
+package internet
 
 import (
 	"bytes"
@@ -13,17 +13,17 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-dispatchers/internet"
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
 var headerNamePattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$`)
 
-// InternetPermission is one entry of a core.internet grant's `capabilities`
+// Permission is one entry of a core.internet grant's `capabilities`
 // list: the methods (an HTTP method list, or ["*"] for any) permitted against a
 // domain (a host, or "*" for any), the request's data-flow policy, and whether
 // it needs human approval. The permissions together are the allowlist that
 // constrains every request the program can make through this grant.
-type InternetPermission struct {
+type Permission struct {
 	Methods         []string `json:"methods"`
 	Domain          string   `json:"domain"`
 	RequireApproval *bool    `json:"require_approval,omitempty"`
@@ -40,7 +40,7 @@ type InternetPermission struct {
 	// (never domain "*", never plain http off loopback), and the guest can
 	// neither supply nor read the value. Keyed by header name.
 	InjectHeaders map[string]HeaderInjection `json:"inject_headers,omitempty"`
-	FlowPolicy
+	registry.FlowPolicy
 }
 
 // HeaderInjection is one host-attached header value: drawn from a host-held
@@ -56,10 +56,10 @@ type HeaderInjection struct {
 // capabilities (the allowlist + per-request flow) and the response/request
 // bounds. The HTTP method is the ADT discriminator of the single net capability.
 type internetConfig struct {
-	Capabilities     []InternetPermission `json:"capabilities,omitempty"`
-	TimeoutMS        int64                `json:"timeout_ms,omitempty"`
-	MaxResponseBytes int64                `json:"max_response_bytes,omitempty"`
-	MaxRequestBytes  int64                `json:"max_request_bytes,omitempty"`
+	Capabilities     []Permission `json:"capabilities,omitempty"`
+	TimeoutMS        int64        `json:"timeout_ms,omitempty"`
+	MaxResponseBytes int64        `json:"max_response_bytes,omitempty"`
+	MaxRequestBytes  int64        `json:"max_request_bytes,omitempty"`
 	// AllowPrivateNetwork opts this grant out of the SSRF guard, permitting
 	// requests to loopback/private/link-local addresses. Off by default: a grant
 	// reaches internal services only when the manifest says so explicitly.
@@ -70,11 +70,11 @@ type internetConfig struct {
 // carries; `method` is the discriminator the allowlist and flow policy read.
 var internetRequestSchema = json.RawMessage(`{"type":"object","properties":{"method":{"type":"string"},"url":{"type":"string","format":"uri"},"headers":{"type":"object","additionalProperties":{"type":"string"}},"body":{"type":"string"}},"required":["method","url"],"additionalProperties":false}`)
 
-type InternetRegistration struct{}
+type Registration struct{}
 
-func (InternetRegistration) Matches(syscall string) bool { return syscall == internet.Capability }
+func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
-func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
 	config, policy, err := parseInternetConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
@@ -85,7 +85,7 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	if err != nil {
 		return capability.Family{}, err
 	}
-	client := internet.NewConfiguredClient(
+	client := NewConfiguredClient(
 		policy,
 		time.Duration(config.TimeoutMS)*time.Millisecond,
 		config.MaxResponseBytes,
@@ -94,8 +94,8 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	// SSRF guard on unless the grant explicitly opted into private networks.
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 	methods := internetMethodPolicies(config.Capabilities)
-	handler := internet.Handler{
-		Name:       internet.Capability,
+	handler := Handler{
+		Name:       Capability,
 		Client:     client,
 		Injections: injections,
 	}
@@ -111,7 +111,7 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 	for _, method := range granted {
 		policy := methods[method]
 		entries = append(entries, capability.Entry{
-			Key:             capability.Key{Syscall: internet.Capability, Operation: method},
+			Key:             capability.Key{Syscall: Capability, Operation: method},
 			Discriminator:   "method",
 			Description:     fmt.Sprintf("%s request", method),
 			Input:           internetRequestSchema,
@@ -129,92 +129,92 @@ func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, se
 // parseInternetConfig validates and canonicalizes a core.internet grant's
 // config and derives the request allowlist from its capabilities — the single
 // parse Normalize (which marshals it) and Configure (which builds from it) share.
-func parseInternetConfig(raw json.RawMessage) (internetConfig, internet.Policy, error) {
+func parseInternetConfig(raw json.RawMessage) (internetConfig, Policy, error) {
 	config := internetConfig{
-		TimeoutMS:        int64(internet.DefaultTimeout / time.Millisecond),
-		MaxResponseBytes: internet.DefaultMaxResponseBytes,
-		MaxRequestBytes:  internet.DefaultMaxRequestBytes,
+		TimeoutMS:        int64(DefaultTimeout / time.Millisecond),
+		MaxResponseBytes: DefaultMaxResponseBytes,
+		MaxRequestBytes:  DefaultMaxRequestBytes,
 	}
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&config); err != nil {
-			return internetConfig{}, internet.Policy{}, err
+			return internetConfig{}, Policy{}, err
 		}
 	}
 	if len(config.Capabilities) == 0 {
-		return internetConfig{}, internet.Policy{}, fmt.Errorf("capabilities must contain at least one {methods, domain}")
+		return internetConfig{}, Policy{}, fmt.Errorf("capabilities must contain at least one {methods, domain}")
 	}
 
-	var rules []internet.Rule
+	var rules []Rule
 	for i := range config.Capabilities {
 		permission := &config.Capabilities[i]
 		domain := strings.TrimSpace(permission.Domain)
 		if domain == "" {
-			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: domain is empty", i)
+			return internetConfig{}, Policy{}, fmt.Errorf("permission %d: domain is empty", i)
 		}
 		methods := canonicalMethods(permission.Methods)
 		if len(methods) == 0 {
-			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: methods must name at least one HTTP method", i)
+			return internetConfig{}, Policy{}, fmt.Errorf("permission %d: methods must name at least one HTTP method", i)
 		}
 		// Methods are enumerated, never wildcarded: the granted set is the index,
 		// and an unbounded one cannot be indexed, listed in a refusal, or given
 		// per-method flow policy.
-		if slices.Contains(methods, internet.AnyMethod) {
-			return internetConfig{}, internet.Policy{}, fmt.Errorf(
-				"permission %d: methods must be enumerated; %q is not allowed", i, internet.AnyMethod)
+		if slices.Contains(methods, AnyMethod) {
+			return internetConfig{}, Policy{}, fmt.Errorf(
+				"permission %d: methods must be enumerated; %q is not allowed", i, AnyMethod)
 		}
 		for _, method := range methods {
-			rule, err := internet.NewRule(method, domain)
+			rule, err := NewRule(method, domain)
 			if err != nil {
-				return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+				return internetConfig{}, Policy{}, fmt.Errorf("permission %d: %w", i, err)
 			}
 			rules = append(rules, rule)
 		}
 		flow, err := permission.FlowPolicy.Normalized()
 		if err != nil {
-			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+			return internetConfig{}, Policy{}, fmt.Errorf("permission %d: %w", i, err)
 		}
 		description, err := sanitizeDescription(permission.Description)
 		if err != nil {
-			return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+			return internetConfig{}, Policy{}, fmt.Errorf("permission %d: %w", i, err)
 		}
 		permission.Methods = methods
 		permission.Domain = domain
 		permission.Description = description
 		permission.FlowPolicy = flow
 		if len(permission.InjectHeaders) > 0 {
-			if err := validateInjection(domain, permission.InjectHeaders); err != nil {
-				return internetConfig{}, internet.Policy{}, fmt.Errorf("permission %d: %w", i, err)
+			if err := ValidateInjection(domain, permission.InjectHeaders); err != nil {
+				return internetConfig{}, Policy{}, fmt.Errorf("permission %d: %w", i, err)
 			}
 		}
 	}
 	if config.TimeoutMS <= 0 {
-		return internetConfig{}, internet.Policy{}, fmt.Errorf("timeout_ms must be positive")
+		return internetConfig{}, Policy{}, fmt.Errorf("timeout_ms must be positive")
 	}
 	if config.MaxResponseBytes <= 0 {
-		return internetConfig{}, internet.Policy{}, fmt.Errorf("max_response_bytes must be positive")
+		return internetConfig{}, Policy{}, fmt.Errorf("max_response_bytes must be positive")
 	}
 	if config.MaxRequestBytes <= 0 {
-		return internetConfig{}, internet.Policy{}, fmt.Errorf("max_request_bytes must be positive")
+		return internetConfig{}, Policy{}, fmt.Errorf("max_request_bytes must be positive")
 	}
-	return config, internet.NewPolicy(rules...), nil
+	return config, NewPolicy(rules...), nil
 }
 
-// validateInjection enforces the credential-safety rules on a permission's
+// ValidateInjection enforces the credential-safety rules on a permission's
 // injected headers: the origin must be a specific host (never "*") and https
 // (loopback may use http, where there is no wire to sniff), each header name
 // must be a valid, non-transport-controlled name, and each injection must name
 // exactly one source. Structural only — resolution happens in Configure.
-func validateInjection(domain string, headers map[string]HeaderInjection) error {
-	origin, err := internet.NewRule(internet.AnyMethod, domain)
+func ValidateInjection(domain string, headers map[string]HeaderInjection) error {
+	origin, err := NewRule(AnyMethod, domain)
 	if err != nil {
 		return err
 	}
 	if origin.AnyHost {
 		return fmt.Errorf(`inject_headers cannot be used with domain "*": a credential must be bound to a specific host`)
 	}
-	if origin.Scheme == "http" && !internet.LoopbackHost(origin.Host) {
+	if origin.Scheme == "http" && !LoopbackHost(origin.Host) {
 		return fmt.Errorf("a credential-injecting permission must use https (host %q is plain http)", origin.Host)
 	}
 	for name, injection := range headers {
@@ -238,22 +238,22 @@ func validateInjection(domain string, headers map[string]HeaderInjection) error 
 // Configure (activation), so a missing/unknown secret fails the driver build —
 // recorded there — rather than silently at request time. The resolved value is
 // never persisted (Normalize keeps only the reference).
-func buildInjections(permissions []InternetPermission, services Services) ([]internet.CredentialInjection, error) {
-	var out []internet.CredentialInjection
+func buildInjections(permissions []Permission, services registry.Services) ([]CredentialInjection, error) {
+	var out []CredentialInjection
 	for i := range permissions {
 		permission := permissions[i]
 		if len(permission.InjectHeaders) == 0 {
 			continue
 		}
-		origin, err := internet.NewRule(internet.AnyMethod, permission.Domain)
+		origin, err := NewRule(AnyMethod, permission.Domain)
 		if err != nil {
 			return nil, fmt.Errorf("permission %d: %w", i, err)
 		}
-		headers, labels, err := resolveInjectedHeaders(permission.InjectHeaders, services)
+		headers, labels, err := ResolveInjectedHeaders(permission.InjectHeaders, services)
 		if err != nil {
 			return nil, fmt.Errorf("permission %d: %w", i, err)
 		}
-		out = append(out, internet.CredentialInjection{
+		out = append(out, CredentialInjection{
 			Methods: permission.Methods,
 			Host:    strings.ToLower(origin.Host),
 			Headers: headers,
@@ -263,21 +263,21 @@ func buildInjections(permissions []InternetPermission, services Services) ([]int
 	return out, nil
 }
 
-// resolveInjectedHeaders resolves a set of header injections host-side into the
+// ResolveInjectedHeaders resolves a set of header injections host-side into the
 // concrete header values to attach and the audit labels naming each credential
 // (its keyed fingerprint, never its value). Shared by the internet and template
 // drivers so credential resolution has one implementation. A missing/unknown
 // referenced secret is a fail-closed error — the driver refuses to build.
-func resolveInjectedHeaders(inject map[string]HeaderInjection, services Services) (map[string]string, []string, error) {
+func ResolveInjectedHeaders(inject map[string]HeaderInjection, services registry.Services) (map[string]string, []string, error) {
 	headers := make(map[string]string, len(inject))
 	var labels []string
 	for name, injection := range inject {
 		canonical := http.CanonicalHeaderKey(strings.TrimSpace(name))
-		var secret Secret
+		var secret registry.Secret
 		if ref := strings.TrimSpace(injection.Secret); ref != "" {
-			secret = SecretRef(ref)
+			secret = registry.SecretRef(ref)
 		} else {
-			secret = LiteralSecret(injection.Value)
+			secret = registry.LiteralSecret(injection.Value)
 		}
 		value, err := secret.Resolve(services.Secrets)
 		if err != nil {
@@ -288,7 +288,7 @@ func resolveInjectedHeaders(inject map[string]HeaderInjection, services Services
 		if credName == "" {
 			credName = "inline"
 		}
-		labels = append(labels, "credential:"+credName+"@"+CredentialFingerprint(services.AuditKey, value))
+		labels = append(labels, "credential:"+credName+"@"+registry.CredentialFingerprint(services.AuditKey, value))
 	}
 	return headers, labels, nil
 }
@@ -296,19 +296,19 @@ func resolveInjectedHeaders(inject map[string]HeaderInjection, services Services
 // internetMethodPolicies aggregates the grant's per-permission flow and approval
 // into a per-method policy the handler reads by the request's method ("*" is the
 // wildcard bucket, merged with the specific method at dispatch).
-func internetMethodPolicies(permissions []InternetPermission) map[string]internet.MethodPolicy {
-	methods := make(map[string]internet.MethodPolicy)
+func internetMethodPolicies(permissions []Permission) map[string]MethodPolicy {
+	methods := make(map[string]MethodPolicy)
 	for _, permission := range permissions {
 		approval := permission.RequireApproval != nil && *permission.RequireApproval
 		for _, method := range permission.Methods {
 			existing := methods[method]
-			methods[method] = internet.MethodPolicy{
+			methods[method] = MethodPolicy{
 				RequireApproval: existing.RequireApproval || approval,
-				Labels:          unionLabels(existing.Labels, permission.Labels),
+				Labels:          registry.UnionLabels(existing.Labels, permission.Labels),
 				// Every internet request is egress — the URL, query, headers, and
 				// body all leave the host — so floor the reserved secret class into
 				// the sink guard regardless of the method or the manifest's taints.
-				Taints: WithEgressFloor(unionLabels(existing.Taints, permission.Taints)),
+				Taints: registry.WithEgressFloor(registry.UnionLabels(existing.Taints, permission.Taints)),
 			}
 		}
 	}
@@ -369,7 +369,7 @@ func sanitizeDescription(raw string) (string, error) {
 // model's tool doc — from each permitted origin: its methods, its domain, the
 // author's usage note when supplied, and, for a credential-injecting origin, an
 // automatic note that the header is attached host-side.
-func internetDescription(permissions []InternetPermission) string {
+func internetDescription(permissions []Permission) string {
 	var b strings.Builder
 	b.WriteString("Make an HTTP request (any method the grant allows) and read the bounded response. Allowed origins:")
 	for _, permission := range permissions {

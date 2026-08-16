@@ -63,9 +63,9 @@ and replaying around it.
 | --- | --- | --- | --- |
 | `core.internet` | `internet/` | Bounded HTTP client, any method | Allowlist of `METHOD:origin`; **SSRF guard** blocks loopback/private/metadata IPs (post‑DNS, defeats rebinding); size + time bounds; policy re‑checked on every redirect |
 | `core.filesystem` | `filesystem/` | **Read‑only** host‑file reads | Chrooted to declared `roots`; rejects symlink escapes; whole‑file or 1‑based line range; byte/line caps; optional extension allowlist; returns a SHA‑256 hash |
-| `core.scratch` | `registry/scratch.go` | Process‑local *ephemeral* store | `get`/`put`/`list`/`search` on a single **unscoped** fresh, private store per process — cleared when it ends (a place to offload a large read out of the model's context); optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
+| `core.scratch` | `scratch/` | Process‑local *ephemeral* store | `get`/`put`/`list`/`search` on a single **unscoped** fresh, private store per process — cleared when it ends (a place to offload a large read out of the model's context); optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
 | `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
-| `core.httpTemplate` | `registry/httptemplate.go` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
+| `core.httpTemplate` | `httptemplate/` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
 | `core.command` | `command/` | Host commands from an author‑declared allowlist | One operation per allowlisted command; no shell (exec with a fixed argv); every slot is a closed set or an anchored pattern; no value may begin with `-` or carry a control character; the child inherits no environment; approval on by default |
 
 Two shared mechanisms make grants expressive and safe:
@@ -87,50 +87,46 @@ git clone https://github.com/aurora-capcompute/aurora-dispatchers
 cd aurora-dispatchers
 
 go build ./...
-go test ./...          # builtin, filesystem, internet, memory, openaillm, registry
+go test ./...          # every driver, plus registry
 go vet ./...
 ```
 
 The tests double as worked examples — read `registry/build_test.go`,
-`openaillm/registration_test.go`, `internet/internet_test.go`, and
-`memory/memory_test.go`.
+`openaillm/registration_test.go`, `internet/registration_test.go`, and
+`command/registration_test.go`.
 
-## Example: assembling a dispatcher
+## Example: assembling a table
 
-You pick which registrations to include, then `Build` a dispatcher from a tenant's
-grants. `registry.Default()` is the credential‑free set (internet + memory);
-credentialed drivers like the LLM are added explicitly.
+You pick which registrations to include, then `Build` the grant table for one
+process. Nothing registers itself — there is no global `init()`.
 
 ```go
-// Credential-free built-ins, or add the LLM driver explicitly:
 reg := registry.New(
-    registry.InternetRegistration{},
-    registry.MemoryRegistration{},
-    openaillm.Registration{},   // carries credentials, so it's opt-in
+    internet.Registration{},
+    filesystem.Registration{},
+    scratch.Registration{},
+    command.Registration{},
+    httptemplate.Registration{},
+    openaillm.Registration{},  // carries credentials, so include it deliberately
 )
 
 services := registry.Services{
-    Tenant:      "acme",
-    MemoryStore: memory.NewMapStore(), // swap for a durable Store in production
-    Secrets:     mySecretResolver,     // resolves {"secret":"OPENAI_KEY"} host-side
+    Secrets:  mySecretResolver, // resolves {"secret":"OPENAI_KEY"} host-side
+    AuditKey: auditKey,         // keys the credential fingerprints on results
 }
 
-cfg, err := reg.Build(ctx, []registry.Entry{
+table, err := reg.Build(ctx, []registry.Entry{
     {Syscall: "core.internet",
      Config: json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"example.com"}]}`)},
-    {Syscall: "core.memory",
-     Config: json.RawMessage(`{"capabilities":[{"scope":"session","operations":["get","put"],"require_approval":true}]}`)},
+    {Syscall: "core.scratch",
+     Config: json.RawMessage(`{"capabilities":[{"operation":"get"},{"operation":"put"}]}`)},
     {Syscall: "core.openaiApi", Hidden: true,
      Config: json.RawMessage(`{"api_key":{"secret":"OPENAI_KEY"},"default_model":"gpt-4o","capabilities":[{"operation":"chat"}]}`)},
 }, services)
-
-dispatcher := builtin.New[MyKernelState](cfg) // a sys.Dispatcher the runtime can drive
 ```
 
-**Registration is explicit, not magic** — there's no global `init()` auto‑register.
-You construct the `Registry` with exactly the drivers you want, and each is matched
-to a syscall by name. Note `FilesystemRegistration`, `ScratchRegistration`, and
-`HTTPTemplateRegistration` exist but are **not** in `Default()` — add them yourself.
+The table is the grant: the runtime routes with `capability.NewDispatcher(table)`
+and its reference monitor judges every call against the same index.
 
 ## Configuration
 
@@ -164,13 +160,15 @@ plus an injected `registry.Services`. Highlights per driver:
 ## Project layout
 
 ```
-builtin/     the leaf Dispatcher (routes syscall name → handler) + HTTP handlers
-internet/    core.internet: bounded, allowlisted HTTP client + SSRF guard
-filesystem/  core.filesystem: read-only, chrooted file reads
-memory/      core.memory: tenant KV store (MapStore is the in-memory reference impl)
-openaillm/   core.openaiApi: the LLM driver (client / handler / settings / registration)
-registry/    the Registration interface + Registry.Build, per-syscall registrations,
-             ADT/schema helpers (adt.go) and secret resolution (secret.go)
+internet/      core.internet: bounded, allowlisted HTTP client + SSRF guard
+filesystem/    core.filesystem: read-only, chrooted file reads
+command/       core.command: host commands from an allowlist, one operation each
+httptemplate/  core.httpTemplate: manifest-fixed requests the agent only fills in
+scratch/       core.scratch: process-local ephemeral KV
+memory/        the KV engine scratch is built on (MapStore is the reference impl)
+openaillm/     core.openaiApi: the LLM driver (client / handler / settings)
+registry/      the Registration interface + Registry.Build, the grant vocabulary
+               (adt.go) and secret resolution (secret.go) — depends on no driver
 ```
 
 ## Dependencies

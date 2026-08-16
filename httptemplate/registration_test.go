@@ -1,4 +1,4 @@
-package registry_test
+package httptemplate_test
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 )
 
 func TestTemplateMatches(t *testing.T) {
-	reg := registry.HTTPTemplateRegistration{}
+	reg := httptemplate.Registration{}
 	if !reg.Matches("core.httpTemplate") {
 		t.Fatal("should match core.httpTemplate")
 	}
@@ -36,7 +36,7 @@ func TestTemplateNormalizeRejectsBadConfigs(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := registryValidate(registry.HTTPTemplateRegistration{}, "core.httpTemplate", json.RawMessage(raw)); err == nil {
+			if _, err := registryValidate(httptemplate.Registration{}, "core.httpTemplate", json.RawMessage(raw)); err == nil {
 				t.Fatalf("Normalize accepted an invalid config (%s)", name)
 			}
 		})
@@ -48,7 +48,7 @@ func TestTemplateNormalizeRejectsBadConfigs(t *testing.T) {
 func TestTemplateNormalizeAcceptsValid(t *testing.T) {
 	for _, base := range []string{"https://onyx.example.com", "http://127.0.0.1:8080"} {
 		raw := `{"base_url":"` + base + `","capabilities":[{"operation":"search","method":"POST","path":"/s","body":{"m":"{{q}}"},"params":{"q":{"type":"string","required":true}}}]}`
-		if _, err := registryValidate(registry.HTTPTemplateRegistration{}, "core.httpTemplate", json.RawMessage(raw)); err != nil {
+		if _, err := registryValidate(httptemplate.Registration{}, "core.httpTemplate", json.RawMessage(raw)); err != nil {
 			t.Fatalf("Normalize rejected a valid grant on %q: %v", base, err)
 		}
 	}
@@ -66,7 +66,7 @@ func templateConfigJSON() string {
 func TestTemplateConfigurePublishesCapability(t *testing.T) {
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
 	config := capability.NewTable()
-	contribution, err := (registry.HTTPTemplateRegistration{}).Configure(
+	contribution, err := (httptemplate.Registration{}).Configure(
 		context.Background(), json.RawMessage(templateConfigJSON()), services)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
@@ -78,7 +78,7 @@ func TestTemplateConfigurePublishesCapability(t *testing.T) {
 		t.Fatalf("capabilities = %+v, want one named core.httpTemplate", config.Descriptors())
 	}
 	schema := string(config.Descriptors()[0].InputSchema)
-	assertMenuIsTheGrant(t, config, "core.httpTemplate")
+	assertMenuOffers(t, config, "core.httpTemplate")
 	if !strings.Contains(schema, `"query"`) {
 		t.Fatalf("schema does not carry the operation's own parameters: %s", schema)
 	}
@@ -108,7 +108,7 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 		`]}`
 	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc", "WEATHER_KEY": "wk-xyz"}}
 	config := capability.NewTable()
-	contribution, err := (registry.HTTPTemplateRegistration{}).Configure(
+	contribution, err := (httptemplate.Registration{}).Configure(
 		context.Background(), json.RawMessage(raw), services)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
@@ -139,18 +139,18 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 // A referenced secret the resolver cannot supply fails the driver build — at
 // activation — never at request time.
 func TestTemplateConfigureFailsClosedOnMissingSecret(t *testing.T) {
-	if _, err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), registry.Services{}); err == nil {
+	if _, err := (httptemplate.Registration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), registry.Services{}); err == nil {
 		t.Fatal("Configure built a handler referencing a secret with no resolver")
 	}
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
-	if _, err := (registry.HTTPTemplateRegistration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services); err == nil {
+	if _, err := (httptemplate.Registration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services); err == nil {
 		t.Fatal("Configure built a handler referencing an unknown secret")
 	}
 }
 
 // Normalize persists only the credential reference, never a resolved value.
 func TestTemplateNormalizeKeepsSecretReference(t *testing.T) {
-	normalized, err := registryValidate(registry.HTTPTemplateRegistration{}, "core.httpTemplate", json.RawMessage(templateConfigJSON()))
+	normalized, err := registryValidate(httptemplate.Registration{}, "core.httpTemplate", json.RawMessage(templateConfigJSON()))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}

@@ -1,4 +1,4 @@
-package registry_test
+package command_test
 
 import (
 	"context"
@@ -35,7 +35,7 @@ const kubectlGrant = `{"capabilities":[{
 func configure(t *testing.T, grant string) *capability.Table {
 	t.Helper()
 	out := capability.NewTable()
-	contribution, err := (registry.CommandRegistration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{})
+	contribution, err := (command.Registration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{})
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCommandConfigErrors(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			err := registry.New(registry.CommandRegistration{}).ValidateConfig(
+			err := registry.New(command.Registration{}).ValidateConfig(
 				context.Background(), command.Capability, json.RawMessage(test.grant), registry.Services{})
 			if err == nil {
 				t.Fatalf("expected a refusal naming %q", test.want)
@@ -168,7 +168,7 @@ func TestCommandConfigErrors(t *testing.T) {
 func TestEnvSecretFailsClosed(t *testing.T) {
 	grant := `{"capabilities":[{
 	  "operation":"a","path":"/bin/echo","env":{"TOKEN":{"secret":"absent"}}}]}`
-	if _, err := (registry.CommandRegistration{}).Configure(
+	if _, err := (command.Registration{}).Configure(
 		context.Background(), json.RawMessage(grant), registry.Services{}); err == nil {
 		t.Fatal("a grant referencing an unknown secret must fail to build")
 	}

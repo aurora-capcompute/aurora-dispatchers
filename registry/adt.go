@@ -9,10 +9,10 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 )
 
-// unionLabels concatenates two already-normalized label sets, dropping
+// UnionLabels concatenates two already-normalized label sets, dropping
 // duplicates. Order is not significant for flow decisions or result labels
 // (WithLabels re-sorts).
-func unionLabels(a, b []string) []string {
+func UnionLabels(a, b []string) []string {
 	if len(a) == 0 {
 		return b
 	}
@@ -45,10 +45,10 @@ var EgressForbidFloor = []string{"secret"}
 // WithEgressFloor unions the egress forbid floor onto an operation's declared
 // sink taints. Applied at every network-egress driver's build so a sink is never
 // a fully open channel for the reserved secret class. Returns a fresh slice: for
-// an op with no declared taints, unionLabels would otherwise return the shared
+// an op with no declared taints, UnionLabels would otherwise return the shared
 // EgressForbidFloor backing array, so every such sink would alias one slice.
 func WithEgressFloor(taints []string) []string {
-	return append([]string(nil), unionLabels(taints, EgressForbidFloor)...)
+	return append([]string(nil), UnionLabels(taints, EgressForbidFloor)...)
 }
 
 // FlowPolicy is the per-operation data-flow declaration carried on a leaf grant's
@@ -102,9 +102,9 @@ func DecodeOperationGrants(raw json.RawMessage) ([]OperationGrant, error) {
 	return grants, nil
 }
 
-// sortOperationGrants orders a grant list by operation so Normalize emits a
+// SortOperationGrants orders a grant list by operation so Normalize emits a
 // canonical form — a config that differs only in operation order hashes the same.
-func sortOperationGrants(grants []OperationGrant) {
+func SortOperationGrants(grants []OperationGrant) {
 	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
 }
 
