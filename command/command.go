@@ -100,6 +100,13 @@ func (p Param) validate(name, value string) error {
 	if strings.HasPrefix(value, "-") {
 		return fmt.Errorf("parameter %q may not begin with %q: it would be read as a flag, not a value", name, "-")
 	}
+	// An empty value is an empty argv element, which a template embeds as
+	// "--namespace=" — a narrowing flag that has silently become no restriction
+	// at all. No operand needs one, and a pattern written with * admits it
+	// without its author noticing.
+	if value == "" {
+		return fmt.Errorf("parameter %q is empty: it would leave its argument with no value", name)
+	}
 	// No control characters. A value spanning lines corrupts the one thing a
 	// human approving this call reads — the summary — and the audit record with
 	// it, and no operand of a command-line tool needs one. Rejecting them here

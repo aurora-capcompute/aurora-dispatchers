@@ -339,3 +339,24 @@ func TestRelativeExecutableIsRefusedAtRunTime(t *testing.T) {
 // approval in builtin's dispatcher, flow policy in the runtime's monitor. They
 // are tested where they are enforced — builtin/dispatcher_test.go and
 // monitor/provenance_test.go — so this package tests only the effect.
+
+// An empty value is refused for the same reason a leading dash is: it changes
+// what the argument means. "--namespace={ns}" with an empty ns is
+// "--namespace=", which scopes to nothing — or, depending on the tool, to
+// everything. A pattern written with * admits "" without its author noticing,
+// so the rule lives here rather than in each author's regular expression.
+func TestEmptyParameterIsRefused(t *testing.T) {
+	h := Handler{Name: Capability, Commands: []Command{{
+		Name: "list", Path: "/bin/echo", Args: []string{"--namespace={ns}"},
+		Params: map[string]Param{"ns": {Pattern: regexp.MustCompile(`\A(?:[a-z0-9-]*)\z`), Source: "[a-z0-9-]*"}},
+	}}}
+	args, _ := json.Marshal(Request{Operation: "list", Params: map[string]string{"ns": ""}})
+	result, err := h.DispatchCall(context.Background(), sys.Syscall{Name: Capability, Args: args}, sys.Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("got %v/%v, want failed/invalid_args — an empty value reached the argument",
+			result.Status(), result.Errno())
+	}
+}
