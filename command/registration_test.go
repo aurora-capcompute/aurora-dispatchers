@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aurora-capcompute/capcompute/sys"
+
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/command"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
@@ -76,7 +78,7 @@ func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 	grant := `{"capabilities":[
 	  {"operation":"read-eu","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-eu"]}},
 	  {"operation":"read-us","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-us"]}}
-	]}]}`
+	]}`
 	first := string(configure(t, grant).Descriptors()[0].InputSchema)
 	if !strings.Contains(first, `"prod-eu"`) || !strings.Contains(first, `"prod-us"`) {
 		t.Fatalf("both commands' constraints must survive:\n%s", first)
@@ -143,7 +145,7 @@ func TestCommandConfigErrors(t *testing.T) {
 		{"undeclared placeholder", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"]}]}`, "undeclared parameter"},
 		{"unused parameter", `{"capabilities":[{"operation":"a","path":"/bin/echo","params":{"ctx":["x"]}}]}`, "never referenced"},
 		{"flag in permitted value", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":["-o"]}}]}`, "flag"},
-		{"empty permitted value", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":[""]}}]}`, "empty"},
+		{"pattern admitting empty", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":"[a-z]*"}}]}`, "admits the empty string"},
 		{"bad pattern", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":"("}}]}`, "pattern"},
 		{"duplicate operation", `{"capabilities":[{"operation":"a","path":"/bin/echo"},{"operation":"a","path":"/bin/echo"}]}`, "more than once"},
 		{"bad operation name", `{"capabilities":[{"operation":"Bad Name","path":"/bin/echo"}]}`, "lowercase identifier"},
@@ -171,5 +173,33 @@ func TestEnvSecretFailsClosed(t *testing.T) {
 	if _, err := (command.Registration{}).Configure(
 		context.Background(), json.RawMessage(grant), registry.Services{}); err == nil {
 		t.Fatal("a grant referencing an unknown secret must fail to build")
+	}
+}
+
+// An empty argument is reachable only when its author enumerated it. A pattern
+// that happens to match "" is refused where it is written, so the two ways of
+// declaring a slot cannot disagree about whether nothing is a permitted value.
+func TestEmptyArgumentMustBeEnumerated(t *testing.T) {
+	grant := `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["--ns={ns}"],"params":{"ns":["","prod"]}}]}`
+	table := capability.NewTable()
+	family, err := (command.Registration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{})
+	if err != nil {
+		t.Fatalf("an enumerated empty value must be accepted: %v", err)
+	}
+	if err := table.Add(family); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	handler := table.Entries()[0].Handler.(command.Handler)
+	args, _ := json.Marshal(command.Request{Operation: "a", Params: map[string]string{"ns": ""}})
+	result, err := handler.DispatchCall(context.Background(),
+		sys.Syscall{Name: command.Capability, Args: args}, sys.Authorization{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status() != sys.StatusResult {
+		t.Fatalf("an enumerated empty value was refused at dispatch: %v", result.Message())
+	}
+	if !strings.Contains(string(result.Result()), `--ns=`) {
+		t.Fatalf("the empty value did not reach the argument: %s", result.Result())
 	}
 }

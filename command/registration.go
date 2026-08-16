@@ -194,9 +194,6 @@ func (p CommandParam) compile(name string) (Param, error) {
 		values := make([]string, 0, len(p.oneOf))
 		seen := make(map[string]struct{}, len(p.oneOf))
 		for _, value := range p.oneOf {
-			if value == "" {
-				return Param{}, fmt.Errorf("parameter %q: a permitted value is empty", name)
-			}
 			if strings.HasPrefix(value, "-") {
 				return Param{}, fmt.Errorf("parameter %q: permitted value %q begins with %q and would be read as a flag", name, value, "-")
 			}
@@ -215,6 +212,12 @@ func (p CommandParam) compile(name string) (Param, error) {
 	compiled, err := regexp.Compile(`\A(?:` + p.pattern + `)\z`)
 	if err != nil {
 		return Param{}, fmt.Errorf("parameter %q pattern: %w", name, err)
+	}
+	// An empty argument is only ever had on purpose, by enumerating "". A pattern
+	// that admits it does so by accident — [a-z0-9-]* reads as "a name" and also
+	// matches nothing, turning "--namespace={ns}" into "--namespace=".
+	if compiled.MatchString("") {
+		return Param{}, fmt.Errorf("parameter %q pattern %s admits the empty string; enumerate \"\" if an empty argument is intended", name, p.pattern)
 	}
 	return Param{Pattern: compiled, Source: p.pattern}, nil
 }
