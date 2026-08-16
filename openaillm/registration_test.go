@@ -3,6 +3,7 @@ package openaillm
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -102,5 +103,37 @@ func TestConfigureFailsClosedOnMissingAPIKeySecret(t *testing.T) {
 	services := registry.Services{Secrets: mapResolver{"OTHER": "x"}}
 	if _, err := (Registration{}).Configure(context.Background(), raw, services); err == nil {
 		t.Fatal("Configure built a client referencing an unknown api_key secret")
+	}
+}
+
+// What this driver owes the flow monitor is the declaration, not the
+// enforcement: each operation's own source classes, and the reserved egress
+// floor on its sink guard because a provider call sends the prompt off-host.
+// Before this moved onto the entries, openai's sink guard ran inside the handler
+// — below the replay tape, so a taint denial was journaled as a completion and
+// replayed forever instead of re-deriving from the run's current taint.
+func TestConfigurePublishesFlowPolicyPerOperation(t *testing.T) {
+	raw := json.RawMessage(`{"base_url":"https://api.example.com","api_key":"k",` +
+		`"capabilities":[{"operation":"chat","labels":["ai_output"],"taints":["untrusted_web"]}]}`)
+	family, err := Registration{}.Configure(context.Background(), raw, registry.Services{})
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	table := capability.NewTable()
+	if err := table.Add(family); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	entries := table.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want one per granted operation", entries)
+	}
+	if !slices.Contains(entries[0].Labels, "ai_output") {
+		t.Fatalf("labels = %v, want the operation's declared source class", entries[0].Labels)
+	}
+	for _, want := range []string{"untrusted_web", "secret"} {
+		if !slices.Contains(entries[0].Forbid, want) {
+			t.Fatalf("SECURITY: forbid = %v, want %q (declared taint plus the egress floor)",
+				entries[0].Forbid, want)
+		}
 	}
 }

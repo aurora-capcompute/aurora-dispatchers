@@ -7,20 +7,15 @@ import (
 	"fmt"
 	"strings"
 
-	flow "github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
-
-var _ flow.Handler = (*Handler)(nil)
 
 type capabilityConfig struct {
 	defaultModel    string
 	modelPolicy     modelPolicy
 	maxRequestBytes int
 	requireApproval bool
-	labels          []string // source classes results carry
-	taints          []string // labels barred from flowing in (sink guard)
 }
 
 type connectionSettings struct {
@@ -62,10 +57,6 @@ func (h *Handler) AddOperation(operation string, settings normalizedSettings, gr
 		modelPolicy:     newModelPolicy(settings.AllowedModels),
 		maxRequestBytes: settings.MaxRequestBytes,
 		requireApproval: requireApproval,
-		labels:          grant.Labels,
-		// A provider call sends the prompt/messages off-host — egress — so floor
-		// the reserved secret class into the sink guard on top of any declared taints.
-		taints: registry.WithEgressFloor(grant.Taints),
 	}
 }
 
@@ -83,13 +74,6 @@ func (h *Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.A
 	if len(call.Args) > capability.maxRequestBytes {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("request exceeds %d bytes", capability.maxRequestBytes)), nil
 	}
-	// Sink guard: refuse before the provider call if the run has observed a
-	// label this operation forbids.
-	if blocked := flow.BlockedBy(flow.Taint(ctx), capability.taints); len(blocked) > 0 {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"flow policy: this run has observed %v, which may not flow into openai %q", blocked, operation)), nil
-	}
-
 	var result sys.SyscallResult
 	switch operation {
 	case "chat":
@@ -106,7 +90,7 @@ func (h *Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.A
 	if err != nil || result.Status() != sys.StatusResult {
 		return result, err
 	}
-	return result.WithLabels(capability.labels...), nil
+	return result, nil
 }
 
 // peekOperation reads the ADT discriminator from an openai call's args.
@@ -145,7 +129,7 @@ func (h *Handler) dispatchModelRequest(
 		return sys.SyscallResult{}, err
 	}
 	response, err := invoke(ctx, body)
-	return providerResult(ctx, response, capability.labels, err)
+	return providerResult(ctx, response, err)
 }
 
 func (h *Handler) dispatchModels(ctx context.Context, capability capabilityConfig, auth sys.Authorization) (sys.SyscallResult, error) {
@@ -153,7 +137,7 @@ func (h *Handler) dispatchModels(ctx context.Context, capability capabilityConfi
 		return *outcome, nil
 	}
 	response, err := h.client.Models(ctx)
-	return providerResult(ctx, response, capability.labels, err)
+	return providerResult(ctx, response, err)
 }
 
 func preparePayload(
@@ -214,21 +198,20 @@ func approval(auth sys.Authorization, capability capabilityConfig, summary strin
 }
 
 // providerResult classifies the outcome of a provider call the driver actually
-// made. A failure here still contacted a labeled source, so it carries the
-// operation's labels — otherwise a failed call's error text would be an
-// untainted channel a forbidding sink accepts (the error-channel launder the
-// internet/template egress drivers already close). The context-cancellation
-// branch stays label-free: no journaled outcome is produced. The success body
-// is labeled by DispatchCall's tail.
-func providerResult(ctx context.Context, response json.RawMessage, labels []string, err error) (sys.SyscallResult, error) {
+// made. Nothing here labels: the monitor's stamp sits above this driver and
+// labels every outcome it returns, failures included — which is what keeps a
+// failed call's error text from being an untainted channel a forbidding sink
+// would accept. The context-cancellation branch returns an error rather than a
+// result, so no journaled outcome is produced and nothing is stamped.
+func providerResult(ctx context.Context, response json.RawMessage, err error) (sys.SyscallResult, error) {
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(labels...), nil
+		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
 	}
 	if !json.Valid(response) {
-		return sys.FailCode(sys.ErrnoTransient, "provider returned invalid JSON").WithLabels(labels...), nil
+		return sys.FailCode(sys.ErrnoTransient, "provider returned invalid JSON"), nil
 	}
 	return sys.Result(response), nil
 }

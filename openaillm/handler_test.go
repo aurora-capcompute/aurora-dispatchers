@@ -100,14 +100,12 @@ func TestProviderErrorCarriesOperationLabels(t *testing.T) {
 	if outcome.Status() != sys.StatusFailed || outcome.Errno() != sys.ErrnoTransient {
 		t.Fatalf("outcome = %s/%v, want failed/transient", outcome.Status(), outcome.Errno())
 	}
-	found := false
-	for _, l := range outcome.Labels() {
-		if l == "ai_output" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("failed provider result labels %v lack the operation's source label", outcome.Labels())
+	// The handler no longer labels anything: a failed provider call still
+	// contacted a labeled source, and the monitor's stamp above this driver is
+	// what marks it (monitor.TestStampLabelsFailuresToo). What this driver owes
+	// is the declaration — see TestConfigurePublishesFlowPolicyPerOperation.
+	if len(outcome.Labels()) != 0 {
+		t.Fatalf("handler labelled %v; labelling belongs to the monitor above it", outcome.Labels())
 	}
 }
 

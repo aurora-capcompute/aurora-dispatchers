@@ -114,7 +114,13 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			Key:         capability.Key{Syscall: SyscallType, Operation: grant.Operation},
 			Description: openaiOperations[grant.Operation].description,
 			Input:       branch,
-			Handler:     handler,
+			Labels:      grant.Labels,
+			// A provider call sends the prompt off-host — egress — so floor the
+			// reserved secret class into the sink guard on top of any declared
+			// taints. Enforcement is the runtime monitor's, above the journal;
+			// declaring it here is the whole of this driver's part.
+			Forbid:  registry.WithEgressFloor(grant.Taints),
+			Handler: handler,
 		})
 		branches = append(branches, branch)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
