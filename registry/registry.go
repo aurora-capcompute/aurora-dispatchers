@@ -48,20 +48,18 @@ func New(registrations ...Registration) *Registry {
 // resolves host-held secrets and assembles clients, but performs no I/O and
 // depends on no process credential.
 func (r *Registry) ValidateConfig(ctx context.Context, syscall string, config json.RawMessage, services Services) error {
-	for _, registration := range r.registrations {
-		if registration.Matches(syscall) {
-			_, err := registration.Configure(ctx, config, services)
-			return err
-		}
+	selected := r.selectFor(syscall)
+	if selected == nil {
+		return fmt.Errorf("unsupported syscall %q", syscall)
 	}
-	return fmt.Errorf("unsupported tool type")
+	_, err := selected.Configure(ctx, config, services)
+	return err
 }
 
 // Entry is one leaf grant to build. Syscall selects the registration; Config is
 // the grant's driver configuration — the `capabilities` list and any family-wide
 // knobs — opaque to the runtime and interpreted by the driver. Hidden keeps the
-// published capability dispatchable but off the program's discoverable menu (the
-// LLM driver publishes under a hidden entry, for instance).
+// published capability dispatchable but off the program's discoverable menu.
 type Entry struct {
 	Syscall string
 	Config  json.RawMessage
