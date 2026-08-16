@@ -1,10 +1,6 @@
 // Package registry assembles built-in capability drivers: it selects a
-// registration by the granted syscall and lets it publish that driver's handler
-// and one capability into a capability.Config. The capability is named for the
-// syscall (core.internet, core.memory, core.openaiApi): a leaf grant is an ADT
-// family whose operations are cases of one capability, discriminated inside the
-// call args — never separate names. The grant's data-flow policy (labels/taints)
-// rides on each operation and is enforced by the driver itself, per call.
+// registration by the granted syscall and folds what that registration
+// publishes into one capability.Table.
 package registry
 
 import (
@@ -46,19 +42,11 @@ func New(registrations ...Registration) *Registry {
 	return &Registry{registrations: append([]Registration(nil), registrations...)}
 }
 
-// ValidateConfig checks one leaf grant's config by building what it would build
-// and throwing it away.
-//
-// There is deliberately no separate parse for this. A registration used to carry
-// a Normalize half that parsed the config, re-marshalled it, and handed back a
-// canonical form nobody read — the manifest stored it and Configure parsed it
-// again with the same parser. What that round trip actually bought was the
-// refusal, so the refusal is all that is left: the door check and the spawn-time
-// build are now literally the same code, and cannot drift into disagreeing about
-// what a valid config is.
-//
-// Building is safe to do twice: a Configure resolves host-held secrets and
-// assembles clients, but performs no I/O and depends on no process credential.
+// ValidateConfig checks one leaf grant's config by building what the spawn would
+// build and throwing it away, so the door check and the build cannot disagree
+// about what a valid config is. Building is safe to do twice: a Configure
+// resolves host-held secrets and assembles clients, but performs no I/O and
+// depends on no process credential.
 func (r *Registry) ValidateConfig(ctx context.Context, syscall string, config json.RawMessage, services Services) error {
 	for _, registration := range r.registrations {
 		if registration.Matches(syscall) {

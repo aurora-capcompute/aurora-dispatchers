@@ -15,18 +15,11 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/command"
 )
 
-// CommandOperationGrant is one case of a core.command grant's `capabilities`
-// ADT, discriminated by `operation`. run is the only operation: execute one of
-// the commands this grant allowlists.
 type CommandOperationGrant struct {
 	Operation string        `json:"operation"`
 	Commands  []CommandRule `json:"commands"`
 }
 
-// CommandRule is one allowlisted command. Everything that decides *what runs* is
-// here, in host-authored config: the executable, its arguments, its working
-// directory, and its entire environment. The guest supplies only values for the
-// slots `params` declares.
 type CommandRule struct {
 	// Name is what a guest calls this command by.
 	Name string `json:"name"`
@@ -63,12 +56,6 @@ type CommandParam struct {
 	oneOf   []string
 	pattern string
 }
-
-// CommandOneOf declares a slot admitting exactly the given values.
-func CommandOneOf(values ...string) CommandParam { return CommandParam{oneOf: values} }
-
-// CommandPattern declares a slot admitting values matching a regular expression.
-func CommandPattern(expr string) CommandParam { return CommandParam{pattern: expr} }
 
 func (p *CommandParam) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)

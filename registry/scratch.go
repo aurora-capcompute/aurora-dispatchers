@@ -23,16 +23,14 @@ const scratchTenant = "scratch"
 
 // scratchConfig is a core.scratch grant's driver configuration: the operations it
 // grants, each an ADT case discriminated by `operation`, with its data-flow
-// policy. Unlike core.memory there is no scope selector — scratch is a single,
-// process-private, unscoped store — so it keeps the plain operation-list shape.
+// policy.
 type scratchConfig struct {
 	Capabilities json.RawMessage `json:"capabilities,omitempty"`
 }
 
-// ScratchRegistration provides core.scratch: a process-local, ephemeral KV with
-// the same get/put/list/search operations (and ADT shape) as core.memory, but
-// backed by a fresh in-memory store built per process and discarded when the
-// process ends. It is the right home for large transient content — a fetched
+// ScratchRegistration provides core.scratch: a process-local, ephemeral KV
+// (get/put/list/search) backed by a fresh in-memory store built per process and
+// discarded when the process ends. It is the right home for large transient content — a fetched
 // page offloaded out of the model's context: private to the process, never
 // written to the durable tenant store, and gone when the run is over. The store
 // lives for one activation; a process that parks and reactivates starts with an
@@ -90,8 +88,6 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 			Taints:          taints,
 		},
 	}
-	// Scratch is one anonymous mount, so a case is the operation with an empty
-	// selector — the same shape core.memory uses, with nothing to disambiguate.
 	entries := make([]capability.Entry, 0, len(grants))
 	for i, grant := range grants {
 		entries = append(entries, capability.Entry{
@@ -112,10 +108,9 @@ func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ S
 }
 
 // parseScratchConfig validates and canonicalizes a core.scratch grant — the
-// single parse Normalize and Configure share. It rejects unknown fields, requires
-// at least one known operation (get/put/list/search) with no duplicates, and
-// normalizes each operation's flow policy. It mirrors the filesystem parser's
-// shape; scratch reuses core.memory's operation schemas.
+// single parse the door check and the build share. It rejects unknown fields,
+// requires at least one known operation (get/put/list/search) with no
+// duplicates, and normalizes each operation's flow policy.
 func parseScratchConfig(raw json.RawMessage) (scratchConfig, []OperationGrant, error) {
 	var config scratchConfig
 	if len(raw) > 0 {

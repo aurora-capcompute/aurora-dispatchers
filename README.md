@@ -63,10 +63,9 @@ and replaying around it.
 | --- | --- | --- | --- |
 | `core.internet` | `internet/` | Bounded HTTP client, any method | Allowlist of `METHOD:origin`; **SSRF guard** blocks loopback/private/metadata IPs (post‑DNS, defeats rebinding); size + time bounds; policy re‑checked on every redirect |
 | `core.filesystem` | `filesystem/` | **Read‑only** host‑file reads | Chrooted to declared `roots`; rejects symlink escapes; whole‑file or 1‑based line range; byte/line caps; optional extension allowlist; returns a SHA‑256 hash |
-| `core.memory` | `memory/` | Tenant‑scoped durable shared key/value store | `get`/`put`/`list`/`search` on scoped **mounts** — `process` / `session` / `shared` (a `space` field names which shared space; no tenant‑wide scope; the tenant is host‑set and prefixes every key, so cross‑tenant read is impossible); optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
-| `core.scratch` | `registry/scratch.go` | Process‑local *ephemeral* store | Same operations as `core.memory` but a single **unscoped** fresh, private store per process — cleared when it ends (a place to offload a large read out of the model's context) |
+| `core.scratch` | `registry/scratch.go` | Process‑local *ephemeral* store | `get`/`put`/`list`/`search` on a single **unscoped** fresh, private store per process — cleared when it ends (a place to offload a large read out of the model's context); optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
 | `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
-| `core.httpTemplate` | `builtin/template.go` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
+| `core.httpTemplate` | `registry/httptemplate.go` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
 
 Two shared mechanisms make grants expressive and safe:
 

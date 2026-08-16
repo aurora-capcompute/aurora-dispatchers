@@ -168,12 +168,9 @@ func TestMemoryTenantsAreIsolated(t *testing.T) {
 	}
 }
 
-// The mount prefix (chroot) went with core.memory: a scratch grant is one
-// unprefixed compartment, so there is nothing to scope keys against.
-
-// The prefix chroot went with core.memory — a scratch grant is one unprefixed
-// compartment. Key hygiene did not: a key that tries to climb out, double up a
-// separator, or name a directory is refused rather than resolved.
+// A grant is one unprefixed compartment, so there is nothing to scope keys
+// against — but key hygiene still holds: a key that tries to climb out, double
+// up a separator, or name a directory is refused rather than resolved.
 func TestMemoryRejectsMalformedKeys(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
