@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
@@ -14,20 +14,20 @@ import (
 // "syscall:" provenance namespace: that provenance is the kernel's to stamp
 // (the Labeler), never a grant's to claim, or a manifest could forge the
 // origin of its own data and launder tainted values as trusted. The guard is
-// sys.NormalizeLabels, reached through FlowPolicy.Normalized.
+// capability.NormalizeLabels, reached through FlowPolicy.Normalized.
 func TestFlowPolicyRejectsReservedLabelNamespace(t *testing.T) {
-	forged := sys.SyscallLabelPrefix + "internet.read"
+	forged := capability.SyscallLabelPrefix + "internet.read"
 
 	t.Run("as a source label", func(t *testing.T) {
 		_, err := registry.FlowPolicy{Labels: []string{forged}}.Normalized()
-		if err == nil || !strings.Contains(err.Error(), sys.SyscallLabelPrefix) {
+		if err == nil || !strings.Contains(err.Error(), capability.SyscallLabelPrefix) {
 			t.Fatalf("err = %v, want a reserved-prefix rejection", err)
 		}
 	})
 
 	t.Run("as a sink taint", func(t *testing.T) {
 		_, err := registry.FlowPolicy{Taints: []string{forged}}.Normalized()
-		if err == nil || !strings.Contains(err.Error(), sys.SyscallLabelPrefix) {
+		if err == nil || !strings.Contains(err.Error(), capability.SyscallLabelPrefix) {
 			t.Fatalf("err = %v, want a reserved-prefix rejection", err)
 		}
 	})
@@ -51,7 +51,7 @@ func TestFlowPolicyRejectsReservedLabelNamespace(t *testing.T) {
 // `capabilities` list is refused when the manifest is validated, before any
 // process runs.
 func TestDriverManifestRejectsForgedProvenanceLabel(t *testing.T) {
-	forged := `{"capabilities":[{"operation":"put","labels":["` + sys.SyscallLabelPrefix + `internet.read"]}]}`
+	forged := `{"capabilities":[{"operation":"put","labels":["` + capability.SyscallLabelPrefix + `internet.read"]}]}`
 	if _, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Normalize("core.scratch", json.RawMessage(forged)); err == nil {
 		t.Fatal("core.memory manifest declaring a reserved syscall: label was accepted; want rejection at manifest time")
 	}

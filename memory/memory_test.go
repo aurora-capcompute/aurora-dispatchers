@@ -102,7 +102,7 @@ func TestListCarriesValueLabels(t *testing.T) {
 	store := memory.NewMapStore()
 	h := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
 
-	tainted := sys.WithTaint(context.Background(), []string{"untrusted_web"})
+	tainted := capability.WithTaint(context.Background(), []string{"untrusted_web"})
 	if r := dispatchCtx(t, tainted, h, "put", `{"key":"notes/x","value":"v"}`, sys.Authorization{}); r.Status() != sys.StatusResult {
 		t.Fatalf("put = %v", r.Status())
 	}
@@ -409,7 +409,7 @@ func TestMemoryCompareAndSet(t *testing.T) {
 func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme", Mount: allOps()}
-	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/3/sha256:put")
+	intent := capability.WithIdempotencyKey(context.Background(), "proc-1/3/sha256:put")
 
 	// Create-only makes re-execution detectable: run twice, it would conflict.
 	first := dispatchCtx(t, intent, handler, "put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{})
@@ -437,7 +437,7 @@ func TestMemoryPutExactlyOnceUnderIdempotencyKey(t *testing.T) {
 
 	// The memory is keyed by intent, not by call shape: a distinct intent with
 	// the same arguments executes for real — and now genuinely conflicts.
-	other := sys.WithIdempotencyKey(context.Background(), "proc-1/9/sha256:put")
+	other := capability.WithIdempotencyKey(context.Background(), "proc-1/9/sha256:put")
 	if result := dispatchCtx(t, other, handler, "put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{}); result.Errno() != sys.ErrnoConflict {
 		t.Fatalf("fresh intent = %#v, want a real conflict", result)
 	}
@@ -471,7 +471,7 @@ func TestMemoryPutDedupeReturnsTheRecordedResult(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store, Tenant: "acme",
 		Mount: mount("", false, "get", "put", "list")}
-	intent := sys.WithIdempotencyKey(context.Background(), "proc-1/5/sha256:put")
+	intent := capability.WithIdempotencyKey(context.Background(), "proc-1/5/sha256:put")
 
 	first := dispatchCtx(t, intent, handler, "put", `{"key":"prefs/tone","value":1}`, sys.Authorization{})
 	if first.Status() != sys.StatusResult {

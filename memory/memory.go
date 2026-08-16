@@ -30,6 +30,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -327,7 +328,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	// human to authorize an effect already performed. The key pins the
 	// call-hash, so a re-seen key carries these same arguments and the rebuilt
 	// response is byte-identical to the first.
-	idem, _ := sys.IdempotencyKey(ctx)
+	idem, _ := capability.IdempotencyKey(ctx)
 	if idem != "" {
 		switch version, done, err := h.Store.Activity(ctx, h.Tenant, idem); {
 		case err != nil:
@@ -347,7 +348,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	// is opaque), so it is stored with the process's taint, handed down by the
 	// flow monitor. The idempotency key rides along so the store records the
 	// write's activity adjacent to the write itself.
-	version, err := h.Store.Put(ctx, h.Tenant, qualified, request.Value, sys.Taint(ctx), expect, idem)
+	version, err := h.Store.Put(ctx, h.Tenant, qualified, request.Value, capability.Taint(ctx), expect, idem)
 	if errors.Is(err, ErrConflict) {
 		return sys.FailCode(sys.ErrnoConflict, fmt.Sprintf("key %q is not at version %d; re-read and retry", request.Key, expect)), nil
 	}

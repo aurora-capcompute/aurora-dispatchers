@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	flow "github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-var _ capability.Handler = (*Handler)(nil)
+var _ flow.Handler = (*Handler)(nil)
 
 type capabilityConfig struct {
 	defaultModel    string
@@ -85,7 +85,7 @@ func (h *Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.A
 	}
 	// Sink guard: refuse before the provider call if the run has observed a
 	// label this operation forbids.
-	if blocked := sys.BlockedBy(sys.Taint(ctx), capability.taints); len(blocked) > 0 {
+	if blocked := flow.BlockedBy(flow.Taint(ctx), capability.taints); len(blocked) > 0 {
 		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
 			"flow policy: this run has observed %v, which may not flow into openai %q", blocked, operation)), nil
 	}

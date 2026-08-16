@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/aurora-capcompute/capcompute/sys"
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
 )
 
 // unionLabels concatenates two already-normalized label sets, dropping
@@ -66,11 +66,11 @@ type FlowPolicy struct {
 // Normalized canonicalizes both label sets (trim/dedup/sort, reserved "syscall:"
 // prefix rejected) with the kernel's shared hygiene.
 func (f FlowPolicy) Normalized() (FlowPolicy, error) {
-	labels, err := sys.NormalizeLabels("labels", f.Labels)
+	labels, err := capability.NormalizeLabels("labels", f.Labels)
 	if err != nil {
 		return FlowPolicy{}, err
 	}
-	taints, err := sys.NormalizeLabels("taints", f.Taints)
+	taints, err := capability.NormalizeLabels("taints", f.Taints)
 	if err != nil {
 		return FlowPolicy{}, err
 	}
