@@ -151,7 +151,8 @@ func TestCommandConfigErrors(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := (registry.CommandRegistration{}).Normalize(command.Capability, json.RawMessage(test.grant))
+			err := registry.New(registry.CommandRegistration{}).ValidateConfig(
+				context.Background(), command.Capability, json.RawMessage(test.grant), registry.Services{})
 			if err == nil {
 				t.Fatalf("expected a refusal naming %q", test.want)
 			}
@@ -159,25 +160,6 @@ func TestCommandConfigErrors(t *testing.T) {
 				t.Fatalf("error %q should name %q", err, test.want)
 			}
 		})
-	}
-}
-
-// A grant round-trips through Normalize unchanged in meaning: the closed set
-// survives as a list, the pattern as a string.
-func TestNormalizeRoundTrips(t *testing.T) {
-	normalized, err := (registry.CommandRegistration{}).Normalize(command.Capability, json.RawMessage(kubectlGrant))
-	if err != nil {
-		t.Fatalf("normalize: %v", err)
-	}
-	again, err := (registry.CommandRegistration{}).Normalize(command.Capability, normalized)
-	if err != nil {
-		t.Fatalf("re-normalize: %v", err)
-	}
-	if string(again) != string(normalized) {
-		t.Fatalf("normalize is not idempotent:\n%s\n%s", normalized, again)
-	}
-	if !strings.Contains(string(normalized), `["prod-eu","staging"]`) {
-		t.Fatalf("the closed set did not survive normalization: %s", normalized)
 	}
 }
 

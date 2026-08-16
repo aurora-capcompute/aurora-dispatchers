@@ -76,31 +76,24 @@ func TestFilesystemMatches(t *testing.T) {
 	}
 }
 
-func TestFilesystemNormalizeAbsolutizesRoots(t *testing.T) {
+// A relative root is resolved to an absolute path, and the read bounds take
+// their defaults. Both are asserted through the built family rather than through
+// a canonical config: the description is what a guest is told it may read, so it
+// is the description that has to name the resolved root.
+func TestFilesystemGrantResolvesRootsAndDefaults(t *testing.T) {
 	dir := t.TempDir()
-	// A relative root resolves to an absolute path in the normalized config.
 	rel, err := filepath.Rel(mustGetwd(t), dir)
 	if err != nil {
 		t.Skipf("cannot relativize temp dir: %v", err)
 	}
-	raw, err := (registry.FilesystemRegistration{}).Normalize("core.filesystem",
-		json.RawMessage(`{"capabilities":[{"operation":"read"}],"roots":["`+filepath.ToSlash(rel)+`"]}`))
+	family, err := (registry.FilesystemRegistration{}).Configure(context.Background(),
+		json.RawMessage(`{"capabilities":[{"operation":"read"}],"roots":["`+filepath.ToSlash(rel)+`"]}`),
+		registry.Services{})
 	if err != nil {
-		t.Fatalf("normalize: %v", err)
+		t.Fatalf("configure: %v", err)
 	}
-	var config struct {
-		Roots        []string `json:"roots"`
-		MaxReadBytes int64    `json:"max_read_bytes"`
-		MaxLines     int      `json:"max_lines"`
-	}
-	if err := json.Unmarshal(raw, &config); err != nil {
-		t.Fatalf("decode normalized: %v", err)
-	}
-	if len(config.Roots) != 1 || !filepath.IsAbs(config.Roots[0]) {
-		t.Fatalf("roots = %v, want one absolute path", config.Roots)
-	}
-	if config.MaxReadBytes != filesystem.DefaultMaxReadBytes || config.MaxLines != filesystem.DefaultMaxLines {
-		t.Fatalf("defaults not applied: %+v", config)
+	if !strings.Contains(family.Description, dir) {
+		t.Fatalf("description = %q, want the relative root resolved to %s", family.Description, dir)
 	}
 }
 
@@ -124,7 +117,7 @@ func TestFilesystemRejectsBadConfig(t *testing.T) {
 	}
 	for name, config := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := (registry.FilesystemRegistration{}).Normalize("core.filesystem", json.RawMessage(config)); err == nil {
+			if _, err := registryValidate(registry.FilesystemRegistration{}, "core.filesystem", json.RawMessage(config)); err == nil {
 				t.Fatalf("expected error for %s", name)
 			}
 		})

@@ -49,18 +49,6 @@ type FilesystemRegistration struct{}
 
 func (FilesystemRegistration) Matches(syscall string) bool { return syscall == filesystem.Capability }
 
-func (FilesystemRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, grants, err := parseFilesystemConfig(raw)
-	if err != nil {
-		return nil, err
-	}
-	// parseFilesystemConfig already returns grants in canonical (sorted) order.
-	if config.Capabilities, err = json.Marshal(grants); err != nil {
-		return nil, err
-	}
-	return json.Marshal(config)
-}
-
 func (FilesystemRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (capability.Family, error) {
 	config, grants, err := parseFilesystemConfig(raw)
 	if err != nil {

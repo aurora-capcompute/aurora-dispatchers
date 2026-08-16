@@ -74,14 +74,6 @@ type InternetRegistration struct{}
 
 func (InternetRegistration) Matches(syscall string) bool { return syscall == internet.Capability }
 
-func (InternetRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, _, err := parseInternetConfig(raw)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(config)
-}
-
 func (InternetRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
 	config, policy, err := parseInternetConfig(raw)
 	if err != nil {

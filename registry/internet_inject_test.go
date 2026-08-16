@@ -33,7 +33,7 @@ func TestInjectHeadersNormalizeRejectsUnsafeShapes(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := (registry.InternetRegistration{}).Normalize("core.internet", json.RawMessage(raw)); err == nil {
+			if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(raw)); err == nil {
 				t.Fatalf("Normalize accepted an unsafe injection (%s)", name)
 			}
 		})
@@ -46,7 +46,7 @@ func TestInjectHeadersNormalizeAcceptsSafeOrigins(t *testing.T) {
 	for _, domain := range []string{"onyx.example.com", "https://onyx.example.com", "http://127.0.0.1:8080", "http://localhost:9000"} {
 		raw := `{"capabilities":[{"methods":["GET"],"domain":"` + domain + `",` +
 			`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`
-		if _, err := (registry.InternetRegistration{}).Normalize("core.internet", json.RawMessage(raw)); err != nil {
+		if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(raw)); err != nil {
 			t.Fatalf("Normalize rejected safe origin %q: %v", domain, err)
 		}
 	}
@@ -57,7 +57,7 @@ func TestInjectHeadersNormalizeAcceptsSafeOrigins(t *testing.T) {
 func TestInjectHeadersNormalizeKeepsReferenceNotValue(t *testing.T) {
 	raw := `{"capabilities":[{"methods":["GET"],"domain":"onyx.example.com",` +
 		`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`
-	normalized, err := (registry.InternetRegistration{}).Normalize("core.internet", json.RawMessage(raw))
+	normalized, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(raw))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}

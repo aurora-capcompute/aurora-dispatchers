@@ -40,7 +40,7 @@ func TestInternetDescriptionIncludesAuthorUsageNote(t *testing.T) {
 func TestInternetDescriptionRoundTripsThroughNormalize(t *testing.T) {
 	usage := "Weather API; GET /v1/forecast?city=NAME."
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"https://api.weather.example.com","description":` + mustJSON(usage) + `}]}`)
-	normalized, err := (registry.InternetRegistration{}).Normalize("core.internet", raw)
+	normalized, err := registryValidate(registry.InternetRegistration{}, "core.internet", raw)
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestInternetDescriptionRejectsUnsafeText(t *testing.T) {
 	controlChar := `{"capabilities":[{"methods":["GET"],"domain":"example.com","description":` + mustJSON(withNUL) + `}]}`
 	for name, bad := range map[string]string{"oversize": oversize, "control char": controlChar} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := (registry.InternetRegistration{}).Normalize("core.internet", json.RawMessage(bad)); err == nil {
+			if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(bad)); err == nil {
 				t.Fatalf("Normalize accepted an unsafe description (%s)", name)
 			}
 		})

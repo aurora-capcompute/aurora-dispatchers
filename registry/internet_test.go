@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
@@ -24,28 +23,37 @@ func TestInternetMatchesSyscall(t *testing.T) {
 }
 
 func TestInternetNormalizeRequiresCapabilities(t *testing.T) {
-	if _, err := (registry.InternetRegistration{}).Normalize("core.internet", json.RawMessage(`{}`)); err == nil {
+	if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected error when capabilities is empty")
 	}
 }
 
 // Any method the grant allowlists is accepted — the policy, not the driver,
-// decides which methods are permitted.
-func TestInternetNormalizeAcceptsAnyMethod(t *testing.T) {
+// decides which methods are permitted — and the canonical (uppercased) form is
+// the case the table indexes. That is where it has to be right: the operation a
+// call resolves to is matched exactly, so a grant written in lowercase must
+// still produce the DELETE entry a guest reaches.
+func TestInternetGrantIndexesCanonicalMethods(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["POST","delete"],"domain":"example.com"}]}`)
-	normalized, err := (registry.InternetRegistration{}).Normalize("core.internet", raw)
+	family, err := (registry.InternetRegistration{}).Configure(context.Background(), raw, registry.Services{})
 	if err != nil {
-		t.Fatalf("normalize: %v", err)
+		t.Fatalf("configure: %v", err)
 	}
-	// Methods are canonicalized (uppercased) in the normalized form.
-	if !strings.Contains(string(normalized), `"POST"`) || !strings.Contains(string(normalized), `"DELETE"`) {
-		t.Fatalf("normalized = %s, want uppercased methods", normalized)
+	table := capability.NewTable()
+	if err := table.Add(family); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	granted := table.Operations(internet.Capability)
+	for _, want := range []string{"POST", "DELETE"} {
+		if !slices.Contains(granted, want) {
+			t.Fatalf("operations = %v, want %q indexed in canonical form", granted, want)
+		}
 	}
 }
 
 func TestInternetNormalizeRejectsEmptyDomain(t *testing.T) {
 	raw := json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"  "}]}`)
-	if _, err := (registry.InternetRegistration{}).Normalize("core.internet", raw); err == nil {
+	if _, err := registryValidate(registry.InternetRegistration{}, "core.internet", raw); err == nil {
 		t.Fatal("expected error for empty domain")
 	}
 }

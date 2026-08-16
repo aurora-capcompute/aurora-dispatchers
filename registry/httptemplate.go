@@ -84,14 +84,6 @@ type HTTPTemplateRegistration struct{}
 
 func (HTTPTemplateRegistration) Matches(syscall string) bool { return syscall == HTTPTemplateSyscall }
 
-func (HTTPTemplateRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, err := parseTemplateConfig(raw)
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(config)
-}
-
 func (HTTPTemplateRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
 	config, err := parseTemplateConfig(raw)
 	if err != nil {

@@ -1,6 +1,7 @@
 package registry_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -52,14 +53,14 @@ func TestFlowPolicyRejectsReservedLabelNamespace(t *testing.T) {
 // process runs.
 func TestDriverManifestRejectsForgedProvenanceLabel(t *testing.T) {
 	forged := `{"capabilities":[{"operation":"put","labels":["` + capability.SyscallLabelPrefix + `internet.read"]}]}`
-	if _, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Normalize("core.scratch", json.RawMessage(forged)); err == nil {
+	if err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).ValidateConfig(context.Background(), "core.scratch", json.RawMessage(forged), registry.Services{}); err == nil {
 		t.Fatal("core.memory manifest declaring a reserved syscall: label was accepted; want rejection at manifest time")
 	}
 
 	// The identical grant with an honest label normalizes cleanly, proving the
 	// rejection above is specific to the reserved namespace, not a blanket refusal.
 	honest := `{"capabilities":[{"operation":"put","labels":["stored"]}]}`
-	if _, err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).Normalize("core.scratch", json.RawMessage(honest)); err != nil {
+	if err := registry.New(registry.InternetRegistration{}, registry.ScratchRegistration{}).ValidateConfig(context.Background(), "core.scratch", json.RawMessage(honest), registry.Services{}); err != nil {
 		t.Fatalf("honest core.memory manifest rejected: %v", err)
 	}
 }

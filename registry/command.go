@@ -119,15 +119,6 @@ type CommandRegistration struct{}
 
 func (CommandRegistration) Matches(syscall string) bool { return syscall == command.Capability }
 
-func (CommandRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, grants, err := parseCommandConfig(raw)
-	if err != nil {
-		return nil, err
-	}
-	config.Capabilities = grants
-	return json.Marshal(config)
-}
-
 func (CommandRegistration) Configure(_ context.Context, raw json.RawMessage, services Services) (capability.Family, error) {
 	_, grants, err := parseCommandConfig(raw)
 	if err != nil {

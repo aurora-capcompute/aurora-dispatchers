@@ -69,20 +69,25 @@ type mapResolver map[string]string
 
 func (m mapResolver) Resolve(name string) (string, bool) { v, ok := m[name]; return v, ok }
 
-// The api_key may be a host-held reference resolved at activation. Normalize
-// persists only the reference — the value never lands in the stored manifest.
+// The api_key may be a host-held reference resolved at activation. The manifest
+// keeps only the reference: validation refuses or accepts and rewrites nothing,
+// so there is no path by which a resolved secret could be written back into the
+// stored grant. Configure resolves it in memory for the client it builds, and
+// that client is all that ever holds the value.
 func TestConfigureResolvesAPIKeyReference(t *testing.T) {
 	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":{"secret":"OPENAI_KEY"},"capabilities":[{"operation":"chat"}]}`)
 
-	normalized, err := (Registration{}).Normalize("core.openaiApi", raw)
-	if err != nil {
-		t.Fatalf("normalize: %v", err)
+	// Validating the grant needs the resolver — a reference to a secret this
+	// deployment does not hold is refused at the door rather than at spawn.
+	resolver := registry.Services{Secrets: mapResolver{"OPENAI_KEY": "sk-real"}}
+	if err := registry.New(Registration{}).ValidateConfig(context.Background(), SyscallType, raw, resolver); err != nil {
+		t.Fatalf("validate: %v", err)
 	}
-	if !strings.Contains(string(normalized), `"secret":"OPENAI_KEY"`) {
-		t.Fatalf("normalized dropped the api_key reference: %s", normalized)
+	if err := registry.New(Registration{}).ValidateConfig(context.Background(), SyscallType, raw, registry.Services{}); err == nil {
+		t.Fatal("a grant referencing a secret the deployment does not hold was admitted")
 	}
-	if strings.Contains(string(normalized), "sk-real") {
-		t.Fatalf("normalized leaked the resolved api_key: %s", normalized)
+	if strings.Contains(string(raw), "sk-real") {
+		t.Fatalf("SECURITY: validation wrote a resolved secret back into the grant: %s", raw)
 	}
 
 	services := registry.Services{Secrets: mapResolver{"OPENAI_KEY": "sk-real"}}

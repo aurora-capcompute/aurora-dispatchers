@@ -36,7 +36,7 @@ func TestTemplateNormalizeRejectsBadConfigs(t *testing.T) {
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := (registry.HTTPTemplateRegistration{}).Normalize("core.httpTemplate", json.RawMessage(raw)); err == nil {
+			if _, err := registryValidate(registry.HTTPTemplateRegistration{}, "core.httpTemplate", json.RawMessage(raw)); err == nil {
 				t.Fatalf("Normalize accepted an invalid config (%s)", name)
 			}
 		})
@@ -48,7 +48,7 @@ func TestTemplateNormalizeRejectsBadConfigs(t *testing.T) {
 func TestTemplateNormalizeAcceptsValid(t *testing.T) {
 	for _, base := range []string{"https://onyx.example.com", "http://127.0.0.1:8080"} {
 		raw := `{"base_url":"` + base + `","capabilities":[{"operation":"search","method":"POST","path":"/s","body":{"m":"{{q}}"},"params":{"q":{"type":"string","required":true}}}]}`
-		if _, err := (registry.HTTPTemplateRegistration{}).Normalize("core.httpTemplate", json.RawMessage(raw)); err != nil {
+		if _, err := registryValidate(registry.HTTPTemplateRegistration{}, "core.httpTemplate", json.RawMessage(raw)); err != nil {
 			t.Fatalf("Normalize rejected a valid grant on %q: %v", base, err)
 		}
 	}
@@ -151,7 +151,7 @@ func TestTemplateConfigureFailsClosedOnMissingSecret(t *testing.T) {
 
 // Normalize persists only the credential reference, never a resolved value.
 func TestTemplateNormalizeKeepsSecretReference(t *testing.T) {
-	normalized, err := (registry.HTTPTemplateRegistration{}).Normalize("core.httpTemplate", json.RawMessage(templateConfigJSON()))
+	normalized, err := registryValidate(registry.HTTPTemplateRegistration{}, "core.httpTemplate", json.RawMessage(templateConfigJSON()))
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
 	}

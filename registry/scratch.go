@@ -47,18 +47,6 @@ type ScratchRegistration struct{}
 
 func (ScratchRegistration) Matches(syscall string) bool { return syscall == ScratchCapability }
 
-func (ScratchRegistration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, grants, err := parseScratchConfig(raw)
-	if err != nil {
-		return nil, err
-	}
-	// parseScratchConfig already returns grants in canonical (sorted) order.
-	if config.Capabilities, err = json.Marshal(grants); err != nil {
-		return nil, err
-	}
-	return json.Marshal(config)
-}
-
 func (ScratchRegistration) Configure(_ context.Context, raw json.RawMessage, _ Services) (capability.Family, error) {
 	_, grants, err := parseScratchConfig(raw)
 	if err != nil {

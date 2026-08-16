@@ -53,22 +53,6 @@ type Registration struct{}
 
 func (Registration) Matches(syscallType string) bool { return syscallType == SyscallType }
 
-func (Registration) Normalize(_ string, raw json.RawMessage) (json.RawMessage, error) {
-	config, grants, err := parseGrantConfig(raw)
-	if err != nil {
-		return nil, err
-	}
-	normalized, err := normalizeSettings(config.Settings)
-	if err != nil {
-		return nil, err
-	}
-	out := grantConfig{Settings: normalized.Settings}
-	if out.Capabilities, err = json.Marshal(grants); err != nil {
-		return nil, err
-	}
-	return json.Marshal(out)
-}
-
 // Configure publishes the single core.openaiApi capability — a oneOf over the
 // granted operations — and the handler that serves them. The grant is kept off
 // the discoverable menu via the manifest `hidden` flag (the agent calls the LLM

@@ -47,7 +47,6 @@ type Services struct {
 // first-wins.
 type Registration interface {
 	Matches(syscall string) bool
-	Normalize(syscall string, config json.RawMessage) (json.RawMessage, error)
 	Configure(ctx context.Context, config json.RawMessage, services Services) (capability.Family, error)
 }
 
@@ -59,11 +58,27 @@ func New(registrations ...Registration) *Registry {
 	return &Registry{registrations: append([]Registration(nil), registrations...)}
 }
 
-func (r *Registry) Normalize(syscall string, config json.RawMessage) (json.RawMessage, error) {
-	if selected := r.selectFor(syscall); selected != nil {
-		return selected.Normalize(syscall, config)
+// ValidateConfig checks one leaf grant's config by building what it would build
+// and throwing it away.
+//
+// There is deliberately no separate parse for this. A registration used to carry
+// a Normalize half that parsed the config, re-marshalled it, and handed back a
+// canonical form nobody read — the manifest stored it and Configure parsed it
+// again with the same parser. What that round trip actually bought was the
+// refusal, so the refusal is all that is left: the door check and the spawn-time
+// build are now literally the same code, and cannot drift into disagreeing about
+// what a valid config is.
+//
+// Building is safe to do twice: a Configure resolves host-held secrets and
+// assembles clients, but performs no I/O and depends on no process credential.
+func (r *Registry) ValidateConfig(ctx context.Context, syscall string, config json.RawMessage, services Services) error {
+	for _, registration := range r.registrations {
+		if registration.Matches(syscall) {
+			_, err := registration.Configure(ctx, config, services)
+			return err
+		}
 	}
-	return nil, fmt.Errorf("unsupported syscall %q", syscall)
+	return fmt.Errorf("unsupported tool type")
 }
 
 // Entry is one leaf grant to build. Syscall selects the registration; Config is
