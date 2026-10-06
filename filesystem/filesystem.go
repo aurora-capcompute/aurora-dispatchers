@@ -7,7 +7,7 @@
 // are deterministic — the recorded result replays regardless of later disk
 // mutations — and carry the grant's provenance labels, so file contents enter
 // the flow monitor tainted at their source (the file-poisoning defense),
-// exactly like tenant memory and the network.
+// exactly like the network.
 //
 // The capability is read-only for now: its operations are cases of one
 // discriminated ADT selected by the `operation` field, and `read` is the only
@@ -79,7 +79,7 @@ type ReadResponse struct {
 type Operation struct{}
 
 // Handler serves one core.filesystem grant: the roots it is chrooted to, the
-// read bounds, and the granted operations. It satisfies builtin.Handler and
+// read bounds, and the granted operations. It satisfies capability.Handler and
 // publishes the single core.filesystem capability. Roots and bounds are
 // host-side grant parameters — a guest only ever names paths that resolve
 // inside a root.

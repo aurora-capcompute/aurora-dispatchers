@@ -1,14 +1,10 @@
-// Package memory provides tenant-scoped shared memory — the filesystem role
-// of the OS model (docs/ARCHITECTURE.md, "Shared state"). Sessions are
-// execution scope, not data scope: data that outlives and crosses sessions
-// lives at the tenant level and is reached only through these journaled
-// capabilities, never ambiently. The two kernel laws fix the driver's form:
-// determinism — reads travel the journaled syscall path, so replay re-reads
-// the recorded value regardless of later mutations; no ambient authority —
-// each grant is scoped to a tenant and partitioned into mounts (process,
-// session, or a named shared space; guest keys are relative to the mount's
-// host-computed prefix and escapes are rejected), and writes can
-// require human approval. Cross-tenant access is impossible by construction.
+// Package memory is a labelled, versioned key-value handler over a Store: get,
+// put, list and search, each an ADT case selected by `operation`. Its one
+// consumer today is core.scratch, which gives every process a fresh in-memory
+// Store. The two kernel laws fix the handler's form: determinism — reads travel
+// the journaled syscall path, so replay re-reads the recorded value regardless
+// of later mutations; no ambient authority — every key is prefixed by a
+// host-set tenant, so a guest names keys only inside it.
 //
 // A third law governs the driver's one effect: the kernel journals an intent
 // before a syscall executes, so a crash between intent and completion
@@ -34,11 +30,10 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Store is the app-supplied durable KV store behind tenant memory. Keys are
-// slash-separated paths, already tenant- and mount-qualified by the
-// handler. Every value is stored with its provenance labels — the taint of
-// the process that wrote it — and Get returns them so a later session reads the
-// value *as tainted*, not as laundered truth (the memory-poisoning defense).
+// Store is the KV store a Handler serves. Keys are slash-separated paths,
+// already tenant-qualified by the handler. Every value is stored with its
+// provenance labels — the taint of the process that wrote it — and Get returns
+// them so a later read sees the value *as tainted*, not as laundered truth.
 // Values are versioned (1 on first write, incremented per write) so writers
 // can compare-and-set instead of blindly overwriting each other.
 //
@@ -169,8 +164,8 @@ const (
 	searchMaxTotalBytes     = 16 * 1024
 )
 
-// Handler serves one memory grant: a tenant plus the mounts the grant opens
-// within it. Its get/put/list/search operations are ADT cases selected by the
+// Handler serves one memory grant: a tenant plus the one mount the grant
+// addresses within it. Its get/put/list/search operations are ADT cases selected by the
 // `operation` field.
 type Handler struct {
 	// Name is the published capability name.
@@ -178,8 +173,8 @@ type Handler struct {
 	// Store is the durable KV store.
 	Store Store
 	// Tenant is the absolute isolation boundary: it prefixes every physical key
-	// and is host-set from the process credential (never guest-supplied), so no
-	// access can ever cross tenants. Required.
+	// and is host-set (never guest-supplied), so no access can ever cross
+	// tenants. Required.
 	Tenant string
 	// Mount is the one compartment this grant addresses: the operations it
 	// allows and the policy the registry publishes for them.
@@ -246,9 +241,7 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	return result, nil
 }
 
-// peekCall reads the ADT discriminator and the mount selector from a call's
-// args, and enforces the selector's shape: `space` accompanies exactly the
-// shared scope — the scope tag and the space payload are separate fields.
+// peekCall reads the ADT discriminator from a call's args.
 func peekCall(args json.RawMessage) (string, error) {
 	var envelope struct {
 		Operation string `json:"operation"`

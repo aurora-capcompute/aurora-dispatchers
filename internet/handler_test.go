@@ -35,8 +35,8 @@ func internetCall(method, url string) sys.Syscall {
 }
 
 // Flow policy and approval used to be enforced here and are now the method's
-// entry's — the sink guard in the runtime's monitor, approval in builtin's
-// dispatcher. They are tested there; this package tests the request.
+// entry's — the sink guard in the runtime's monitor, approval in
+// capability.Dispatcher. This package tests the request.
 
 func TestInternetHandlerCleanRequestPasses(t *testing.T) {
 	client := &fakeClient{response: internet.Response{Status: 204}}

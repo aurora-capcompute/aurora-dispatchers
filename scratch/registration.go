@@ -72,12 +72,10 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry
 		names = append(names, operations[grant.Operation].description)
 	}
 
-	// A fresh in-memory store per Configure call — i.e. per process. It is never
-	// the durable tenant store (Services is unused here), and it is dropped with
-	// the process's dispatcher chain, so nothing stored here outlives the run.
-	// Scratch is inherently one compartment — the process's own ephemeral store —
-	// so its lone mount is anonymous (no scope, empty prefix = the whole
-	// per-process store) and calls address it with no selector.
+	// A fresh in-memory store per Configure call — i.e. per process. It is
+	// dropped with the process's dispatcher chain, so nothing stored here
+	// outlives the run. Scratch is inherently one compartment — the process's own
+	// ephemeral store — so calls address it with no selector.
 	handler := memory.Handler{
 		Name:   Capability,
 		Store:  memory.NewMapStore(),

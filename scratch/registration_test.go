@@ -14,8 +14,8 @@ import (
 
 func buildScratchTable(t *testing.T, config string) *capability.Table {
 	t.Helper()
-	// Unlike core.memory, scratch needs no Services — it owns a fresh in-memory
-	// store per build (i.e. per process).
+	// Scratch needs no Services — it owns a fresh in-memory store per build
+	// (i.e. per process).
 	built, err := registry.New(scratch.Registration{}).Build(context.Background(),
 		[]registry.Entry{{Syscall: scratch.Capability, Config: json.RawMessage(config)}},
 		registry.Services{},
@@ -47,8 +47,7 @@ func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallRes
 	return res
 }
 
-// core.scratch routes by the capability name and, unlike core.memory, requires
-// no host Services.
+// core.scratch routes by the capability name and requires no host Services.
 func TestScratchRoutesByNameAndNeedsNoServices(t *testing.T) {
 	table := buildScratchTable(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`)
 	if got := table.Operations(scratch.Capability); len(got) != 3 {

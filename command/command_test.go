@@ -336,9 +336,8 @@ func TestRelativeExecutableIsRefusedAtRunTime(t *testing.T) {
 }
 
 // Approval and the sink guard used to be enforced here and are now the entry's:
-// approval in builtin's dispatcher, flow policy in the runtime's monitor. They
-// are tested where they are enforced — builtin/dispatcher_test.go and
-// monitor/provenance_test.go — so this package tests only the effect.
+// approval in capability.Dispatcher, flow policy in the runtime's monitor
+// (monitor/provenance_test.go) — so this package tests only the effect.
 
 // An empty value is refused for the same reason a leading dash is: it changes
 // what the argument means. "--namespace={ns}" with an empty ns is

@@ -200,6 +200,6 @@ func TestTemplateRejectsBadCalls(t *testing.T) {
 }
 
 // Flow policy and approval used to be enforced here and are now the operation's
-// entry's — the sink guard in the runtime's monitor, approval in builtin's
-// dispatcher — so they are tested there. Credential provenance is published as
-// the entry's labels; registry/httptemplate_test.go covers it.
+// entry's — the sink guard in the runtime's monitor, approval in
+// capability.Dispatcher. Credential provenance is published as the entry's
+// labels; httptemplate/registration_test.go covers it.

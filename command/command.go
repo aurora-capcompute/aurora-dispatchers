@@ -170,9 +170,8 @@ func (c Command) ParamNames() []string {
 	return names
 }
 
-// Handler adapts the allowlist to the builtin dispatcher, enforcing the command
-// allowlist, its slot declarations, flow policy, and approval before anything is
-// executed.
+// Handler adapts the allowlist to capability.Dispatcher, enforcing the command
+// allowlist and its slot declarations before anything is executed.
 type Handler struct {
 	Name     string
 	Commands []Command
@@ -181,8 +180,7 @@ type Handler struct {
 func (h Handler) Handles(name string) bool { return name == h.Name }
 
 // DispatchCall validates a run against the allowlist and its slot declarations,
-// gates it on flow policy and approval, executes it, and stamps the result's
-// provenance.
+// executes it, and stamps the result's provenance.
 func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
 	var request Request
 	if err := json.Unmarshal(call.Args, &request); err != nil {

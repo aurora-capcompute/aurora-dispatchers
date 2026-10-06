@@ -284,10 +284,9 @@ func TestReadUngrantedOperation(t *testing.T) {
 }
 
 // Approval, source labels and the sink guard used to be enforced here and are
-// now the entry's: approval in builtin's dispatcher (below the replay tape, so
+// now the entry's: approval in capability.Dispatcher (below the replay tape, so
 // the yield is journaled once) and flow policy in the runtime's monitor (above
-// it, so a denial re-derives and is never journaled). They are tested where
-// they are enforced — builtin/dispatcher_test.go and monitor/provenance_test.go
+// it, so a denial re-derives and is never journaled; monitor/provenance_test.go)
 // — so this package tests only the effect.
 
 func TestReadFollowsAbsolutePathInsideRoot(t *testing.T) {

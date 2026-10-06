@@ -2,7 +2,8 @@
 
 **The "device drivers" that let a sandboxed agent touch the real world — safely.**
 `aurora-dispatchers` is a Go library of ready‑made capability drivers for Aurora:
-make an HTTP call, read a file, get/put shared memory, or call an LLM. Each driver
+make an HTTP call, read a file, run an allowlisted command, keep a process‑local
+scratch store, or call an LLM. Each driver
 runs the action *for* the agent, under a scoped, approval‑gated, recorded grant.
 
 > New here? The first two sections explain what a "dispatcher" is and where it fits.
@@ -19,14 +20,14 @@ socket, read a file, or call an API by itself. Instead it emits a **syscall**
 action on its behalf — but only within the limits of a **grant** you wrote in the
 agent's manifest.
 
-Every dispatcher in this repo enforces the same three safety mechanisms:
+Every grant in this repo carries the same three safety mechanisms:
 
 1. **Least privilege** — a grant scopes exactly what's allowed (which domains,
    which files, which operations). Anything outside it is denied.
-2. **Approval gating** — mark a grant `require_approval: true` and the driver
+2. **Approval gating** — mark a grant `require_approval: true` and the call
    *yields* ("Approve this?") instead of acting, until a human says yes.
-3. **Data‑flow tracking** — results are stamped with provenance **labels**, and a
-   driver refuses a call whose inputs are too "tainted" to flow into that action.
+3. **Data‑flow tracking** — results are stamped with provenance **labels**, and the
+   runtime refuses a call whose inputs are too "tainted" to flow into that action.
 
 This module is **drivers only**. The durable processes, journal, approval tasks,
 and guest instances are owned by the runtime
@@ -46,14 +47,14 @@ and guest instances are owned by the runtime
                       ◀ YOU ARE HERE
    └──────────┬──────────┘
               │  both built on
-         capcompute                          ← the kernel (the foundation)
+         capcompute                          ← the processor (the foundation)
 
    aurora-brains  →  Wasm agent programs that emit the syscalls
 ```
 
 An assembly (like [aurora-dist](https://github.com/aurora-capcompute/aurora-dist))
 builds a `registry.Registry` from these drivers, calls `Registry.Build(...)` with a
-tenant's granted syscalls, and hands the resulting dispatcher to the runtime. The
+process's granted syscalls, and hands the resulting grant table to the runtime. The
 runtime then feeds each agent syscall to that dispatcher — journaling, approving,
 and replaying around it.
 
@@ -142,16 +143,6 @@ plus an injected `registry.Services`. Highlights per driver:
   labels, taints}`, `timeout_ms`, `max_response_bytes`, `allow_private_network`.
 - **filesystem** — `roots[]` (required, existing absolute dirs), `extensions[]`,
   `max_read_bytes` (2 MiB), `max_lines` (10000), `follow_symlinks`.
-- **memory** — `capabilities[]` is a list of **mounts**, each
-  `{scope, space, operations[], require_approval, labels, taints}`; `scope` ∈
-  `process` / `session` / `shared` (there is no tenant‑wide scope), and `space`
-  names the shared space — required exactly when `scope` is `shared`, forbidden
-  otherwise (the tag and its payload are separate fields, never packed into one
-  string). Each call names its `scope` (+`space` for shared; omittable only when
-  one mount is granted) and a `key`; the tenant + scope prefix are host‑set, so a
-  key can never cross a tenant, and crosses a session only through a named shared
-  space. `Services` must carry the calling `SessionID`/`ProcessID` for the
-  self‑scopes to resolve.
 - **scratch** — `capabilities[]{operation, require_approval, labels, taints}` — a
   single unscoped, process‑private store (no scope selector).
 - **httptemplate** — `base_url` (grant default), `capabilities[]{operation, method,
@@ -173,14 +164,14 @@ registry/      the Registration interface + Registry.Build, the grant vocabulary
 
 ## Dependencies
 
-Only two direct dependencies: `github.com/aurora-capcompute/capcompute` (the `sys`
-vocabulary every driver speaks) and `github.com/openai/openai-go/v3` (used only by
-`openaillm`). Domain drivers live in their own modules so an assembly pulls only
-the clients it ships.
+Three direct dependencies: `github.com/aurora-capcompute/capcompute` (the `sys`
+vocabulary every driver speaks), `github.com/aurora-capcompute/aurora-capcompute`
+(the `capability` index every driver contributes to), and
+`github.com/openai/openai-go/v3` (used only by `openaillm`).
 
 ## Related repos
 
-- [capcompute](https://github.com/aurora-capcompute/capcompute) — the kernel whose `sys` vocabulary these drivers speak
+- [capcompute](https://github.com/aurora-capcompute/capcompute) — the processor whose `sys` vocabulary these drivers speak
 - [aurora-capcompute](https://github.com/aurora-capcompute/aurora-capcompute) — the runtime that drives these dispatchers
 - [aurora-dist](https://github.com/aurora-capcompute/aurora-dist) — the assembly that wires them into a server
 - [aurora-brains](https://github.com/aurora-capcompute/aurora-brains) — the agent programs that emit the syscalls
