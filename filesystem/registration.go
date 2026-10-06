@@ -152,7 +152,9 @@ func parseFilesystemConfig(raw json.RawMessage) (filesystemConfig, []registry.Op
 }
 
 // normalizeRoots requires at least one root and canonicalizes each to an
-// existing absolute directory, de-duplicated and sorted.
+// existing absolute directory, de-duplicated and sorted. A root is resolved to
+// its real path: with follow_symlinks, a read's real path is compared against
+// the roots, so a root under a symlink (macOS /tmp, /var) would refuse every read.
 func normalizeRoots(roots []string) ([]string, error) {
 	if len(roots) == 0 {
 		return nil, errors.New("roots must contain at least one directory")
@@ -162,6 +164,9 @@ func normalizeRoots(roots []string) ([]string, error) {
 		abs, err := filepath.Abs(root)
 		if err != nil {
 			return nil, err
+		}
+		if abs, err = filepath.EvalSymlinks(abs); err != nil {
+			return nil, fmt.Errorf("filesystem root %q: %w", root, err)
 		}
 		info, err := os.Stat(abs)
 		if err != nil {

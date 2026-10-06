@@ -24,6 +24,18 @@ func handler(dir string) filesystem.Handler {
 	}
 }
 
+// rootDir returns a temp dir in the real-path form a grant's roots take after
+// registration. On macOS t.TempDir is under the /var symlink, and a followed
+// read's real path must be compared against a real root.
+func rootDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // readArgs builds a read call's args from a fields object merged with the
 // `operation` discriminator.
 func readArgs(t *testing.T, fields string) json.RawMessage {
@@ -296,7 +308,7 @@ func TestReadRejectsSymlinkByDefault(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink semantics differ on windows")
 	}
-	dir := t.TempDir()
+	dir := rootDir(t)
 	write(t, dir, "real.txt", "real\n")
 	link := filepath.Join(dir, "link.txt")
 	if err := os.Symlink(filepath.Join(dir, "real.txt"), link); err != nil {
@@ -318,7 +330,7 @@ func TestReadRejectsIntermediateSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink semantics differ on windows")
 	}
-	dir := t.TempDir()
+	dir := rootDir(t)
 	write(t, dir, "real/secret.txt", "secret\n")
 	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
 		t.Skipf("symlink unsupported: %v", err)

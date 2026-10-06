@@ -95,6 +95,26 @@ func TestFilesystemGrantResolvesRootsAndDefaults(t *testing.T) {
 	}
 }
 
+// A root reached through a symlink still serves followed reads: the grant
+// resolves the root to its real path, so a followed link's real target is
+// compared against the same form.
+func TestFilesystemSymlinkedRootFollowsLinks(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "real/data.txt", "data\n")
+	root := filepath.Join(dir, "alias")
+	if err := os.Symlink(filepath.Join(dir, "real"), root); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "data.txt"), filepath.Join(root, "link.txt")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	config := `{"capabilities":[{"operation":"read"}],"roots":["` + root + `"],"follow_symlinks":true}`
+	handler := buildFilesystem(t, config).(filesystem.Handler)
+	if got := decodeRead(t, dispatch(t, handler, `{"path":"link.txt"}`)); got.Content != "data\n" {
+		t.Fatalf("followed read under a symlinked root = %q", got.Content)
+	}
+}
+
 func TestFilesystemRejectsBadConfig(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "afile")
