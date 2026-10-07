@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 )
@@ -88,24 +90,43 @@ type OperationGrant struct {
 	FlowPolicy
 }
 
-// DecodeOperationGrants parses a leaf grant's `capabilities` list strictly.
-func DecodeOperationGrants(raw json.RawMessage) ([]OperationGrant, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
+// ParseOperationGrants parses a leaf grant's `capabilities` list strictly and
+// checks it: at least one operation, each one of known, none twice, and each
+// flow policy normalized. family names the driver in the errors. The grants
+// come back sorted by operation, so the entries built from them have one
+// order.
+func ParseOperationGrants(raw json.RawMessage, family string, known []string) ([]OperationGrant, error) {
 	var grants []OperationGrant
-	if err := decoder.Decode(&grants); err != nil {
-		return nil, err
+	if len(raw) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&grants); err != nil {
+			return nil, err
+		}
 	}
-	return grants, nil
-}
-
-// SortOperationGrants orders a grant list by operation so Normalize emits a
-// canonical form — a config that differs only in operation order hashes the same.
-func SortOperationGrants(grants []OperationGrant) {
+	want := strings.Join(known, ", ")
+	if len(grants) == 0 {
+		return nil, fmt.Errorf("capabilities must grant at least one operation (%s)", want)
+	}
+	seen := make(map[string]struct{}, len(grants))
+	for i := range grants {
+		operation := strings.TrimSpace(grants[i].Operation)
+		if !slices.Contains(known, operation) {
+			return nil, fmt.Errorf("unknown %s operation %q (want %s)", family, grants[i].Operation, want)
+		}
+		if _, dup := seen[operation]; dup {
+			return nil, fmt.Errorf("duplicate %s operation %q", family, operation)
+		}
+		seen[operation] = struct{}{}
+		grants[i].Operation = operation
+		flow, err := grants[i].FlowPolicy.Normalized()
+		if err != nil {
+			return nil, fmt.Errorf("operation %q: %w", operation, err)
+		}
+		grants[i].FlowPolicy = flow
+	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
+	return grants, nil
 }
 
 // OperationBranch builds one oneOf branch of a leaf capability's ADT: the

@@ -127,8 +127,8 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 }
 
 // parseInternetConfig validates and canonicalizes a core.internet grant's
-// config and derives the request allowlist from its capabilities — the single
-// parse Normalize (which marshals it) and Configure (which builds from it) share.
+// config and derives the request allowlist from its capabilities — the one
+// parse Configure runs, so the door check and the build agree.
 func parseInternetConfig(raw json.RawMessage) (internetConfig, Policy, error) {
 	config := internetConfig{
 		TimeoutMS:        int64(DefaultTimeout / time.Millisecond),

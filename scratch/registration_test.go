@@ -7,17 +7,16 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/aurora-dispatchers/scratch"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-func buildScratchTable(t *testing.T, config string, store memory.Store) *capability.Table {
+func buildScratchTable(t *testing.T, config string, store scratch.Store) *capability.Table {
 	t.Helper()
-	built, err := registry.New(scratch.Registration{}).Build(context.Background(),
+	built, err := registry.New(scratch.Registration{Store: store}).Build(context.Background(),
 		[]registry.Entry{{Syscall: scratch.Capability, Config: json.RawMessage(config)}},
-		registry.Services{Scratch: store},
+		registry.Services{},
 	)
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -32,7 +31,7 @@ func buildScratchTable(t *testing.T, config string, store memory.Store) *capabil
 	return built
 }
 
-func buildScratch(t *testing.T, config string, store memory.Store) capability.Handler {
+func buildScratch(t *testing.T, config string, store scratch.Store) capability.Handler {
 	return buildScratchTable(t, config, store).Entries()[0].Handler
 }
 
@@ -48,7 +47,7 @@ func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallRes
 
 // core.scratch routes by its own capability name.
 func TestScratchRoutesByName(t *testing.T) {
-	table := buildScratchTable(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`, memory.NewMapStore())
+	table := buildScratchTable(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`, scratch.NewMapStore())
 	if got := table.Operations(scratch.Capability); len(got) != 3 {
 		t.Fatalf("operations = %v, want get/put/search under %s", got, scratch.Capability)
 	}
@@ -60,7 +59,7 @@ func TestScratchRoutesByName(t *testing.T) {
 // put then search round-trips through the session's store — the offload path
 // (stash a page, grep it later).
 func TestScratchRoundTrips(t *testing.T) {
-	handler := buildScratch(t, `{"capabilities":[{"operation":"put"},{"operation":"search"}]}`, memory.NewMapStore())
+	handler := buildScratch(t, `{"capabilities":[{"operation":"put"},{"operation":"search"}]}`, scratch.NewMapStore())
 	if put := scratchCall(t, handler, `{"operation":"put","key":"fetch/x","value":"the quick brown fox"}`); put.Status() != sys.StatusResult {
 		t.Fatalf("put status = %v", put.Status())
 	}
@@ -75,7 +74,7 @@ func TestScratchRoundTrips(t *testing.T) {
 // resumed) reads. Which store a build gets is the host's choice; isolating
 // sessions from each other is tested where the host binds them.
 func TestScratchBuildsShareTheirSessionStore(t *testing.T) {
-	session := memory.NewMapStore()
+	session := scratch.NewMapStore()
 	writer := buildScratch(t, `{"capabilities":[{"operation":"put"}]}`, session)
 	reader := buildScratch(t, `{"capabilities":[{"operation":"get"}]}`, session)
 	if put := scratchCall(t, writer, `{"operation":"put","key":"notes/plan","value":"step two"}`); put.Status() != sys.StatusResult {

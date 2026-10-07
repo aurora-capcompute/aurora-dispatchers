@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
-	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
@@ -27,19 +27,24 @@ type scratchConfig struct {
 // the processes of one session share. A process can leave data for the next
 // one — a large fetched page offloaded out of the model's context, notes, an
 // auxiliary output — even when the next one sees no session history. The host
-// binds the store to the calling session (Services.Scratch), so a grant never
-// reaches another session's data.
+// builds one registration per process, over the calling session's Store, so a
+// grant never reaches another session's data.
 //
 // Because scratch is one compartment, its flow policy is a single property of
 // the grant: reads carry the union of the granted operations' labels, writes are
 // guarded by the union of their taints, and a write requires approval if any
 // grant asks for it. In practice a scratch grant declares bare operations and no
 // policy at all.
-type Registration struct{}
+type Registration struct {
+	// Store is the calling session's space. Nil (as in a config check, where
+	// there is no process) builds a handler whose every call fails with errno
+	// internal.
+	Store Store
+}
 
 func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
-func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
+func (r Registration) Configure(_ context.Context, raw json.RawMessage, _ registry.Services) (capability.Family, error) {
 	_, grants, err := parseConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
@@ -63,7 +68,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		names = append(names, operations[grant.Operation].description)
 	}
 
-	handler := memory.Handler{Name: Capability, Store: services.Scratch}
+	handler := Handler{Name: Capability, Store: r.Store}
 	entries := make([]capability.Entry, 0, len(grants))
 	for i, grant := range grants {
 		entries = append(entries, capability.Entry{
@@ -96,29 +101,10 @@ func parseConfig(raw json.RawMessage) (scratchConfig, []registry.OperationGrant,
 			return scratchConfig{}, nil, err
 		}
 	}
-	grants, err := registry.DecodeOperationGrants(config.Capabilities)
+	grants, err := registry.ParseOperationGrants(config.Capabilities, "scratch", slices.Sorted(maps.Keys(operations)))
 	if err != nil {
 		return scratchConfig{}, nil, err
 	}
-	if len(grants) == 0 {
-		return scratchConfig{}, nil, errors.New("capabilities must grant at least one operation (get, put, list, search)")
-	}
-	seen := make(map[string]struct{}, len(grants))
-	for i := range grants {
-		operation := strings.TrimSpace(grants[i].Operation)
-		if _, ok := operations[operation]; !ok {
-			return scratchConfig{}, nil, fmt.Errorf("unknown scratch operation %q (want get, put, list, search)", grants[i].Operation)
-		}
-		if _, dup := seen[operation]; dup {
-			return scratchConfig{}, nil, fmt.Errorf("duplicate scratch operation %q", operation)
-		}
-		seen[operation] = struct{}{}
-		grants[i].Operation = operation
-		if grants[i].FlowPolicy, err = grants[i].FlowPolicy.Normalized(); err != nil {
-			return scratchConfig{}, nil, fmt.Errorf("operation %q: %w", operation, err)
-		}
-	}
-	registry.SortOperationGrants(grants)
 	return config, grants, nil
 }
 

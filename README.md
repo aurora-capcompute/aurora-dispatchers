@@ -144,9 +144,9 @@ plus an injected `registry.Services`. Highlights per driver:
 - **filesystem** — `roots[]` (required, existing absolute dirs), `extensions[]`,
   `max_read_bytes` (2 MiB), `max_lines` (10000), `follow_symlinks`.
 - **scratch** — `capabilities[]{operation, require_approval, labels, taints}`.
-  The store is the calling session's, bound by the host through
-  `Services.Scratch`; a grant has no scope selector and cannot name another
-  session.
+  The store is the calling session's: the host builds `scratch.Registration`
+  per process over that session's `Store`. A grant has no scope selector and
+  cannot name another session.
 - **httptemplate** — `base_url` (grant default), `capabilities[]{operation, method,
   base_url, path, query, body, params, inject_headers, require_approval}`, bounds.
 
@@ -157,8 +157,8 @@ internet/      core.internet: bounded, allowlisted HTTP client + SSRF guard
 filesystem/    core.filesystem: read-only, chrooted file reads
 command/       core.command: host commands from an allowlist, one operation each
 httptemplate/  core.httpTemplate: manifest-fixed requests the agent only fills in
-scratch/       core.scratch: the session's durable KV
-memory/        the KV engine and Store contract scratch is built on (MapStore is the in-memory impl)
+scratch/       core.scratch: the session's durable KV — handler, Store contract,
+               MapStore (the in-memory store), registration
 openaillm/     core.openaiApi: the LLM driver (client / handler / settings)
 registry/      the Registration interface + Registry.Build, the grant vocabulary
                (adt.go) and secret resolution (secret.go) — depends on no driver

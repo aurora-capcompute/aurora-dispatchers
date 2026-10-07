@@ -134,29 +134,10 @@ func parseGrantConfig(raw json.RawMessage) (grantConfig, []registry.OperationGra
 			return grantConfig{}, nil, err
 		}
 	}
-	grants, err := registry.DecodeOperationGrants(config.Capabilities)
+	grants, err := registry.ParseOperationGrants(config.Capabilities, "openai", Operations())
 	if err != nil {
 		return grantConfig{}, nil, err
 	}
-	if len(grants) == 0 {
-		return grantConfig{}, nil, fmt.Errorf("capabilities must grant at least one operation (%s)", strings.Join(Operations(), ", "))
-	}
-	seen := make(map[string]struct{}, len(grants))
-	for i := range grants {
-		operation := strings.TrimSpace(grants[i].Operation)
-		if _, ok := openaiOperations[operation]; !ok {
-			return grantConfig{}, nil, fmt.Errorf("unknown openai operation %q (want %s)", grants[i].Operation, strings.Join(Operations(), ", "))
-		}
-		if _, dup := seen[operation]; dup {
-			return grantConfig{}, nil, fmt.Errorf("duplicate openai operation %q", operation)
-		}
-		seen[operation] = struct{}{}
-		grants[i].Operation = operation
-		if grants[i].FlowPolicy, err = grants[i].FlowPolicy.Normalized(); err != nil {
-			return grantConfig{}, nil, fmt.Errorf("operation %q: %w", operation, err)
-		}
-	}
-	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
 	return config, grants, nil
 }
 

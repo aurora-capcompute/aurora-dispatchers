@@ -142,8 +142,8 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 // operation with a unique name, each resolving to a fixed https (or loopback)
 // origin, a valid method and absolute path, a JSON body template if present,
 // valid parameter types, credential injection bound to the operation's origin,
-// and every {{param}} placeholder resolving to a declared parameter. The single
-// parse Normalize (which marshals it) and Configure (which builds from it) share.
+// and every {{param}} placeholder resolving to a declared parameter. It is the
+// one parse Configure runs, so the door check and the build agree.
 func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 	var config templateConfig
 	if len(raw) > 0 {

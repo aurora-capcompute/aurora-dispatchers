@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -96,10 +97,10 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry
 }
 
 // parseFilesystemConfig validates and canonicalizes a core.filesystem grant's
-// config — the single parse Normalize and Configure share. It rejects unknown
-// top-level fields, requires at least one granted operation from the known set
-// with no duplicates, normalizes each operation's flow policy, validates roots,
-// and applies the default read bounds.
+// config — the one parse Configure runs, so the door check and the build agree.
+// It rejects unknown top-level fields, requires at least one granted operation
+// from the known set with no duplicates, normalizes each operation's flow
+// policy, validates roots, and applies the default read bounds.
 func parseFilesystemConfig(raw json.RawMessage) (filesystemConfig, []registry.OperationGrant, error) {
 	config := filesystemConfig{
 		MaxReadBytes: DefaultMaxReadBytes,
@@ -112,29 +113,10 @@ func parseFilesystemConfig(raw json.RawMessage) (filesystemConfig, []registry.Op
 			return filesystemConfig{}, nil, err
 		}
 	}
-	grants, err := registry.DecodeOperationGrants(config.Capabilities)
+	grants, err := registry.ParseOperationGrants(config.Capabilities, "filesystem", slices.Sorted(maps.Keys(filesystemOperations)))
 	if err != nil {
 		return filesystemConfig{}, nil, err
 	}
-	if len(grants) == 0 {
-		return filesystemConfig{}, nil, errors.New("capabilities must grant at least one operation (read)")
-	}
-	seen := make(map[string]struct{}, len(grants))
-	for i := range grants {
-		operation := strings.TrimSpace(grants[i].Operation)
-		if _, ok := filesystemOperations[operation]; !ok {
-			return filesystemConfig{}, nil, fmt.Errorf("unknown filesystem operation %q (want read)", grants[i].Operation)
-		}
-		if _, dup := seen[operation]; dup {
-			return filesystemConfig{}, nil, fmt.Errorf("duplicate filesystem operation %q", operation)
-		}
-		seen[operation] = struct{}{}
-		grants[i].Operation = operation
-		if grants[i].FlowPolicy, err = grants[i].FlowPolicy.Normalized(); err != nil {
-			return filesystemConfig{}, nil, fmt.Errorf("operation %q: %w", operation, err)
-		}
-	}
-	registry.SortOperationGrants(grants)
 
 	if config.Roots, err = normalizeRoots(config.Roots); err != nil {
 		return filesystemConfig{}, nil, err

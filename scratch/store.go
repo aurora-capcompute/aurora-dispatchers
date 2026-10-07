@@ -1,7 +1,7 @@
-// Package memory is a labelled, versioned key-value handler over a Store: get,
-// put, list and search, each an ADT case selected by `operation`. Its one
-// consumer is core.scratch, whose Store is the calling session's durable
-// space. The two kernel laws fix the handler's form: determinism — reads travel
+// Package scratch provides core.scratch: a labelled, versioned key-value
+// handler over one session's Store — get, put, list and search, each an ADT
+// case selected by `operation` — and the registration that grants it. The two
+// kernel laws fix the handler's form: determinism — reads travel
 // the journaled syscall path, so replay re-reads the recorded value regardless
 // of later mutations; no ambient authority — the host hands the handler one
 // space, so a guest names keys only inside it.
@@ -10,7 +10,7 @@
 // syscall executes, so a crash between intent and completion re-drives the
 // write. A plain put repeats harmlessly. A compare-and-set put that finds its
 // own write already in place reports success instead of a conflict (see put).
-package memory
+package scratch
 
 import (
 	"bytes"
@@ -67,7 +67,7 @@ const (
 // ErrConflict is returned by Store.Put when the version expectation fails.
 // The handler surfaces it to the guest as errno conflict; the guest re-reads
 // and retries — optimistic concurrency across the processes that share a space.
-var ErrConflict = errors.New("memory: version conflict")
+var ErrConflict = errors.New("scratch: version conflict")
 
 // GetRequest asks for one key.
 type GetRequest struct {
