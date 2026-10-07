@@ -166,7 +166,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new tape: %v", err)
 		}
-		return replay.NewDispatcher[string](tape, handlerDispatcher{handler})
+		return replay.NewDispatcher(tape, handlerDispatcher{handler}, nil)
 	}
 
 	if _, err := store.Put(context.Background(), "prefs/tone", json.RawMessage(`"casual"`), nil, memory.PutAny); err != nil {
@@ -250,17 +250,17 @@ func TestMemoryPoisoningSurfacesAcrossProcesses(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store}
 	table := memTable(handler)
-	run := func() sys.Dispatcher[memPID] {
-		flow := monitor.NewFlow[string, memPID](monitor.NewTaints[string](), table)
-		return flow.Guard(flow.Stamp(chainAdapter{routedChain{handler}}))
+	run := func() sys.Dispatcher[string] {
+		flow := monitor.NewFlow(monitor.NewTaints[string](), table)
+		return flow.Guard(flow.Stamp(routedChain{handler}))
 	}
-	dispatchRun := func(t *testing.T, monitor sys.Dispatcher[memPID], pid, name, args string) sys.SyscallResult {
+	dispatchRun := func(t *testing.T, monitor sys.Dispatcher[string], pid, name, args string) sys.SyscallResult {
 		t.Helper()
 		call := sys.Syscall{Abi: sys.ABIVersion, Name: name}
 		if args != "" {
 			call.Args = json.RawMessage(args)
 		}
-		result, err := monitor.Dispatch(context.Background(), memPID{id: pid}, call, sys.Authorization{})
+		result, err := monitor.Dispatch(context.Background(), pid, call, sys.Authorization{})
 		if err != nil {
 			t.Fatalf("dispatch %s: %v", name, err)
 		}
@@ -291,18 +291,6 @@ func TestMemoryPoisoningSurfacesAcrossProcesses(t *testing.T) {
 	if result := dispatchRun(t, reader, "run-r", "k8s.delete", ""); result.Errno() != sys.ErrnoDenied {
 		t.Fatalf("poisoned reader reached the protected capability: %#v", result)
 	}
-}
-
-type memPID struct{ id string }
-
-func (p memPID) PID() string { return p.id }
-
-// chainAdapter lifts the string-cred test chain to the memPID cred the
-// flow monitor requires.
-type chainAdapter struct{ next routedChain }
-
-func (a chainAdapter) Dispatch(ctx context.Context, cred memPID, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	return a.next.Dispatch(ctx, cred.id, call, auth)
 }
 
 func TestMemoryCompareAndSet(t *testing.T) {
