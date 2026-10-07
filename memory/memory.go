@@ -29,8 +29,8 @@ import (
 )
 
 // Store is one space of keys — the whole of what a Handler can reach. The host
-// binds it before the handler sees it, so the handler names no tenant or
-// session and cannot address another space. Keys are slash-separated paths.
+// binds it before the handler sees it, so the handler names no session and
+// cannot address another space. Keys are slash-separated paths.
 // Every value is stored with its provenance labels — the taint of the process
 // that wrote it — and Get returns them so a later read sees the value *as
 // tainted*, not as laundered truth. Values are versioned (1 on first write,
