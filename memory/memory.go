@@ -1,10 +1,10 @@
 // Package memory is a labelled, versioned key-value handler over a Store: get,
 // put, list and search, each an ADT case selected by `operation`. Its one
-// consumer today is core.scratch, which gives every process a fresh in-memory
-// Store. The two kernel laws fix the handler's form: determinism — reads travel
+// consumer is core.scratch, whose Store is the calling session's durable
+// space. The two kernel laws fix the handler's form: determinism — reads travel
 // the journaled syscall path, so replay re-reads the recorded value regardless
-// of later mutations; no ambient authority — every key is prefixed by a
-// host-set tenant, so a guest names keys only inside it.
+// of later mutations; no ambient authority — the host hands the handler one
+// space, so a guest names keys only inside it.
 //
 // A third law governs the driver's one effect: the kernel journals an intent
 // before a syscall executes, so a crash between intent and completion
@@ -30,20 +30,22 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Store is the KV store a Handler serves. Keys are slash-separated paths,
-// already tenant-qualified by the handler. Every value is stored with its
-// provenance labels — the taint of the process that wrote it — and Get returns
-// them so a later read sees the value *as tainted*, not as laundered truth.
-// Values are versioned (1 on first write, incremented per write) so writers
-// can compare-and-set instead of blindly overwriting each other.
+// Store is one space of keys — the whole of what a Handler can reach. The host
+// binds it before the handler sees it, so the handler names no tenant or
+// session and cannot address another space. Keys are slash-separated paths.
+// Every value is stored with its provenance labels — the taint of the process
+// that wrote it — and Get returns them so a later read sees the value *as
+// tainted*, not as laundered truth. Values are versioned (1 on first write,
+// incremented per write) so writers can compare-and-set instead of blindly
+// overwriting each other.
 //
-// Put and Activity together are the store's activity memory: it remembers, per
-// tenant, the idempotency keys of puts it has executed and the version each
-// recorded, so a crash-re-driven put replays its outcome instead of executing
-// twice. Records must live beside the data, never in it — Get and List must
-// not surface them (no reserved-prefix leaks; use separate maps or tables).
+// Put and Activity together are the store's activity memory: it remembers the
+// idempotency keys of puts it has executed and the version each recorded, so a
+// crash-re-driven put replays its outcome instead of executing twice. Records
+// must live beside the data, never in it — Get and List must not surface them
+// (no reserved-prefix leaks; use separate maps or tables).
 type Store interface {
-	Get(ctx context.Context, tenant, key string) (value json.RawMessage, labels []string, version int64, ok bool, err error)
+	Get(ctx context.Context, key string) (value json.RawMessage, labels []string, version int64, ok bool, err error)
 	// Put writes key if the expectation holds: PutAny overwrites
 	// unconditionally, PutAbsent requires the key not to exist, a positive
 	// value requires that exact current version. It returns the new version,
@@ -56,17 +58,17 @@ type Store interface {
 	// where the store can, under the write's own lock otherwise. A failed
 	// expectation records nothing: a conflict is a non-effect, safe to
 	// re-evaluate. "" bypasses the activity memory (keyless = at-least-once).
-	Put(ctx context.Context, tenant, key string, value json.RawMessage, labels []string, expect int64, activity string) (int64, error)
+	Put(ctx context.Context, key string, value json.RawMessage, labels []string, expect int64, activity string) (int64, error)
 	// List returns each matching key WITH the provenance labels of its stored
 	// value, so enumerating keys carries the same taint a get of each value would
 	// — key names are not a label-free side channel a tainted writer can use to
 	// smuggle data to a later reader.
-	List(ctx context.Context, tenant, prefix string) (keys []ListedKey, err error)
+	List(ctx context.Context, prefix string) (keys []ListedKey, err error)
 	// Activity reports whether a put under this activity key already executed,
 	// and the version it recorded. The handler asks before any gating, so a
 	// re-driven, already-performed effect returns its result instead of
 	// re-yielding for an approval that was already granted.
-	Activity(ctx context.Context, tenant, activity string) (version int64, done bool, err error)
+	Activity(ctx context.Context, activity string) (version int64, done bool, err error)
 }
 
 // ListedKey is a key returned by List together with the provenance labels of its
@@ -85,10 +87,10 @@ const (
 
 // ErrConflict is returned by Store.Put when the version expectation fails.
 // The handler surfaces it to the guest as errno conflict; the guest re-reads
-// and retries — optimistic concurrency across a tenant's sessions.
+// and retries — optimistic concurrency across the processes that share a space.
 var ErrConflict = errors.New("memory: version conflict")
 
-// GetRequest asks for one key, relative to the addressed mount.
+// GetRequest asks for one key.
 type GetRequest struct {
 	Key string `json:"key"`
 }
@@ -164,40 +166,16 @@ const (
 	searchMaxTotalBytes     = 16 * 1024
 )
 
-// Handler serves one memory grant: a tenant plus the one mount the grant
-// addresses within it. Its get/put/list/search operations are ADT cases selected by the
-// `operation` field.
+// Handler serves get/put/list/search over one Store. Which operations a grant
+// opens, their flow policy, and approval are the grant table's entries,
+// enforced by the runtime before a call reaches this handler; the handler only
+// reads and writes.
 type Handler struct {
 	// Name is the published capability name.
 	Name string
-	// Store is the durable KV store.
+	// Store is the one space the handler serves. A nil Store fails every call
+	// with errno internal: the host did not bind a space.
 	Store Store
-	// Tenant is the absolute isolation boundary: it prefixes every physical key
-	// and is host-set (never guest-supplied), so no access can ever cross
-	// tenants. Required.
-	Tenant string
-	// Mount is the one compartment this grant addresses: the operations it
-	// allows and the policy the registry publishes for them.
-	Mount Mount
-}
-
-// Mount is the compartment a grant addresses: the operations allowed on it and
-// the data-flow policy that applies.
-type Mount struct {
-	// Operations is the set of verbs granted (get/put/list/search).
-	Operations map[string]struct{}
-	// RequireApproval, Labels and Taints are read by the registry to publish the
-	// grant's entries. Nothing here enforces them — the runtime does, above and
-	// below the replay tape.
-	RequireApproval bool
-	Labels          []string
-	Taints          []string
-}
-
-// grants reports whether the mount permits an operation.
-func (m Mount) grants(operation string) bool {
-	_, ok := m.Operations[operation]
-	return ok
 }
 
 func (h Handler) Handles(name string) bool { return name == h.Name }
@@ -206,39 +184,22 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	if h.Store == nil {
 		return sys.FailCode(sys.ErrnoInternal, "memory store is not configured"), nil
 	}
-	if h.Tenant == "" {
-		return sys.FailCode(sys.ErrnoInternal, "memory grant has no tenant"), nil
-	}
 	operation, err := peekCall(call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	mount := h.Mount
-	if !mount.grants(operation) {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf("operation %q is not granted", operation)), nil
-	}
-	// Flow policy and approval are this (operation, mount) case's entry's,
-	// enforced by the runtime above and below the replay tape. This handler
-	// reads and writes.
-	var result sys.SyscallResult
 	switch operation {
 	case "get":
-		result, err = h.get(ctx, call, mount)
+		return h.get(ctx, call)
 	case "put":
-		result, err = h.put(ctx, call, auth, mount)
+		return h.put(ctx, call)
 	case "list":
-		result, err = h.list(ctx, call, mount)
+		return h.list(ctx, call)
 	case "search":
-		result, err = h.search(ctx, call, mount)
+		return h.search(ctx, call)
 	default:
 		return sys.FailCode(sys.ErrnoNotFound, "unknown memory operation: "+operation), nil
 	}
-	if err != nil || result.Status() != sys.StatusResult {
-		return result, err
-	}
-	// The stored provenance a value already carries is the value's own and is
-	// stamped by the read; the mount's source labels are the entry's.
-	return result, nil
 }
 
 // peekCall reads the ADT discriminator from a call's args.
@@ -255,7 +216,7 @@ func peekCall(args json.RawMessage) (string, error) {
 	return envelope.Operation, nil
 }
 
-func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
+func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request GetRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
@@ -264,7 +225,7 @@ func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.Sy
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	value, labels, version, found, err := h.Store.Get(ctx, h.Tenant, qualified)
+	value, labels, version, found, err := h.Store.Get(ctx, qualified)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
@@ -274,11 +235,11 @@ func (h Handler) get(ctx context.Context, call sys.Syscall, mount Mount) (sys.Sy
 	}
 	// Restamp the stored provenance: the flow monitor accumulates it into the
 	// reading process's taint, so a value written from a tainted process resurfaces
-	// as tainted in every later session.
+	// as tainted in every later process that reads it.
 	return result.WithLabels(labels...), nil
 }
 
-func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorization, mount Mount) (sys.SyscallResult, error) {
+func (h Handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request PutRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
@@ -301,7 +262,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	// response is byte-identical to the first.
 	idem, _ := capability.IdempotencyKey(ctx)
 	if idem != "" {
-		switch version, done, err := h.Store.Activity(ctx, h.Tenant, idem); {
+		switch version, done, err := h.Store.Activity(ctx, idem); {
 		case err != nil:
 			return storeFailure(ctx, err)
 		case done:
@@ -319,7 +280,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	// is opaque), so it is stored with the process's taint, handed down by the
 	// flow monitor. The idempotency key rides along so the store records the
 	// write's activity adjacent to the write itself.
-	version, err := h.Store.Put(ctx, h.Tenant, qualified, request.Value, capability.Taint(ctx), expect, idem)
+	version, err := h.Store.Put(ctx, qualified, request.Value, capability.Taint(ctx), expect, idem)
 	if errors.Is(err, ErrConflict) {
 		return sys.FailCode(sys.ErrnoConflict, fmt.Sprintf("key %q is not at version %d; re-read and retry", request.Key, expect)), nil
 	}
@@ -329,7 +290,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall, auth sys.Authorizati
 	return marshalResult(PutResponse{Key: request.Key, Version: version})
 }
 
-func (h Handler) list(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
+func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request ListRequest
 	if len(call.Args) > 0 {
 		if err := json.Unmarshal(call.Args, &request); err != nil {
@@ -344,30 +305,28 @@ func (h Handler) list(ctx context.Context, call sys.Syscall, mount Mount) (sys.S
 		}
 		prefix = qualified
 	}
-	entries, err := h.Store.List(ctx, h.Tenant, prefix)
+	entries, err := h.Store.List(ctx, prefix)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	// Return keys relative to the mount — the guest's view — and carry
-	// the union of the listed values' provenance labels, so a key name derived
-	// from tainted data cannot be read back label-free (get/search already
-	// re-stamp their values; list now matches for key names).
-	relative := make([]string, 0, len(entries))
+	// Carry the union of the listed values' provenance labels, so a key name
+	// derived from tainted data cannot be read back label-free (get/search
+	// re-stamp their values; list matches for key names).
+	keys := make([]string, 0, len(entries))
 	var labels []string
 	for _, entry := range entries {
-		key := entry.Key
-		relative = append(relative, key)
+		keys = append(keys, entry.Key)
 		labels = append(labels, entry.Labels...)
 	}
-	sort.Strings(relative)
-	result, err := marshalResult(ListResponse{Keys: relative})
+	sort.Strings(keys)
+	result, err := marshalResult(ListResponse{Keys: keys})
 	if err != nil {
 		return result, err
 	}
 	return result.WithLabels(labels...), nil
 }
 
-func (h Handler) search(ctx context.Context, call sys.Syscall, mount Mount) (sys.SyscallResult, error) {
+func (h Handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request SearchRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
@@ -386,7 +345,7 @@ func (h Handler) search(ctx context.Context, call sys.Syscall, mount Mount) (sys
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("invalid pattern: %v", err)), nil
 	}
-	value, labels, _, found, err := h.Store.Get(ctx, h.Tenant, qualified)
+	value, labels, _, found, err := h.Store.Get(ctx, qualified)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
@@ -507,16 +466,15 @@ func marshalResult(value any) (sys.SyscallResult, error) {
 	return sys.Result(raw), nil
 }
 
-// MapStore is the in-memory reference Store — for tests and prototyping.
-// Production supplies a durable implementation. The activity memory is a
-// separate map (invisible to Get/List by construction) sharing the store's
-// one mutex, so the write and its record are atomic. Being process-local it
-// dies with the values themselves — it covers re-drives within one host
-// lifetime — and grows unboundedly, which its role affords.
+// MapStore is one space held in memory: the reference Store, and the store
+// behind an in-memory deployment. The activity memory is a separate map
+// (invisible to Get/List by construction) under the store's one mutex, so the
+// write and its record are atomic. It dies with the host and grows without
+// bound, which its role affords.
 type MapStore struct {
 	mu         sync.Mutex
-	tenants    map[string]map[string]labelled
-	activities map[string]map[string]int64 // tenant → activity key → recorded version
+	values     map[string]labelled
+	activities map[string]int64 // activity key → recorded version
 }
 
 type labelled struct {
@@ -527,64 +485,54 @@ type labelled struct {
 
 func NewMapStore() *MapStore {
 	return &MapStore{
-		tenants:    make(map[string]map[string]labelled),
-		activities: make(map[string]map[string]int64),
+		values:     make(map[string]labelled),
+		activities: make(map[string]int64),
 	}
 }
 
-func (s *MapStore) Get(_ context.Context, tenant, key string) (json.RawMessage, []string, int64, bool, error) {
+func (s *MapStore) Get(_ context.Context, key string) (json.RawMessage, []string, int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stored, ok := s.tenants[tenant][key]
+	stored, ok := s.values[key]
 	return append(json.RawMessage(nil), stored.value...), append([]string(nil), stored.labels...), stored.version, ok, nil
 }
 
-func (s *MapStore) Put(_ context.Context, tenant, key string, value json.RawMessage, labels []string, expect int64, activity string) (int64, error) {
+func (s *MapStore) Put(_ context.Context, key string, value json.RawMessage, labels []string, expect int64, activity string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if activity != "" {
-		if version, done := s.activities[tenant][activity]; done {
+		if version, done := s.activities[activity]; done {
 			return version, nil // this intent already wrote; replay its outcome
 		}
 	}
-	space := s.tenants[tenant]
-	if space == nil {
-		space = make(map[string]labelled)
-		s.tenants[tenant] = space
-	}
-	current := space[key].version // zero when absent
+	current := s.values[key].version // zero when absent
 	if expect != PutAny && expect != current {
 		return 0, ErrConflict
 	}
 	next := current + 1
-	space[key] = labelled{
+	s.values[key] = labelled{
 		value:   append(json.RawMessage(nil), value...),
 		labels:  append([]string(nil), labels...),
 		version: next,
 	}
 	if activity != "" {
-		records := s.activities[tenant]
-		if records == nil {
-			records = make(map[string]int64)
-			s.activities[tenant] = records
-		}
-		records[activity] = next // same mutex hold as the write: atomic
+		s.activities[activity] = next // same mutex hold as the write: atomic
 	}
 	return next, nil
 }
 
-func (s *MapStore) Activity(_ context.Context, tenant, activity string) (int64, bool, error) {
+func (s *MapStore) Activity(_ context.Context, activity string) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	version, done := s.activities[tenant][activity]
+	version, done := s.activities[activity]
 	return version, done, nil
 }
 
-func (s *MapStore) List(_ context.Context, tenant, prefix string) ([]ListedKey, error) {
+func (s *MapStore) List(_ context.Context, prefix string) ([]ListedKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var keys []ListedKey
-	for key, stored := range s.tenants[tenant] {
+	for key, stored := range s.values {
 		if prefix == "" || key == prefix || strings.HasPrefix(key, prefix+"/") {
 			keys = append(keys, ListedKey{Key: key, Labels: append([]string(nil), stored.labels...)})
 		}

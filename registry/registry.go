@@ -14,6 +14,7 @@ import (
 	"fmt"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 )
 
 // Services are the host-side facts a registration needs to configure a driver —
@@ -26,6 +27,12 @@ type Services struct {
 	// AuditKey keys the credential fingerprints stamped on results (empty is
 	// allowed; it yields a stable but unkeyed fingerprint).
 	AuditKey []byte
+	// Scratch is the calling session's durable scratch space, already bound to
+	// that session by the host. Unlike the fields above it is per-process: the
+	// provider sets it on each build from the process credential. Nil (as in a
+	// config check, where there is no process) builds a core.scratch handler
+	// whose every call fails with errno internal.
+	Scratch memory.Store
 }
 
 // Registration builds a leaf I/O driver for one syscall. A registration is

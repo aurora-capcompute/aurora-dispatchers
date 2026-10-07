@@ -13,14 +13,8 @@ import (
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
-// Capability is the syscall/capability name of the process-scoped scratch
-// store.
+// Capability is the syscall/capability name of the session's scratch store.
 const Capability = "core.scratch"
-
-// tenant namespaces keys inside a process's scratch map. Every process
-// gets its own fresh store, so isolation comes from the per-process store, not
-// the tenant — the tenant is a constant.
-const tenant = "scratch"
 
 // scratchConfig is a core.scratch grant's driver configuration: the operations it
 // grants, each an ADT case discriminated by `operation`, with its data-flow
@@ -29,36 +23,33 @@ type scratchConfig struct {
 	Capabilities json.RawMessage `json:"capabilities,omitempty"`
 }
 
-// Registration provides core.scratch: a process-local, ephemeral KV
-// (get/put/list/search) backed by a fresh in-memory store built per process and
-// discarded when the process ends. It is the right home for large transient content — a fetched
-// page offloaded out of the model's context: private to the process, never
-// written to the durable tenant store, and gone when the run is over. The store
-// lives for one activation; a process that parks and reactivates starts with an
-// empty scratch (the journaled summary/excerpt of any offload survive
-// regardless — only a full-text re-query would miss and prompt a re-fetch).
+// Registration provides core.scratch: a durable KV (get/put/list/search) that
+// the processes of one session share. A process can leave data for the next
+// one — a large fetched page offloaded out of the model's context, notes, an
+// auxiliary output — even when the next one sees no session history. The host
+// binds the store to the calling session (Services.Scratch), so a grant never
+// reaches another session's data.
 //
-// Because scratch is one compartment, its flow policy is a single mount property:
-// reads carry the union of the granted operations' labels, writes are guarded by
-// the union of their taints, and a write requires approval if any grant asks for
-// it. In practice a scratch grant declares bare operations and no policy at all.
+// Because scratch is one compartment, its flow policy is a single property of
+// the grant: reads carry the union of the granted operations' labels, writes are
+// guarded by the union of their taints, and a write requires approval if any
+// grant asks for it. In practice a scratch grant declares bare operations and no
+// policy at all.
 type Registration struct{}
 
 func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
-func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry.Services) (capability.Family, error) {
+func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
 	_, grants, err := parseConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
 	}
 
-	ops := make(map[string]struct{}, len(grants))
 	requireApproval := false
 	var labels, taints []string
 	branches := make([]json.RawMessage, 0, len(grants))
 	names := make([]string, 0, len(grants))
 	for _, grant := range grants {
-		ops[grant.Operation] = struct{}{}
 		if grant.RequireApproval != nil && *grant.RequireApproval {
 			requireApproval = true
 		}
@@ -72,21 +63,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry
 		names = append(names, operations[grant.Operation].description)
 	}
 
-	// A fresh in-memory store per Configure call — i.e. per process. It is
-	// dropped with the process's dispatcher chain, so nothing stored here
-	// outlives the run. Scratch is inherently one compartment — the process's own
-	// ephemeral store — so calls address it with no selector.
-	handler := memory.Handler{
-		Name:   Capability,
-		Store:  memory.NewMapStore(),
-		Tenant: tenant,
-		Mount: memory.Mount{
-			Operations:      ops,
-			RequireApproval: requireApproval,
-			Labels:          labels,
-			Taints:          taints,
-		},
-	}
+	handler := memory.Handler{Name: Capability, Store: services.Scratch}
 	entries := make([]capability.Entry, 0, len(grants))
 	for i, grant := range grants {
 		entries = append(entries, capability.Entry{
@@ -101,7 +78,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, _ registry
 		})
 	}
 	return capability.Family{Entries: entries,
-		Description: fmt.Sprintf("Process-local scratch memory — ephemeral and private to this process, cleared when it ends, never written to shared storage. Keys are relative slash-paths. Stash large content here and query it with search rather than carrying it in the conversation. Choose an operation:\n- %s.",
+		Description: fmt.Sprintf("Session scratch memory — durable, shared by every process in this session, private to it. Keys are relative slash-paths. Stash large content or notes here for this run or a later one, and query large values with search rather than carrying them in the conversation. Choose an operation:\n- %s.",
 			strings.Join(names, "\n- ")),
 	}, nil
 }

@@ -2,7 +2,7 @@
 
 **The "device drivers" that let a sandboxed agent touch the real world — safely.**
 `aurora-dispatchers` is a Go library of ready‑made capability drivers for Aurora:
-make an HTTP call, read a file, run an allowlisted command, keep a process‑local
+make an HTTP call, read a file, run an allowlisted command, keep a per‑session
 scratch store, or call an LLM. Each driver
 runs the action *for* the agent, under a scoped, approval‑gated, recorded grant.
 
@@ -64,7 +64,7 @@ and replaying around it.
 | --- | --- | --- | --- |
 | `core.internet` | `internet/` | Bounded HTTP client, any method | Allowlist of `METHOD:origin`; **SSRF guard** blocks loopback/private/metadata IPs (post‑DNS, defeats rebinding); size + time bounds; policy re‑checked on every redirect |
 | `core.filesystem` | `filesystem/` | **Read‑only** host‑file reads | Chrooted to declared `roots`; rejects symlink escapes; whole‑file or 1‑based line range; byte/line caps; optional extension allowlist; returns a SHA‑256 hash |
-| `core.scratch` | `scratch/` | Process‑local *ephemeral* store | `get`/`put`/`list`/`search` on a single **unscoped** fresh, private store per process — cleared when it ends (a place to offload a large read out of the model's context); optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
+| `core.scratch` | `scratch/` | Durable store shared by the processes of one session | `get`/`put`/`list`/`search` on the calling session's store, bound by the host — one process can leave data for a later one, even without session history (a place to offload a large read out of the model's context, notes, auxiliary output); optimistic concurrency (`if_version`); **exactly‑once puts** via idempotency key; preserves provenance labels |
 | `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
 | `core.httpTemplate` | `httptemplate/` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
 | `core.command` | `command/` | Host commands from an author‑declared allowlist | One operation per allowlisted command; no shell (exec with a fixed argv); every slot is a closed set or an anchored pattern; no value may begin with `-` or carry a control character; the child inherits no environment; approval on by default |
@@ -143,8 +143,10 @@ plus an injected `registry.Services`. Highlights per driver:
   labels, taints}`, `timeout_ms`, `max_response_bytes`, `allow_private_network`.
 - **filesystem** — `roots[]` (required, existing absolute dirs), `extensions[]`,
   `max_read_bytes` (2 MiB), `max_lines` (10000), `follow_symlinks`.
-- **scratch** — `capabilities[]{operation, require_approval, labels, taints}` — a
-  single unscoped, process‑private store (no scope selector).
+- **scratch** — `capabilities[]{operation, require_approval, labels, taints}`.
+  The store is the calling session's, bound by the host through
+  `Services.Scratch`; a grant has no scope selector and cannot name another
+  session.
 - **httptemplate** — `base_url` (grant default), `capabilities[]{operation, method,
   base_url, path, query, body, params, inject_headers, require_approval}`, bounds.
 
@@ -155,8 +157,8 @@ internet/      core.internet: bounded, allowlisted HTTP client + SSRF guard
 filesystem/    core.filesystem: read-only, chrooted file reads
 command/       core.command: host commands from an allowlist, one operation each
 httptemplate/  core.httpTemplate: manifest-fixed requests the agent only fills in
-scratch/       core.scratch: process-local ephemeral KV
-memory/        the KV engine scratch is built on (MapStore is the reference impl)
+scratch/       core.scratch: the session's durable KV
+memory/        the KV engine and Store contract scratch is built on (MapStore is the in-memory impl)
 openaillm/     core.openaiApi: the LLM driver (client / handler / settings)
 registry/      the Registration interface + Registry.Build, the grant vocabulary
                (adt.go) and secret resolution (secret.go) — depends on no driver

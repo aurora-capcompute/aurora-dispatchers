@@ -7,18 +7,17 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-dispatchers/memory"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/aurora-dispatchers/scratch"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-func buildScratchTable(t *testing.T, config string) *capability.Table {
+func buildScratchTable(t *testing.T, config string, store memory.Store) *capability.Table {
 	t.Helper()
-	// Scratch needs no Services — it owns a fresh in-memory store per build
-	// (i.e. per process).
 	built, err := registry.New(scratch.Registration{}).Build(context.Background(),
 		[]registry.Entry{{Syscall: scratch.Capability, Config: json.RawMessage(config)}},
-		registry.Services{},
+		registry.Services{Scratch: store},
 	)
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -33,8 +32,8 @@ func buildScratchTable(t *testing.T, config string) *capability.Table {
 	return built
 }
 
-func buildScratch(t *testing.T, config string) capability.Handler {
-	return buildScratchTable(t, config).Entries()[0].Handler
+func buildScratch(t *testing.T, config string, store memory.Store) capability.Handler {
+	return buildScratchTable(t, config, store).Entries()[0].Handler
 }
 
 func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallResult {
@@ -47,9 +46,9 @@ func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallRes
 	return res
 }
 
-// core.scratch routes by the capability name and requires no host Services.
-func TestScratchRoutesByNameAndNeedsNoServices(t *testing.T) {
-	table := buildScratchTable(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`)
+// core.scratch routes by its own capability name.
+func TestScratchRoutesByName(t *testing.T) {
+	table := buildScratchTable(t, `{"capabilities":[{"operation":"put"},{"operation":"get"},{"operation":"search"}]}`, memory.NewMapStore())
 	if got := table.Operations(scratch.Capability); len(got) != 3 {
 		t.Fatalf("operations = %v, want get/put/search under %s", got, scratch.Capability)
 	}
@@ -58,10 +57,10 @@ func TestScratchRoutesByNameAndNeedsNoServices(t *testing.T) {
 	}
 }
 
-// put then search round-trips through the process's own store — the offload
-// path (stash a page, grep it later).
+// put then search round-trips through the session's store — the offload path
+// (stash a page, grep it later).
 func TestScratchRoundTrips(t *testing.T) {
-	handler := buildScratch(t, `{"capabilities":[{"operation":"put"},{"operation":"search"}]}`)
+	handler := buildScratch(t, `{"capabilities":[{"operation":"put"},{"operation":"search"}]}`, memory.NewMapStore())
 	if put := scratchCall(t, handler, `{"operation":"put","key":"fetch/x","value":"the quick brown fox"}`); put.Status() != sys.StatusResult {
 		t.Fatalf("put status = %v", put.Status())
 	}
@@ -71,20 +70,33 @@ func TestScratchRoundTrips(t *testing.T) {
 	}
 }
 
-// Each build owns a distinct store: a key written to one process's scratch is
-// invisible to another's. This is the whole point — process-scoped, never
-// shared, so offloaded internet data cannot leak across processes.
-func TestScratchIsProcessIsolated(t *testing.T) {
-	a := buildScratch(t, `{"capabilities":[{"operation":"put"},{"operation":"get"}]}`)
-	b := buildScratch(t, `{"capabilities":[{"operation":"put"},{"operation":"get"}]}`)
-	if put := scratchCall(t, a, `{"operation":"put","key":"secret","value":"a-only"}`); put.Status() != sys.StatusResult {
-		t.Fatalf("put into a = %v", put.Status())
+// Every build — every quantum of every process — over one session's store sees
+// the same data: what one process writes, a later process (or the same one,
+// resumed) reads. Which store a build gets is the host's choice; isolating
+// sessions from each other is tested where the host binds them.
+func TestScratchBuildsShareTheirSessionStore(t *testing.T) {
+	session := memory.NewMapStore()
+	writer := buildScratch(t, `{"capabilities":[{"operation":"put"}]}`, session)
+	reader := buildScratch(t, `{"capabilities":[{"operation":"get"}]}`, session)
+	if put := scratchCall(t, writer, `{"operation":"put","key":"notes/plan","value":"step two"}`); put.Status() != sys.StatusResult {
+		t.Fatalf("put = %v", put.Status())
 	}
-	got := scratchCall(t, b, `{"operation":"get","key":"secret"}`)
-	if got.Status() != sys.StatusResult {
-		t.Fatalf("get from b = %v", got.Status())
+	got := scratchCall(t, reader, `{"operation":"get","key":"notes/plan"}`)
+	if got.Status() != sys.StatusResult || !strings.Contains(string(got.Result()), `"step two"`) {
+		t.Fatalf("get = %v / %s, want the value the other build wrote", got.Status(), got.Result())
 	}
-	if !strings.Contains(string(got.Result()), `"found":false`) || strings.Contains(string(got.Result()), "a-only") {
-		t.Fatalf("b saw a's key: %s — scratch is not isolated", got.Result())
+}
+
+// The door check builds without a process, so without a store: the config is
+// still validated, and a handler built that way fails closed instead of
+// writing somewhere unscoped.
+func TestScratchWithoutAStoreFailsClosed(t *testing.T) {
+	config := json.RawMessage(`{"capabilities":[{"operation":"put"}]}`)
+	if _, err := registryValidate(scratch.Registration{}, scratch.Capability, config); err != nil {
+		t.Fatalf("door check refused a valid grant: %v", err)
+	}
+	handler := buildScratch(t, string(config), nil)
+	if got := scratchCall(t, handler, `{"operation":"put","key":"k","value":1}`); got.Errno() != sys.ErrnoInternal {
+		t.Fatalf("put without a store = %#v, want errno internal", got)
 	}
 }
