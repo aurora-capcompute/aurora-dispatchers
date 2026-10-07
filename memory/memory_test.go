@@ -19,20 +19,10 @@ import (
 // memJournal is a local in-memory journaled.Journal double; the kernel ships
 // only the interface.
 type memJournal struct {
-	header    journaled.Header
-	hasHeader bool
-	records   []journaled.Record
+	records []journaled.Record
 }
 
 func newMemJournal() *memJournal { return &memJournal{} }
-
-func (j *memJournal) Header() (journaled.Header, bool, error) { return j.header, j.hasHeader, nil }
-
-func (j *memJournal) SetHeader(header journaled.Header) error {
-	j.header = header
-	j.hasHeader = true
-	return nil
-}
 
 func (j *memJournal) Load(idx int) (journaled.Record, error) {
 	if idx < 0 || idx >= len(j.records) {
@@ -158,14 +148,10 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	store := memory.NewMapStore()
 	handler := memory.Handler{Name: "mem", Store: store}
 	journal := newMemJournal()
-	header := journaled.Header{ABI: sys.ABIVersion, Program: "sha256:test", Process: "proc-1"}
 
 	chain := func(t *testing.T) sys.Dispatcher[string] {
 		t.Helper()
-		tape, err := journaled.NewTape(journal, header)
-		if err != nil {
-			t.Fatalf("new tape: %v", err)
-		}
+		tape := journaled.NewTape(journal)
 		return replay.NewDispatcher(tape, handlerDispatcher{handler}, nil)
 	}
 
