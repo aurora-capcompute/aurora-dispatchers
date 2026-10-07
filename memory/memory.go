@@ -6,13 +6,10 @@
 // of later mutations; no ambient authority — the host hands the handler one
 // space, so a guest names keys only inside it.
 //
-// A third law governs the driver's one effect: the kernel journals an intent
-// before a syscall executes, so a crash between intent and completion
-// re-drives the dispatch — at-least-once — under the same idempotency key.
-// An effectful driver's activity memory makes that window exactly-once
-// (Helland, "Life beyond Distributed Transactions"; Stripe-style idempotency
-// keys): put remembers the keys it has executed and replays the recorded
-// result for a re-seen key instead of writing again. Reads stay keyless.
+// Its one effect, put, is at-least-once: the kernel journals an intent before a
+// syscall executes, so a crash between intent and completion re-drives the
+// write. A plain put repeats harmlessly; a compare-and-set put may then report a
+// conflict with its own earlier write.
 package memory
 
 import (
@@ -38,37 +35,18 @@ import (
 // tainted*, not as laundered truth. Values are versioned (1 on first write,
 // incremented per write) so writers can compare-and-set instead of blindly
 // overwriting each other.
-//
-// Put and Activity together are the store's activity memory: it remembers the
-// idempotency keys of puts it has executed and the version each recorded, so a
-// crash-re-driven put replays its outcome instead of executing twice. Records
-// must live beside the data, never in it — Get and List must not surface them
-// (no reserved-prefix leaks; use separate maps or tables).
 type Store interface {
 	Get(ctx context.Context, key string) (value json.RawMessage, labels []string, version int64, ok bool, err error)
 	// Put writes key if the expectation holds: PutAny overwrites
 	// unconditionally, PutAbsent requires the key not to exist, a positive
 	// value requires that exact current version. It returns the new version,
 	// or ErrConflict when the expectation fails.
-	//
-	// A non-empty activity key makes the write exactly-once: if the key is
-	// already recorded, Put returns the recorded version without touching the
-	// value or re-evaluating the expectation; otherwise it records
-	// {activity → new version} adjacent to the write — in one transaction
-	// where the store can, under the write's own lock otherwise. A failed
-	// expectation records nothing: a conflict is a non-effect, safe to
-	// re-evaluate. "" bypasses the activity memory (keyless = at-least-once).
-	Put(ctx context.Context, key string, value json.RawMessage, labels []string, expect int64, activity string) (int64, error)
+	Put(ctx context.Context, key string, value json.RawMessage, labels []string, expect int64) (int64, error)
 	// List returns each matching key WITH the provenance labels of its stored
 	// value, so enumerating keys carries the same taint a get of each value would
 	// — key names are not a label-free side channel a tainted writer can use to
 	// smuggle data to a later reader.
 	List(ctx context.Context, prefix string) (keys []ListedKey, err error)
-	// Activity reports whether a put under this activity key already executed,
-	// and the version it recorded. The handler asks before any gating, so a
-	// re-driven, already-performed effect returns its result instead of
-	// re-yielding for an approval that was already granted.
-	Activity(ctx context.Context, activity string) (version int64, done bool, err error)
 }
 
 // ListedKey is a key returned by List together with the provenance labels of its
@@ -251,24 +229,6 @@ func (h Handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	if len(request.Value) == 0 {
 		return sys.FailCode(sys.ErrnoInvalidArgs, "value is required"), nil
 	}
-	// Exactly-once across the intent→completion crash window: the kernel
-	// journals an intent before the effect executes and re-drives it after a
-	// crash, so this put can arrive again under the same idempotency key. A
-	// recorded key means the write — and any approval that gated it — already
-	// happened: replay the recorded result before the gate, because
-	// re-executing would double-apply the write and re-yielding would ask a
-	// human to authorize an effect already performed. The key pins the
-	// call-hash, so a re-seen key carries these same arguments and the rebuilt
-	// response is byte-identical to the first.
-	idem, _ := capability.IdempotencyKey(ctx)
-	if idem != "" {
-		switch version, done, err := h.Store.Activity(ctx, idem); {
-		case err != nil:
-			return storeFailure(ctx, err)
-		case done:
-			return marshalResult(PutResponse{Key: request.Key, Version: version})
-		}
-	}
 	expect := PutAny
 	if request.IfVersion != nil {
 		if *request.IfVersion < 0 {
@@ -278,9 +238,8 @@ func (h Handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	}
 	// The written value derives from anything the process has observed (the guest
 	// is opaque), so it is stored with the process's taint, handed down by the
-	// flow monitor. The idempotency key rides along so the store records the
-	// write's activity adjacent to the write itself.
-	version, err := h.Store.Put(ctx, qualified, request.Value, capability.Taint(ctx), expect, idem)
+	// flow monitor.
+	version, err := h.Store.Put(ctx, qualified, request.Value, capability.Taint(ctx), expect)
 	if errors.Is(err, ErrConflict) {
 		return sys.FailCode(sys.ErrnoConflict, fmt.Sprintf("key %q is not at version %d; re-read and retry", request.Key, expect)), nil
 	}
@@ -467,14 +426,11 @@ func marshalResult(value any) (sys.SyscallResult, error) {
 }
 
 // MapStore is one space held in memory: the reference Store, and the store
-// behind an in-memory deployment. The activity memory is a separate map
-// (invisible to Get/List by construction) under the store's one mutex, so the
-// write and its record are atomic. It dies with the host and grows without
+// behind an in-memory deployment. It dies with the host and grows without
 // bound, which its role affords.
 type MapStore struct {
-	mu         sync.Mutex
-	values     map[string]labelled
-	activities map[string]int64 // activity key → recorded version
+	mu     sync.Mutex
+	values map[string]labelled
 }
 
 type labelled struct {
@@ -484,10 +440,7 @@ type labelled struct {
 }
 
 func NewMapStore() *MapStore {
-	return &MapStore{
-		values:     make(map[string]labelled),
-		activities: make(map[string]int64),
-	}
+	return &MapStore{values: make(map[string]labelled)}
 }
 
 func (s *MapStore) Get(_ context.Context, key string) (json.RawMessage, []string, int64, bool, error) {
@@ -497,14 +450,9 @@ func (s *MapStore) Get(_ context.Context, key string) (json.RawMessage, []string
 	return append(json.RawMessage(nil), stored.value...), append([]string(nil), stored.labels...), stored.version, ok, nil
 }
 
-func (s *MapStore) Put(_ context.Context, key string, value json.RawMessage, labels []string, expect int64, activity string) (int64, error) {
+func (s *MapStore) Put(_ context.Context, key string, value json.RawMessage, labels []string, expect int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if activity != "" {
-		if version, done := s.activities[activity]; done {
-			return version, nil // this intent already wrote; replay its outcome
-		}
-	}
 	current := s.values[key].version // zero when absent
 	if expect != PutAny && expect != current {
 		return 0, ErrConflict
@@ -515,17 +463,7 @@ func (s *MapStore) Put(_ context.Context, key string, value json.RawMessage, lab
 		labels:  append([]string(nil), labels...),
 		version: next,
 	}
-	if activity != "" {
-		s.activities[activity] = next // same mutex hold as the write: atomic
-	}
 	return next, nil
-}
-
-func (s *MapStore) Activity(_ context.Context, activity string) (int64, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	version, done := s.activities[activity]
-	return version, done, nil
 }
 
 func (s *MapStore) List(_ context.Context, prefix string) ([]ListedKey, error) {
