@@ -8,11 +8,12 @@
 //
 // Its one effect, put, is at-least-once: the kernel journals an intent before a
 // syscall executes, so a crash between intent and completion re-drives the
-// write. A plain put repeats harmlessly; a compare-and-set put may then report a
-// conflict with its own earlier write.
+// write. A plain put repeats harmlessly. A compare-and-set put that finds its
+// own write already in place reports success instead of a conflict (see put).
 package memory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -241,6 +242,14 @@ func (h Handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	// flow monitor.
 	version, err := h.Store.Put(ctx, qualified, request.Value, capability.Taint(ctx), expect)
 	if errors.Is(err, ErrConflict) {
+		// A crash between this put and its completion record re-drives it, and
+		// the first run may have written already. If the key now holds exactly
+		// this value at the version this put would have made, the state is what
+		// the put asked for — whoever wrote it — so the put succeeded.
+		current, _, at, found, getErr := h.Store.Get(ctx, qualified)
+		if getErr == nil && found && at == expect+1 && bytes.Equal(current, request.Value) {
+			return marshalResult(PutResponse{Key: request.Key, Version: at})
+		}
 		return sys.FailCode(sys.ErrnoConflict, fmt.Sprintf("key %q is not at version %d; re-read and retry", request.Key, expect)), nil
 	}
 	if err != nil {

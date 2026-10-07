@@ -445,3 +445,31 @@ func TestMemorySearch(t *testing.T) {
 		t.Fatalf("bad pattern = %#v", bad)
 	}
 }
+
+// A crash between a compare-and-set put and its completion record re-drives the
+// put after its first run may already have written. Finding its own write in
+// place — this value, at the version this put makes — it succeeds instead of
+// reporting a conflict with itself, and writes nothing more.
+func TestCompareAndSetPutSurvivesItsOwnReDrive(t *testing.T) {
+	store := memory.NewMapStore()
+	handler := memory.Handler{Name: "mem", Store: store}
+	put := `{"key":"plan","value":"step two","if_version":0}`
+
+	first := dispatch(t, handler, "put", put, sys.Authorization{})
+	redriven := dispatch(t, handler, "put", put, sys.Authorization{})
+	if redriven.Status() != sys.StatusResult || string(redriven.Result()) != string(first.Result()) {
+		t.Fatalf("re-driven put = %#v, want the first run's result %s", redriven, first.Result())
+	}
+	if _, _, version, _, _ := store.Get(context.Background(), "plan"); version != 1 {
+		t.Fatalf("version = %d, want 1: the re-drive must not write again", version)
+	}
+
+	// A different value, or the same value further along, is a real conflict.
+	if r := dispatch(t, handler, "put", `{"key":"plan","value":"other","if_version":0}`, sys.Authorization{}); r.Errno() != sys.ErrnoConflict {
+		t.Fatalf("different value = %#v, want conflict", r)
+	}
+	dispatch(t, handler, "put", `{"key":"plan","value":"step three"}`, sys.Authorization{})
+	if r := dispatch(t, handler, "put", put, sys.Authorization{}); r.Errno() != sys.ErrnoConflict {
+		t.Fatalf("stale create of an old value = %#v, want conflict", r)
+	}
+}
