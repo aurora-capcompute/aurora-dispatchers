@@ -35,9 +35,9 @@ func TestMatchesSyscall(t *testing.T) {
 // operation this grant withheld cannot appear in it — the driver knows four, and
 // a grant of two must advertise two.
 func TestConfigurePublishesOneCapability(t *testing.T) {
-	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test","capabilities":[{"operation":"chat"},{"operation":"models"}]}`)
+	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":{"secret":"OPENAI_KEY"},"capabilities":[{"operation":"chat"},{"operation":"models"}]}`)
 	config := capability.NewTable()
-	contribution, err := (Registration{}).Configure(context.Background(), raw, registry.Services{})
+	contribution, err := (Registration{}).Configure(context.Background(), raw, keyed)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
@@ -67,13 +67,24 @@ func TestConfigurePublishesOneCapability(t *testing.T) {
 }
 
 func TestConfigureRequiresOperations(t *testing.T) {
-	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test"}`)
-	if _, err := (Registration{}).Configure(context.Background(), raw, registry.Services{}); err == nil {
+	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":{"secret":"OPENAI_KEY"}}`)
+	if _, err := (Registration{}).Configure(context.Background(), raw, keyed); err == nil {
 		t.Fatal("expected error when no operations are granted")
 	}
-	bad := json.RawMessage(`{"api_key":"sk-test","capabilities":[{"operation":"nope"}]}`)
-	if _, err := (Registration{}).Configure(context.Background(), bad, registry.Services{}); err == nil {
+	bad := json.RawMessage(`{"api_key":{"secret":"OPENAI_KEY"},"capabilities":[{"operation":"nope"}]}`)
+	if _, err := (Registration{}).Configure(context.Background(), bad, keyed); err == nil {
 		t.Fatal("expected error for an unknown operation")
+	}
+}
+
+// keyed is a Services whose resolver holds the test key every fixture names.
+var keyed = registry.Services{Secrets: mapResolver{"OPENAI_KEY": "sk-test"}}
+
+// An inline api_key is refused: the manifest names the secret, the host holds it.
+func TestConfigureRefusesAnInlineKey(t *testing.T) {
+	raw := json.RawMessage(`{"base_url":"https://api.openai.com/v1","api_key":"sk-test","capabilities":[{"operation":"chat"}]}`)
+	if _, err := (Registration{}).Configure(context.Background(), raw, keyed); err == nil {
+		t.Fatal("an inline api_key was accepted")
 	}
 }
 
@@ -131,9 +142,9 @@ func TestConfigureFailsClosedOnMissingAPIKeySecret(t *testing.T) {
 // — below the replay tape, so a taint denial was journaled as a completion and
 // replayed forever instead of re-deriving from the run's current taint.
 func TestConfigurePublishesFlowPolicyPerOperation(t *testing.T) {
-	raw := json.RawMessage(`{"base_url":"https://api.example.com","api_key":"k",` +
+	raw := json.RawMessage(`{"base_url":"https://api.example.com","api_key":{"secret":"OPENAI_KEY"},` +
 		`"capabilities":[{"operation":"chat","labels":["ai_output"],"taints":["untrusted_web"]}]}`)
-	family, err := Registration{}.Configure(context.Background(), raw, registry.Services{})
+	family, err := Registration{}.Configure(context.Background(), raw, keyed)
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}

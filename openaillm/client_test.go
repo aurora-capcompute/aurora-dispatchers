@@ -86,7 +86,7 @@ func TestSDKClientUsesCompatibleEndpointsAndHeaders(t *testing.T) {
 	settings, err := normalizeSettings(Settings{
 		BaseURL:           server.URL + "/v1",
 		AllowInsecureHTTP: true,
-		APIKey:            registry.LiteralSecret("test-key"),
+		APIKey:            registry.SecretRef("OPENAI_KEY"),
 		Headers:           map[string]string{"X-Gateway-Tenant": "tenant-a"},
 	})
 	if err != nil {

@@ -135,7 +135,7 @@ There are no env vars read directly here — config arrives as JSON grant config
 plus an injected `registry.Services`. Highlights per driver:
 
 - **openaillm** — `base_url` (default `https://api.openai.com/v1`), `api_key`
-  (literal or `{"secret":"NAME"}`), `default_model`, `allowed_models`, `timeout`
+  (`{"secret":"NAME"}` only — an inline key is refused), `default_model`, `allowed_models`, `timeout`
   (2m), `max_request_bytes`, `headers` (Authorization/Host forbidden). The OpenAI
   SDK is built with explicit options so stray `OPENAI_*` env vars can't override a
   configured provider.

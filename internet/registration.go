@@ -43,12 +43,12 @@ type Permission struct {
 	registry.FlowPolicy
 }
 
-// HeaderInjection is one host-attached header value: drawn from a host-held
-// secret (Secret ref, recommended) or a literal (Value, soft-deprecated), with
-// an optional Prefix such as "Bearer ". Exactly one of Secret or Value is set.
+// HeaderInjection is one host-attached header value, drawn from a host-held
+// secret by name, with an optional Prefix such as "Bearer ". There is no inline
+// form: an injected header is a credential, and a credential never enters the
+// manifest.
 type HeaderInjection struct {
-	Secret string `json:"secret,omitempty"`
-	Value  string `json:"value,omitempty"`
+	Secret string `json:"secret"`
 	Prefix string `json:"prefix,omitempty"`
 }
 
@@ -226,8 +226,8 @@ func ValidateInjection(domain string, headers map[string]HeaderInjection) error 
 		case "Host", "Content-Length":
 			return fmt.Errorf("header %q cannot be injected", canonical)
 		}
-		if (strings.TrimSpace(injection.Secret) != "") == (injection.Value != "") {
-			return fmt.Errorf(`inject_headers[%q]: set exactly one of "secret" or "value"`, name)
+		if strings.TrimSpace(injection.Secret) == "" {
+			return fmt.Errorf(`inject_headers[%q]: "secret" names the host-held value; there is no inline form`, name)
 		}
 	}
 	return nil
@@ -273,22 +273,13 @@ func ResolveInjectedHeaders(inject map[string]HeaderInjection, services registry
 	var labels []string
 	for name, injection := range inject {
 		canonical := http.CanonicalHeaderKey(strings.TrimSpace(name))
-		var secret registry.Secret
-		if ref := strings.TrimSpace(injection.Secret); ref != "" {
-			secret = registry.SecretRef(ref)
-		} else {
-			secret = registry.LiteralSecret(injection.Value)
-		}
+		secret := registry.SecretRef(injection.Secret)
 		value, err := secret.Resolve(services.Secrets)
 		if err != nil {
 			return nil, nil, fmt.Errorf("header %q: %w", canonical, err)
 		}
 		headers[canonical] = injection.Prefix + value
-		credName := secret.Ref()
-		if credName == "" {
-			credName = "inline"
-		}
-		labels = append(labels, "credential:"+credName+"@"+registry.CredentialFingerprint(services.AuditKey, value))
+		labels = append(labels, "credential:"+secret.Ref()+"@"+registry.CredentialFingerprint(services.AuditKey, value))
 	}
 	return headers, labels, nil
 }

@@ -176,6 +176,23 @@ func TestEnvSecretFailsClosed(t *testing.T) {
 	}
 }
 
+// An env value is a plain string or a secret reference. The reference resolves
+// host-side at build, so the command gets the value and the manifest never
+// holds it.
+func TestEnvTakesPlainValuesAndReferences(t *testing.T) {
+	grant := `{"capabilities":[{
+	  "operation":"a","path":"/bin/echo","env":{"PATH":"/usr/bin","TOKEN":{"secret":"API_TOKEN"}}}]}`
+	family, err := (command.Registration{}).Configure(context.Background(), json.RawMessage(grant),
+		registry.Services{Secrets: anySecret{}})
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	env := family.Entries[0].Handler.(command.Handler).Commands[0].Env
+	if env["PATH"] != "/usr/bin" || env["TOKEN"] != "resolved-API_TOKEN" {
+		t.Fatalf("env = %v, want the plain PATH and the resolved TOKEN", env)
+	}
+}
+
 // An empty argument is reachable only when its author enumerated it. A pattern
 // that happens to match "" is refused where it is written, so the two ways of
 // declaring a slot cannot disagree about whether nothing is a permitted value.

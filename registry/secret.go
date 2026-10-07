@@ -20,26 +20,22 @@ type SecretResolver interface {
 	Resolve(name string) (value string, ok bool)
 }
 
-// Secret is a credential-bearing manifest field: either a literal value
-// (soft-deprecated — a literal sprawls into the persisted manifest and the
-// journal) or a reference {"secret":"NAME"} resolved host-side so the value
-// never touches the manifest, journal, or guest. It round-trips through
-// Normalize preserving the reference form.
+// Secret is a credential-bearing manifest field. It is only ever a reference
+// {"secret":"NAME"}: the host resolves the value where the driver needs it (in
+// aurora-dist, from the AURORA_SECRET_<NAME> environment variable), so the value
+// never enters the manifest, the journal, or the guest. A literal value is
+// refused when the manifest is decoded.
 type Secret struct {
-	literal string
-	ref     string
+	ref string
 }
-
-// LiteralSecret is a plain in-manifest value (the soft-deprecated form).
-func LiteralSecret(v string) Secret { return Secret{literal: v} }
 
 // SecretRef is a reference resolved host-side from the named secret.
 func SecretRef(name string) Secret { return Secret{ref: strings.TrimSpace(name)} }
 
 // IsZero reports whether no credential was supplied.
-func (s Secret) IsZero() bool { return s.literal == "" && s.ref == "" }
+func (s Secret) IsZero() bool { return s.ref == "" }
 
-// Ref returns the reference name (empty for a literal or zero secret).
+// Ref returns the reference name (empty for a zero secret).
 func (s Secret) Ref() string { return s.ref }
 
 func (s *Secret) UnmarshalJSON(data []byte) error {
@@ -49,12 +45,7 @@ func (s *Secret) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	if trimmed[0] == '"' {
-		var literal string
-		if err := json.Unmarshal(trimmed, &literal); err != nil {
-			return err
-		}
-		*s = Secret{literal: literal}
-		return nil
+		return fmt.Errorf(`a secret is a reference {"secret":"NAME"}, never an inline value; provide the value to the host (aurora-dist: AURORA_SECRET_NAME)`)
 	}
 	var ref struct {
 		Secret string `json:"secret"`
@@ -62,7 +53,7 @@ func (s *Secret) UnmarshalJSON(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&ref); err != nil {
-		return fmt.Errorf(`secret must be a string or {"secret":"NAME"}: %w`, err)
+		return fmt.Errorf(`secret must be {"secret":"NAME"}: %w`, err)
 	}
 	name := strings.TrimSpace(ref.Secret)
 	if name == "" {
@@ -73,20 +64,20 @@ func (s *Secret) UnmarshalJSON(data []byte) error {
 }
 
 func (s Secret) MarshalJSON() ([]byte, error) {
-	if s.ref != "" {
-		return json.Marshal(map[string]string{"secret": s.ref})
+	if s.ref == "" {
+		return []byte("null"), nil
 	}
-	return json.Marshal(s.literal)
+	return json.Marshal(map[string]string{"secret": s.ref})
 }
 
-// Resolve returns the secret's value: a literal verbatim, or a reference looked
-// up through the resolver. A reference with no resolver configured, or an
-// unknown name, is a fail-closed error — the driver refuses to build rather than
-// run without the credential (so a missing secret fails at activation, and is
+// Resolve looks the reference up through the resolver; a zero secret resolves
+// to "" (no credential). A reference with no resolver configured, or an unknown
+// name, is a fail-closed error — the driver refuses to build rather than run
+// without the credential (so a missing secret fails at activation, and is
 // recorded there, never silently at dispatch).
 func (s Secret) Resolve(secrets SecretResolver) (string, error) {
 	if s.ref == "" {
-		return s.literal, nil
+		return "", nil
 	}
 	if secrets == nil {
 		return "", fmt.Errorf("secret %q referenced but no secret resolver is configured", s.ref)

@@ -23,8 +23,7 @@ var headerPattern = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]+$
 
 type Settings struct {
 	BaseURL string `json:"base_url,omitempty"`
-	// APIKey is the provider credential: a literal (soft-deprecated — it sprawls
-	// into the manifest and journal) or a {"secret":"NAME"} reference resolved
+	// APIKey is the provider credential, a {"secret":"NAME"} reference resolved
 	// host-side so the value never enters the manifest, journal, or guest.
 	APIKey            registry.Secret   `json:"api_key,omitempty"`
 	APIKeyOptional    bool              `json:"api_key_optional,omitempty"`

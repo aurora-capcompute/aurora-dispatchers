@@ -10,7 +10,7 @@ import (
 func TestNormalizeSettingsCleansPolicy(t *testing.T) {
 	settings, err := normalizeSettings(Settings{
 		BaseURL:       "https://llm.example.com/v1/",
-		APIKey:        registry.LiteralSecret("sk-test"),
+		APIKey:        registry.SecretRef("OPENAI_KEY"),
 		AllowedModels: []string{" model-b ", "model-a", "model-a"},
 		Timeout:       "120s",
 	})
@@ -20,7 +20,7 @@ func TestNormalizeSettingsCleansPolicy(t *testing.T) {
 	if settings.BaseURL != "https://llm.example.com/v1" {
 		t.Fatalf("base URL = %q", settings.BaseURL)
 	}
-	if settings.APIKey != registry.LiteralSecret("sk-test") {
+	if settings.APIKey != registry.SecretRef("OPENAI_KEY") {
 		t.Fatalf("API key not preserved through normalize")
 	}
 	if !reflect.DeepEqual(settings.AllowedModels, []string{"model-a", "model-b"}) {

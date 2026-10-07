@@ -22,7 +22,9 @@ func TestInjectHeadersNormalizeRejectsUnsafeShapes(t *testing.T) {
 			`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","prefix":"Bearer "}}}]}`,
 		"plain http off loopback": `{"capabilities":[{"methods":["GET"],"domain":"http://onyx.example.com",` +
 			`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN"}}}]}`,
-		"both sources set": `{"capabilities":[{"methods":["GET"],"domain":"onyx.example.com",` +
+		"inline value": `{"capabilities":[{"methods":["GET"],"domain":"onyx.example.com",` +
+			`"inject_headers":{"Authorization":{"value":"literal"}}}]}`,
+		"inline value beside a reference": `{"capabilities":[{"methods":["GET"],"domain":"onyx.example.com",` +
 			`"inject_headers":{"Authorization":{"secret":"ONYX_TOKEN","value":"literal"}}}]}`,
 		"no source set": `{"capabilities":[{"methods":["GET"],"domain":"onyx.example.com",` +
 			`"inject_headers":{"Authorization":{"prefix":"Bearer "}}}]}`,

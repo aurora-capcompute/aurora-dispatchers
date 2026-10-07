@@ -28,9 +28,10 @@ type CommandRule struct {
 	Args []string `json:"args,omitempty"`
 	// Dir is the working directory (absolute).
 	Dir string `json:"dir,omitempty"`
-	// Env is the child's entire environment — it inherits nothing. Values may be
-	// secret references ({"secret":"NAME"}) resolved host-side.
-	Env map[string]registry.Secret `json:"env,omitempty"`
+	// Env is the child's entire environment — it inherits nothing. A value is a
+	// plain string, or a secret reference {"secret":"NAME"} resolved host-side;
+	// a secret goes in as a reference, never inline.
+	Env map[string]EnvValue `json:"env,omitempty"`
 	// Params declares each slot Args may reference. A value is either a JSON
 	// array (the closed set of permitted values) or a string (a regular
 	// expression, anchored by the loader).
@@ -149,12 +150,42 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	}, nil
 }
 
+// EnvValue is one variable of a command's environment: a plain value, or a
+// secret reference resolved host-side.
+type EnvValue struct {
+	plain  string
+	secret registry.Secret
+}
+
+func (v *EnvValue) UnmarshalJSON(data []byte) error {
+	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '"' {
+		*v = EnvValue{}
+		return json.Unmarshal(trimmed, &v.plain)
+	}
+	*v = EnvValue{}
+	return json.Unmarshal(data, &v.secret)
+}
+
+func (v EnvValue) MarshalJSON() ([]byte, error) {
+	if !v.secret.IsZero() {
+		return json.Marshal(v.secret)
+	}
+	return json.Marshal(v.plain)
+}
+
+func (v EnvValue) resolve(secrets registry.SecretResolver) (string, error) {
+	if v.secret.IsZero() {
+		return v.plain, nil
+	}
+	return v.secret.Resolve(secrets)
+}
+
 // buildCommand resolves one validated rule into the executable form, resolving
 // secret-referencing environment values host-side.
 func buildCommand(rule CommandRule, services registry.Services) (Command, error) {
 	env := make(map[string]string, len(rule.Env))
-	for key, secret := range rule.Env {
-		value, err := secret.Resolve(services.Secrets)
+	for key, entry := range rule.Env {
+		value, err := entry.resolve(services.Secrets)
 		if err != nil {
 			return Command{}, fmt.Errorf("env %q: %w", key, err)
 		}

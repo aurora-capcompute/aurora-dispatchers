@@ -13,12 +13,10 @@ type mapResolver map[string]string
 func (m mapResolver) Resolve(name string) (string, bool) { v, ok := m[name]; return v, ok }
 
 func TestSecretUnmarshalMarshal(t *testing.T) {
+	// A secret is never written inline: the manifest names it, the host holds it.
 	var literal registry.Secret
-	if err := json.Unmarshal([]byte(`"sk-123"`), &literal); err != nil {
-		t.Fatalf("literal: %v", err)
-	}
-	if literal.Ref() != "" {
-		t.Fatalf("a plain string parsed as a reference")
+	if err := json.Unmarshal([]byte(`"sk-123"`), &literal); err == nil {
+		t.Fatal("an inline secret value was accepted")
 	}
 
 	var ref registry.Secret
@@ -48,8 +46,8 @@ func TestSecretUnmarshalMarshal(t *testing.T) {
 func TestSecretResolveFailsClosed(t *testing.T) {
 	res := mapResolver{"ONYX_TOKEN": "tok-abc"}
 
-	if v, err := registry.LiteralSecret("lit").Resolve(nil); err != nil || v != "lit" {
-		t.Fatalf("literal resolve = %q, %v", v, err)
+	if v, err := (registry.Secret{}).Resolve(nil); err != nil || v != "" {
+		t.Fatalf("zero secret resolve = %q, %v; want no credential", v, err)
 	}
 	if v, err := registry.SecretRef("ONYX_TOKEN").Resolve(res); err != nil || v != "tok-abc" {
 		t.Fatalf("ref resolve = %q, %v", v, err)
