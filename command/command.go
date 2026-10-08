@@ -176,26 +176,13 @@ func (c Command) ParamNames() []string {
 	return names
 }
 
-// Handler adapts the allowlist to capability.Dispatcher, enforcing the command
-// allowlist and its slot declarations before anything is executed.
-type Handler struct {
-	Name     string
-	Commands []Command
-}
-
-func (h Handler) Handles(name string) bool { return name == h.Name }
-
-// DispatchCall validates a run against the allowlist and its slot declarations,
-// executes it, and stamps the result's provenance.
-func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+// DispatchCall runs the command: it checks the guest's values against the
+// slot declarations, executes the command, and reports how it ended. The
+// grant table routed the call here, so the command is the one the call named.
+func (command Command) DispatchCall(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request Request
 	if err := json.Unmarshal(call.Args, &request); err != nil {
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
-	}
-	command, ok := h.lookup(request.Operation)
-	if !ok {
-		return sys.FailCode(sys.ErrnoDenied, fmt.Sprintf(
-			"command %q is not granted (granted: %s)", request.Operation, strings.Join(h.names(), ", "))), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
 
 	argv, err := resolve(command, request.Params)
@@ -231,24 +218,6 @@ func marshalResult(response Response) (sys.SyscallResult, error) {
 		return sys.SyscallResult{}, err
 	}
 	return sys.Result(encoded), nil
-}
-
-func (h Handler) lookup(name string) (Command, bool) {
-	for _, command := range h.Commands {
-		if command.Name == name {
-			return command, true
-		}
-	}
-	return Command{}, false
-}
-
-func (h Handler) names() []string {
-	out := make([]string, 0, len(h.Commands))
-	for _, command := range h.Commands {
-		out = append(out, command.Name)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // placeholder matches a {slot} reference in an argument template.
@@ -323,7 +292,7 @@ func execCommand(ctx context.Context, command Command, argv []string) (Response,
 	// A floor enforced where the command runs, not only where it was configured:
 	// a relative path would be resolved against the working directory or PATH,
 	// which is exactly the ambient authority this driver refuses to depend on.
-	// The registry checks this too; a Handler built by hand must not slip past it.
+	// The registry checks this too; a Command built by hand must not slip past it.
 	if !filepath.IsAbs(command.Path) {
 		return Response{}, fmt.Errorf("executable %q is not an absolute path", command.Path)
 	}

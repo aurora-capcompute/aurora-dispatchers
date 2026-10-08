@@ -119,11 +119,6 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		commands = append(commands, built)
 	}
 
-	handler := Handler{
-		Name:     Capability,
-		Commands: commands,
-	}
-
 	// One entry per command: two commands may declare the same slot name with
 	// different constraints, and a merged params object would have to pick one of
 	// them — publishing a constraint that does not match the command being called.
@@ -144,7 +139,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			Forbid:          c.Taints,
 			RequireApproval: c.RequireApproval,
 			Prompt:          c.prompt,
-			Handler:         handler,
+			Handler:         c,
 		})
 	}
 	return capability.Family{Entries: entries,

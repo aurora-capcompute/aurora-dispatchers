@@ -26,7 +26,7 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Store is one space of keys — the whole of what a Handler can reach. The host
+// Store is one space of keys — the whole of what the handler can reach. The host
 // binds it before the handler sees it, so the handler names no session and
 // cannot address another space. Keys are slash-separated paths.
 // Every value is stored with its provenance labels — the taint of the process
@@ -120,57 +120,16 @@ const (
 	searchMaxTotalBytes     = 16 * 1024
 )
 
-// Handler serves get/put/list/search over one Store. Which operations a grant
+// handler serves get/put/list/search over one Store. Which operations a grant
 // opens, their flow policy, and approval are the grant table's entries,
 // enforced by the runtime before a call reaches this handler; the handler only
 // reads and writes.
-type Handler struct {
-	// Name is the published capability name.
-	Name string
-	// Store is the one space the handler serves. A nil Store fails every call
-	// with errno internal: the host did not bind a space.
+type handler struct {
+	// Store is the one space the handler serves.
 	Store Store
 }
 
-func (h Handler) Handles(name string) bool { return name == h.Name }
-
-func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if h.Store == nil {
-		return sys.FailCode(sys.ErrnoInternal, "memory store is not configured"), nil
-	}
-	operation, err := peekCall(call.Args)
-	if err != nil {
-		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
-	}
-	switch operation {
-	case "get":
-		return h.get(ctx, call)
-	case "put":
-		return h.put(ctx, call)
-	case "list":
-		return h.list(ctx, call)
-	case "search":
-		return h.search(ctx, call)
-	default:
-		return sys.FailCode(sys.ErrnoNotFound, "unknown memory operation: "+operation), nil
-	}
-}
-
-// peekCall reads the ADT discriminator from a call's args.
-func peekCall(args json.RawMessage) (string, error) {
-	var envelope struct {
-		Operation string `json:"operation"`
-	}
-	if err := json.Unmarshal(args, &envelope); err != nil {
-		return "", fmt.Errorf("decode call: %v", err)
-	}
-	if envelope.Operation == "" {
-		return "", fmt.Errorf("operation is required")
-	}
-	return envelope.Operation, nil
-}
-
-func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+func (h handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request GetRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
@@ -193,7 +152,7 @@ func (h Handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	return result.WithLabels(labels...), nil
 }
 
-func (h Handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+func (h handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request PutRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
@@ -214,7 +173,7 @@ func (h Handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	return marshalResult(PutResponse{Key: request.Key})
 }
 
-func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+func (h handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request ListRequest
 	if len(call.Args) > 0 {
 		if err := json.Unmarshal(call.Args, &request); err != nil {
@@ -250,7 +209,7 @@ func (h Handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult,
 	return result.WithLabels(labels...), nil
 }
 
-func (h Handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+func (h handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request SearchRequest
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil

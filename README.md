@@ -115,8 +115,9 @@ reads no environment variables.
   `max_request_bytes`, `allow_insecure_http`, `headers` (no `Authorization`,
   `Host` or `Content-Length`). `allowed_models` also narrows the `model` field
   in the published schema, so the runtime refuses another model before any
-  approval. Stray `OPENAI_*` environment variables cannot change a
-  configured provider.
+  approval. Requests go through `core.internet`'s client, fixed to the
+  provider's origin, so they share its dial guard and size bounds. A network
+  error, a 429 or a 5xx is tried again up to `max_retries` times (default 2).
 
 ## Build and test
 
@@ -141,5 +142,6 @@ openaillm/     core.openaiApi: client, handler, settings
 registry/      Registration, Registry.Build, the grant vocabulary, secrets
 ```
 
-Direct dependencies: `capcompute` (the `sys` vocabulary), `aurora-capcompute`
-(the `capability` table) and `openai-go` (only in `openaillm`).
+Direct dependencies: `capcompute` (the `sys` vocabulary) and
+`aurora-capcompute` (the `capability` table). Everything else is the Go
+standard library.

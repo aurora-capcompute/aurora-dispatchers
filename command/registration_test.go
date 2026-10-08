@@ -103,11 +103,11 @@ func TestPatternsAreAnchored(t *testing.T) {
 	  "operation":"echo","path":"/bin/echo","dir":"/","args":["{env}"],
 	  "params":{"env":"prod"}}]}`
 	out := configure(t, grant)
-	handler, ok := out.Entries()[0].Handler.(command.Handler)
+	handler, ok := out.Entries()[0].Handler.(command.Command)
 	if !ok {
 		t.Fatalf("handler = %T", out.Entries()[0].Handler)
 	}
-	param := handler.Commands[0].Params["env"]
+	param := handler.Params["env"]
 	if param.Pattern == nil {
 		t.Fatal("pattern was not compiled")
 	}
@@ -124,8 +124,8 @@ func TestPatternsAreAnchored(t *testing.T) {
 func TestApprovalDefaultsOn(t *testing.T) {
 	grant := `{"capabilities":[{"operation":"echo","path":"/bin/echo","dir":"/"}]}`
 	out := configure(t, grant)
-	handler := out.Entries()[0].Handler.(command.Handler)
-	if !handler.Commands[0].RequireApproval {
+	handler := out.Entries()[0].Handler.(command.Command)
+	if !handler.RequireApproval {
 		t.Fatal("require_approval must default to true for core.command")
 	}
 }
@@ -189,7 +189,7 @@ func TestEnvTakesPlainValuesAndReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("configure: %v", err)
 	}
-	env := family.Entries[0].Handler.(command.Handler).Commands[0].Env
+	env := family.Entries[0].Handler.(command.Command).Env
 	if env["PATH"] != "/usr/bin" || env["TOKEN"] != "resolved-API_TOKEN" {
 		t.Fatalf("env = %v, want the plain PATH and the resolved TOKEN", env)
 	}
@@ -208,10 +208,9 @@ func TestEmptyArgumentMustBeEnumerated(t *testing.T) {
 	if err := table.Add(family); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	handler := table.Entries()[0].Handler.(command.Handler)
+	handler := table.Entries()[0].Handler.(command.Command)
 	args, _ := json.Marshal(command.Request{Operation: "a", Params: map[string]string{"ns": ""}})
-	result, err := handler.DispatchCall(context.Background(),
-		sys.Syscall{Name: command.Capability, Args: args}, sys.Authorization{})
+	result, err := handler.DispatchCall(context.Background(), sys.Syscall{Name: command.Capability, Args: args})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,7 +24,6 @@ func (c *fakeClient) Do(_ context.Context, _ internet.Request) (internet.Respons
 
 func newInternetHandler(client internet.Doer) internet.Handler {
 	return internet.Handler{
-		Name:   "core.internet",
 		Client: client,
 	}
 }
@@ -43,7 +42,7 @@ func TestInternetHandlerCleanRequestPasses(t *testing.T) {
 	handler := newInternetHandler(client)
 
 	// A GET with no forbidden taint and no approval requirement reaches the net.
-	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "https://ok.example/"), sys.Authorization{})
+	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "https://ok.example/"))
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

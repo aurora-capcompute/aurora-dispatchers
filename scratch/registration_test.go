@@ -31,13 +31,13 @@ func buildScratchTable(t *testing.T, config string, store scratch.Store) *capabi
 	return built
 }
 
-func buildScratch(t *testing.T, config string, store scratch.Store) capability.Handler {
-	return buildScratchTable(t, config, store).Entries()[0].Handler
+func buildScratch(t *testing.T, config string, store scratch.Store) sys.Dispatcher[string] {
+	return capability.NewDispatcher[string](buildScratchTable(t, config, store))
 }
 
-func scratchCall(t *testing.T, h capability.Handler, args string) sys.SyscallResult {
+func scratchCall(t *testing.T, h sys.Dispatcher[string], args string) sys.SyscallResult {
 	t.Helper()
-	res, err := h.DispatchCall(context.Background(),
+	res, err := h.Dispatch(context.Background(), "p1",
 		sys.Syscall{Name: scratch.Capability, Args: json.RawMessage(args)}, sys.Authorization{})
 	if err != nil {
 		t.Fatalf("dispatch %s: %v", args, err)
@@ -87,15 +87,10 @@ func TestScratchBuildsShareTheirSessionStore(t *testing.T) {
 }
 
 // The door check builds without a process, so without a store: the config is
-// still validated, and a handler built that way fails closed instead of
-// writing somewhere unscoped.
-func TestScratchWithoutAStoreFailsClosed(t *testing.T) {
+// still validated. It serves no call.
+func TestScratchConfigCheckNeedsNoStore(t *testing.T) {
 	config := json.RawMessage(`{"capabilities":[{"operation":"put"}]}`)
 	if _, err := registryValidate(scratch.Registration{}, scratch.Capability, config); err != nil {
 		t.Fatalf("door check refused a valid grant: %v", err)
-	}
-	handler := buildScratch(t, string(config), nil)
-	if got := scratchCall(t, handler, `{"operation":"put","key":"k","value":1}`); got.Errno() != sys.ErrnoInternal {
-		t.Fatalf("put without a store = %#v, want errno internal", got)
 	}
 }

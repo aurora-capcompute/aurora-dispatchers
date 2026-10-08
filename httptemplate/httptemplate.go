@@ -19,9 +19,9 @@ import (
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Handler serves a manifest-defined family of HTTP operations whose
-// method, host, path, headers, and body shape are fixed by the manifest — the
-// guest supplies only the declared parameters. It is the operation-level
+// Handler serves one manifest-defined HTTP operation whose method, host,
+// path, headers, and body shape are fixed by the manifest — the guest supplies
+// only the declared parameters. A grant builds one handler per operation. It is the operation-level
 // least-privilege counterpart to InternetHandler: where core.internet hands the
 // guest the whole request (any method/url the allowlist permits), a template
 // grant lets the guest fill named holes in one exact request and reach nothing
@@ -30,12 +30,11 @@ import (
 // the path/query, structurally in the JSON body — so a value can never break out
 // of its slot to alter the method, host, path, or JSON shape.
 type Handler struct {
-	Name   string
 	Client internet.Doer
-	// Operations is the published operation set, keyed by name. Each operation
-	// carries its own origin and its own host-held credential, so one grant can
-	// front several APIs — the ADT over `operation` is the menu.
-	Operations map[string]Operation
+	// Operation is the one request this handler sends. Each operation carries
+	// its own origin and its own host-held credential, so one grant can front
+	// several APIs.
+	Operation Operation
 }
 
 // Operation is one fixed request the guest may invoke by name, with the
@@ -82,22 +81,8 @@ type Param struct {
 
 var placeholder = regexp.MustCompile(`\{\{(\w+)\}\}`)
 
-func (h Handler) Handles(name string) bool { return name == h.Name }
-
-func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if h.Client == nil {
-		return sys.FailCode(sys.ErrnoNotFound, "template client is not configured"), nil
-	}
-	var envelope struct {
-		Operation string `json:"operation"`
-	}
-	if err := json.Unmarshal(call.Args, &envelope); err != nil {
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s call: %v", h.Name, err)), nil
-	}
-	operation, ok := h.Operations[envelope.Operation]
-	if !ok {
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("unknown operation %q", envelope.Operation)), nil
-	}
+func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+	operation := h.Operation
 	params, err := extractParams(operation, call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
@@ -105,7 +90,7 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 	// Flow policy and approval are the operation's entry's, enforced by the
 	// runtime above and below the replay tape. This handler renders and sends.
 
-	request, err := h.render(operation, params)
+	request, err := render(operation, params)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
@@ -153,7 +138,7 @@ func credentialHeaderNames(headers map[string]string) []string {
 // the validated parameters. Every guest value is placed through an encoding that
 // keeps it inside its slot: PathEscape in the path, query-encoding in the query,
 // and structural JSON substitution in the body.
-func (h Handler) render(operation Operation, params map[string]any) (internet.Request, error) {
+func render(operation Operation, params map[string]any) (internet.Request, error) {
 	target := operation.BaseURL + expandString(operation.Path, params, url.PathEscape)
 	if len(operation.Query) > 0 {
 		values := url.Values{}

@@ -2,109 +2,106 @@ package openaillm
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 )
 
-// Regression: the SSRF guard must run AFTER DNS resolution (on the resolved IP),
-// not on the unresolved hostname. Guarding the hostname rejected every hostname
-// base_url as "not an IP", breaking the driver out of the box. Here a
-// non-loopback base_url arms the guard, and a request via a hostname (localhost)
-// that resolves to the loopback test server must be blocked as "non-public"
-// (post-resolution) — never with the pre-fix "did not resolve to an IP".
-func TestGuardedTransportGuardsResolvedIPNotHostname(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer server.Close()
-
-	client := &http.Client{Transport: guardedTransport("https://api.example.com/v1", 5*time.Second)}
-	target := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
-	_, err := client.Get(target)
-	if err == nil {
-		t.Fatal("expected the loopback dial to be blocked by the SSRF guard")
-	}
-	if strings.Contains(err.Error(), "did not resolve to an IP") {
-		t.Fatalf("REGRESSION: guard ran on the unresolved hostname (the pre-fix bug): %v", err)
-	}
-	if !strings.Contains(err.Error(), "non-public") {
-		t.Fatalf("expected a post-resolution non-public block, got: %v", err)
-	}
-}
-
-// A loopback base_url (local dev) opts out of the guard, so the dial to the
-// loopback provider succeeds — the driver must work against a local endpoint.
-func TestGuardedTransportAllowsLoopbackBaseURL(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	client := &http.Client{Transport: guardedTransport(server.URL, 5*time.Second)}
-	resp, err := client.Get(server.URL)
-	if err != nil {
-		t.Fatalf("a loopback base_url must permit the dial: %v", err)
-	}
-	_ = resp.Body.Close()
-}
-
-func TestSDKClientUsesCompatibleEndpointsAndHeaders(t *testing.T) {
-	var requests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.Header().Set("Content-Type", "application/json")
-		if r.Header.Get("Authorization") != "Bearer test-key" {
-			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
-		}
-		if r.Header.Get("X-Gateway-Tenant") != "tenant-a" {
-			t.Errorf("tenant header = %q", r.Header.Get("X-Gateway-Tenant"))
-		}
-		if r.Header.Get("X-Leaked") != "" {
-			t.Errorf("ambient OPENAI_CUSTOM_HEADERS leaked into request")
-		}
-		switch r.URL.Path {
-		case "/v1/chat/completions":
-			body, _ := io.ReadAll(r.Body)
-			if !json.Valid(body) {
-				t.Errorf("invalid request JSON: %s", body)
-			}
-			_, _ = w.Write([]byte(`{"id":"chat-1","choices":[]}`))
-		case "/v1/models":
-			_, _ = w.Write([]byte(`{"data":[{"id":"model-a"}]}`))
-		default:
-			http.Error(w, "unexpected path", http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("OPENAI_CUSTOM_HEADERS", "X-Leaked: yes")
-	settings, err := normalizeSettings(Settings{
-		BaseURL:           server.URL + "/v1",
-		AllowInsecureHTTP: true,
-		APIKey:            registry.SecretRef("OPENAI_KEY"),
-		Headers:           map[string]string{"X-Gateway-Tenant": "tenant-a"},
-	})
+func testProvider(t *testing.T, settings Settings, apiKey string) provider {
+	t.Helper()
+	normalized, err := normalizeSettings(settings)
 	if err != nil {
 		t.Fatalf("settings: %v", err)
 	}
-	settings.apiKey = "test-key" // resolved host-side by Configure in production
-	client, err := NewClient(settings)
+	normalized.apiKey = apiKey // resolved host-side by Configure in production
+	p, err := newProvider(normalized)
 	if err != nil {
-		t.Fatalf("new client: %v", err)
+		t.Fatalf("new provider: %v", err)
 	}
-	if _, err := client.Chat(context.Background(), json.RawMessage(`{"model":"model-a","messages":[]}`)); err != nil {
+	return p
+}
+
+// The provider sends to the endpoint's paths, with the key, the organization
+// and project, and the grant's own headers.
+func TestProviderSendsToTheEndpointWithItsHeaders(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		for header, want := range map[string]string{
+			"Authorization":       "Bearer test-key",
+			"OpenAI-Organization": "org-1",
+			"X-Gateway-Tenant":    "tenant-a",
+			"Content-Type":        "application/json",
+		} {
+			if got := r.Header.Get(header); got != want {
+				t.Errorf("%s = %q, want %q", header, got, want)
+			}
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	p := testProvider(t, Settings{
+		BaseURL:           server.URL + "/v1",
+		AllowInsecureHTTP: true,
+		APIKey:            registry.SecretRef("OPENAI_KEY"),
+		Organization:      "org-1",
+		Headers:           map[string]string{"X-Gateway-Tenant": "tenant-a"},
+	}, "test-key")
+	if _, err := p.Do(context.Background(), http.MethodPost, "chat/completions", []byte(`{"model":"m","messages":[]}`)); err != nil {
 		t.Fatalf("chat: %v", err)
 	}
-	if _, err := client.Models(context.Background()); err != nil {
+	if _, err := p.Do(context.Background(), http.MethodGet, "models", nil); err != nil {
 		t.Fatalf("models: %v", err)
 	}
-	if requests != 2 {
-		t.Fatalf("requests = %d, want 2", requests)
+	if strings.Join(seen, ", ") != "POST /v1/chat/completions, GET /v1/models" {
+		t.Fatalf("requests = %v", seen)
+	}
+}
+
+// A 5xx is tried again, up to max_retries; a 4xx is not, and its error quotes
+// the provider's body (where a context-length message lives).
+func TestProviderRetriesTransientFailures(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.Contains(string(body), "bad"):
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"maximum context length exceeded"}`))
+		case requests == 1:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer server.Close()
+
+	retries := 1
+	p := testProvider(t, Settings{BaseURL: server.URL, AllowInsecureHTTP: true, APIKeyOptional: true, MaxRetries: &retries}, "")
+	if _, err := p.Do(context.Background(), http.MethodPost, "chat/completions", []byte(`{}`)); err != nil || requests != 2 {
+		t.Fatalf("Do = %v after %d requests, want success on the retry", err, requests)
+	}
+	requests = 0
+	_, err := p.Do(context.Background(), http.MethodPost, "chat/completions", []byte(`{"bad":true}`))
+	if err == nil || requests != 1 || !strings.Contains(err.Error(), "maximum context length") {
+		t.Fatalf("Do = %v after %d requests, want one try and the provider's message", err, requests)
+	}
+}
+
+// A base_url that is not loopback is held to the dial guard, so an internal
+// address never receives the key.
+func TestProviderRefusesAPrivateAddress(t *testing.T) {
+	none := 0
+	p := testProvider(t, Settings{BaseURL: "https://10.255.255.1/v1", MaxRetries: &none}, "test-key")
+	_, err := p.Do(context.Background(), http.MethodGet, "models", nil)
+	if err == nil || !strings.Contains(err.Error(), "non-public") {
+		t.Fatalf("Do = %v, want the dial guard's refusal", err)
 	}
 }
 
@@ -113,7 +110,7 @@ func TestAPIKeyRequiredUnlessOptional(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settings: %v", err)
 	}
-	if _, err := NewClient(settings); err == nil {
+	if _, err := newProvider(settings); err == nil {
 		t.Fatal("expected missing API key error")
 	}
 }

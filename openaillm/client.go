@@ -4,15 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
+	"maps"
 	"net/url"
-	"syscall"
 	"time"
-
-	"github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 )
@@ -22,142 +16,95 @@ import (
 // (long completions, large embedding batches) are big but not unbounded.
 const maxProviderResponseBytes = 32 << 20 // 32 MiB
 
+// defaultMaxRetries is how many times a failed provider call is tried again
+// when the grant sets no max_retries.
+const defaultMaxRetries = 2
+
+// maxErrorBodyBytes bounds how much of a provider's error body an error
+// message quotes.
+const maxErrorBodyBytes = 2000
+
+// Client sends one request to the provider and returns its JSON body.
 type Client interface {
-	Chat(context.Context, json.RawMessage) (json.RawMessage, error)
-	Responses(context.Context, json.RawMessage) (json.RawMessage, error)
-	Embeddings(context.Context, json.RawMessage) (json.RawMessage, error)
-	Models(context.Context) (json.RawMessage, error)
+	Do(ctx context.Context, method, path string, body json.RawMessage) (json.RawMessage, error)
 }
 
-type sdkClient struct {
-	client  openai.Client
-	timeout time.Duration
+// provider is the Client for one OpenAI-compatible endpoint. It sends through
+// an internet.Client allowlisted to the endpoint's origin, so it shares
+// core.internet's dial guard, size bounds and redirect policy. It tries a call
+// again after a network error, a 429 or a 5xx.
+type provider struct {
+	http    *internet.Client
+	baseURL string
+	headers map[string]string
+	retries int
 }
 
-func NewClient(settings normalizedSettings) (Client, error) {
+func newProvider(settings normalizedSettings) (provider, error) {
 	if settings.apiKey == "" && !settings.APIKeyOptional {
-		return nil, fmt.Errorf("api_key is required")
+		return provider{}, fmt.Errorf("api_key is required")
 	}
+	// normalizeSettings validated the base URL.
+	base, _ := url.Parse(settings.BaseURL)
+	rule, err := internet.NewRule(internet.AnyMethod, base.Scheme+"://"+base.Host)
+	if err != nil {
+		return provider{}, err
+	}
+	client := internet.NewConfiguredClient(internet.NewPolicy(rule), settings.timeout,
+		maxProviderResponseBytes, int64(settings.MaxRequestBytes))
+	// A loopback base_url (local development) is the one private address the
+	// provider may reach. Any other base_url is held to the dial guard, so a name
+	// rebound to an internal address cannot receive the API key.
+	client.AllowPrivateNetwork = internet.LoopbackHost(base.Host)
 
-	httpClient := &http.Client{
-		Transport: guardedTransport(settings.BaseURL, settings.timeout),
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return fmt.Errorf("provider redirects are disabled")
-		},
+	headers := map[string]string{"Content-Type": "application/json", "Accept": "application/json"}
+	if settings.apiKey != "" {
+		headers["Authorization"] = "Bearer " + settings.apiKey
 	}
-	options := []option.RequestOption{
-		option.WithBaseURL(settings.BaseURL),
-		option.WithAPIKey(settings.apiKey),
-		option.WithHTTPClient(httpClient),
-		option.WithOrganization(settings.Organization),
-		option.WithProject(settings.Project),
+	if settings.Organization != "" {
+		headers["OpenAI-Organization"] = settings.Organization
 	}
+	if settings.Project != "" {
+		headers["OpenAI-Project"] = settings.Project
+	}
+	maps.Copy(headers, settings.Headers)
+
+	retries := defaultMaxRetries
 	if settings.MaxRetries != nil {
-		options = append(options, option.WithMaxRetries(*settings.MaxRetries))
+		retries = *settings.MaxRetries
 	}
-	for header, value := range settings.Headers {
-		options = append(options, option.WithHeader(header, value))
-	}
-	// Construct the generic SDK client with explicit options so unrelated
-	// OPENAI_* variables cannot silently alter a manifest-defined provider.
-	return &sdkClient{client: openai.Client{Options: options}, timeout: settings.timeout}, nil
+	return provider{http: client, baseURL: settings.BaseURL, headers: headers, retries: retries}, nil
 }
 
-func (c *sdkClient) Chat(ctx context.Context, body json.RawMessage) (json.RawMessage, error) {
-	return c.post(ctx, "chat/completions", body)
-}
-
-func (c *sdkClient) Responses(ctx context.Context, body json.RawMessage) (json.RawMessage, error) {
-	return c.post(ctx, "responses", body)
-}
-
-func (c *sdkClient) Embeddings(ctx context.Context, body json.RawMessage) (json.RawMessage, error) {
-	return c.post(ctx, "embeddings", body)
-}
-
-func (c *sdkClient) Models(ctx context.Context) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	var response json.RawMessage
-	if err := c.client.Get(ctx, "models", nil, &response); err != nil {
-		return nil, err
-	}
-	return response, nil
-}
-
-func (c *sdkClient) post(ctx context.Context, path string, body json.RawMessage) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-	var response json.RawMessage
-	if err := c.client.Post(ctx, path, []byte(body), &response); err != nil {
-		return nil, err
-	}
-	return response, nil
-}
-
-// guardedTransport builds the provider transport with a dial-time SSRF guard —
-// it blocks connecting to a non-public address, defeating DNS rebinding of the
-// (manifest-fixed, https-validated) provider host to an internal/metadata IP,
-// which would otherwise ship the API key there — plus a response-size bound. A
-// loopback base_url (local dev) opts out of the dial guard, since the dial is
-// then legitimately to loopback.
-func guardedTransport(baseURL string, timeout time.Duration) http.RoundTripper {
-	allowLocal := false
-	if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
-		allowLocal = internet.LoopbackHost(u.Host)
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// Guard at Control, not DialContext: Control runs AFTER DNS resolution with
-	// the concrete IP:port, which is exactly what GuardDialAddress checks (and is
-	// where the rebinding defense lives). Guarding DialContext instead would hand
-	// GuardDialAddress the unresolved hostname — which it rejects as "not an IP",
-	// breaking every hostname base_url — and would run before resolution, so a
-	// rebound name would never be checked. This mirrors the internet client.
-	dialer := &net.Dialer{
-		Timeout: timeout,
-		Control: func(_, address string, _ syscall.RawConn) error {
-			if allowLocal {
-				return nil
+func (p provider) Do(ctx context.Context, method, path string, body json.RawMessage) (json.RawMessage, error) {
+	request := internet.Request{Method: method, URL: p.baseURL + "/" + path, Headers: p.headers, Body: string(body)}
+	for attempt := 0; ; attempt++ {
+		response, err := p.http.Do(ctx, request)
+		retryable := err != nil
+		if err == nil {
+			switch {
+			case response.Truncated:
+				return nil, fmt.Errorf("provider response exceeds %d bytes", maxProviderResponseBytes)
+			case response.Status < 300:
+				return json.RawMessage(response.Body), nil
 			}
-			return internet.GuardDialAddress(address)
-		},
+			err = fmt.Errorf("%s %s: %d %s", method, path, response.Status, truncateBytes(response.Body, maxErrorBodyBytes))
+			retryable = response.Status == 429 || response.Status >= 500
+		}
+		if !retryable || attempt >= p.retries || ctx.Err() != nil {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(500<<attempt) * time.Millisecond):
+		}
 	}
-	transport.DialContext = dialer.DialContext
-	return &boundedRoundTripper{next: transport}
 }
 
-// boundedRoundTripper caps each response body at maxProviderResponseBytes.
-type boundedRoundTripper struct{ next http.RoundTripper }
-
-func (b *boundedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := b.next.RoundTrip(req)
-	if err != nil || resp == nil {
-		return resp, err
+func truncateBytes(s string, limit int) string {
+	if len(s) <= limit {
+		return s
 	}
-	resp.Body = &boundedBody{inner: resp.Body, remaining: maxProviderResponseBytes}
-	return resp, nil
+	return s[:limit] + "…"
 }
-
-type boundedBody struct {
-	inner     io.ReadCloser
-	remaining int64
-}
-
-func (b *boundedBody) Read(p []byte) (int, error) {
-	if b.remaining < 0 {
-		return 0, fmt.Errorf("provider response exceeds %d bytes", int64(maxProviderResponseBytes))
-	}
-	// Read at most one byte past the cap so a body of exactly the cap ends on a
-	// clean EOF, while a body over it trips the guard on the next read.
-	if int64(len(p)) > b.remaining+1 {
-		p = p[:b.remaining+1]
-	}
-	n, err := b.inner.Read(p)
-	b.remaining -= int64(n)
-	if b.remaining < 0 {
-		return n, fmt.Errorf("provider response exceeds %d bytes", int64(maxProviderResponseBytes))
-	}
-	return n, err
-}
-
-func (b *boundedBody) Close() error { return b.inner.Close() }

@@ -30,19 +30,16 @@ func templateCall(operation string, fields map[string]any) sys.Syscall {
 
 func searchHandler(t *testing.T, client internet.Doer) httptemplate.Handler {
 	return httptemplate.Handler{
-		Name:   "core.httpTemplate",
 		Client: client,
-		Operations: map[string]httptemplate.Operation{
-			"search": {
-				Name:             "search",
-				Method:           "POST",
-				BaseURL:          "https://onyx.example.com",
-				Path:             "/api/chat/send-message-simple-api",
-				Body:             mustParse(t, `{"message":"{{query}}","persona_id":0}`),
-				Params:           map[string]httptemplate.Param{"query": {Type: "string", Required: true}},
-				Headers:          map[string]string{"Authorization": "Bearer tok-abc"},
-				CredentialLabels: []string{"credential:ONYX_TOKEN@abc123def456"},
-			},
+		Operation: httptemplate.Operation{
+			Name:             "search",
+			Method:           "POST",
+			BaseURL:          "https://onyx.example.com",
+			Path:             "/api/chat/send-message-simple-api",
+			Body:             mustParse(t, `{"message":"{{query}}","persona_id":0}`),
+			Params:           map[string]httptemplate.Param{"query": {Type: "string", Required: true}},
+			Headers:          map[string]string{"Authorization": "Bearer tok-abc"},
+			CredentialLabels: []string{"credential:ONYX_TOKEN@abc123def456"},
 		},
 	}
 }
@@ -65,8 +62,7 @@ func TestTemplateRendersRequestAndInjectsCredential(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200, Body: "ok"}}
 	handler := searchHandler(t, client)
 
-	result, err := handler.DispatchCall(context.Background(),
-		templateCall("search", map[string]any{"query": "What is Hwaas?"}), sys.Authorization{})
+	result, err := handler.DispatchCall(context.Background(), templateCall("search", map[string]any{"query": "What is Hwaas?"}))
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -99,8 +95,7 @@ func TestTemplateBodySubstitutionIsInjectionSafe(t *testing.T) {
 	handler := searchHandler(t, client)
 
 	attack := `hi","persona_id":999,"admin":true,"x":"`
-	if _, err := handler.DispatchCall(context.Background(),
-		templateCall("search", map[string]any{"query": attack}), sys.Authorization{}); err != nil {
+	if _, err := handler.DispatchCall(context.Background(), templateCall("search", map[string]any{"query": attack})); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	var body map[string]any
@@ -123,24 +118,20 @@ func TestTemplateBodySubstitutionIsInjectionSafe(t *testing.T) {
 func TestTemplatePathAndQueryAreEncoded(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := httptemplate.Handler{
-		Name:   "core.httpTemplate",
 		Client: client,
-		Operations: map[string]httptemplate.Operation{
-			"doc": {
-				Name:    "doc",
-				Method:  "GET",
-				BaseURL: "https://onyx.example.com",
-				Path:    "/api/docs/{{id}}",
-				Query:   map[string]string{"q": "{{term}}"},
-				Params: map[string]httptemplate.Param{
-					"id":   {Type: "string", Required: true},
-					"term": {Type: "string", Required: true},
-				},
+		Operation: httptemplate.Operation{
+			Name:    "doc",
+			Method:  "GET",
+			BaseURL: "https://onyx.example.com",
+			Path:    "/api/docs/{{id}}",
+			Query:   map[string]string{"q": "{{term}}"},
+			Params: map[string]httptemplate.Param{
+				"id":   {Type: "string", Required: true},
+				"term": {Type: "string", Required: true},
 			},
 		},
 	}
-	_, err := handler.DispatchCall(context.Background(),
-		templateCall("doc", map[string]any{"id": "a/../secret", "term": "x&y=z"}), sys.Authorization{})
+	_, err := handler.DispatchCall(context.Background(), templateCall("doc", map[string]any{"id": "a/../secret", "term": "x&y=z"}))
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -156,21 +147,17 @@ func TestTemplatePathAndQueryAreEncoded(t *testing.T) {
 func TestTemplateTypedParamSubstitution(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := httptemplate.Handler{
-		Name:   "core.httpTemplate",
 		Client: client,
-		Operations: map[string]httptemplate.Operation{
-			"search": {
-				Name:    "search",
-				Method:  "POST",
-				BaseURL: "https://onyx.example.com",
-				Path:    "/s",
-				Body:    mustParse(t, `{"top_k":"{{k}}"}`),
-				Params:  map[string]httptemplate.Param{"k": {Type: "integer", Required: true}},
-			},
+		Operation: httptemplate.Operation{
+			Name:    "search",
+			Method:  "POST",
+			BaseURL: "https://onyx.example.com",
+			Path:    "/s",
+			Body:    mustParse(t, `{"top_k":"{{k}}"}`),
+			Params:  map[string]httptemplate.Param{"k": {Type: "integer", Required: true}},
 		},
 	}
-	if _, err := handler.DispatchCall(context.Background(),
-		templateCall("search", map[string]any{"k": 5}), sys.Authorization{}); err != nil {
+	if _, err := handler.DispatchCall(context.Background(), templateCall("search", map[string]any{"k": 5})); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if client.seen.Body != `{"top_k":5}` {
@@ -182,16 +169,12 @@ func TestTemplateRejectsBadCalls(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := searchHandler(t, client)
 
-	// Unknown operation.
-	if r, _ := handler.DispatchCall(context.Background(), templateCall("nope", nil), sys.Authorization{}); r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("unknown operation errno = %v, want invalid args", r.Errno())
-	}
 	// Missing required parameter.
-	if r, _ := handler.DispatchCall(context.Background(), templateCall("search", nil), sys.Authorization{}); r.Errno() != sys.ErrnoInvalidArgs {
+	if r, _ := handler.DispatchCall(context.Background(), templateCall("search", nil)); r.Errno() != sys.ErrnoInvalidArgs {
 		t.Fatalf("missing param errno = %v, want invalid args", r.Errno())
 	}
 	// Wrong parameter type.
-	if r, _ := handler.DispatchCall(context.Background(), templateCall("search", map[string]any{"query": 5}), sys.Authorization{}); r.Errno() != sys.ErrnoInvalidArgs {
+	if r, _ := handler.DispatchCall(context.Background(), templateCall("search", map[string]any{"query": 5})); r.Errno() != sys.ErrnoInvalidArgs {
 		t.Fatalf("wrong-type param errno = %v, want invalid args", r.Errno())
 	}
 	if client.seen.URL != "" {

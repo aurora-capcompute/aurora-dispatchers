@@ -32,7 +32,6 @@ func internetCallWithHeaders(method, url string, headers map[string]string) sys.
 
 func injectingHandler(client internet.Doer) internet.Handler {
 	return internet.Handler{
-		Name:   "core.internet",
 		Client: client,
 		Injections: []internet.CredentialInjection{{
 			Methods: []string{"*"},
@@ -50,7 +49,7 @@ func TestInjectAttachesCredentialAndLabels(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200, Body: "ok"}}
 	handler := injectingHandler(client)
 
-	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "https://onyx.example.com/v1/data"), sys.Authorization{})
+	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "https://onyx.example.com/v1/data"))
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -75,7 +74,7 @@ func TestInjectHostWinsOverGuestHeader(t *testing.T) {
 
 	// A guest-supplied Authorization it is trying to spoof must lose to the host.
 	call := internetCallWithHeaders("POST", "https://onyx.example.com/v1/data", map[string]string{"Authorization": "Bearer guest-forged"})
-	if _, err := handler.DispatchCall(context.Background(), call, sys.Authorization{}); err != nil {
+	if _, err := handler.DispatchCall(context.Background(), call); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if got := client.seen.Headers["Authorization"]; got != "Bearer tok-abc" {
@@ -91,7 +90,7 @@ func TestInjectHostWinsRegardlessOfGuestHeaderCasing(t *testing.T) {
 
 	call := internetCallWithHeaders("GET", "https://onyx.example.com/v1/data",
 		map[string]string{"authorization": "Bearer guest-forged"})
-	if _, err := handler.DispatchCall(context.Background(), call, sys.Authorization{}); err != nil {
+	if _, err := handler.DispatchCall(context.Background(), call); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	// Exactly one Authorization (any casing) reaches the wire, and it is the host's.
@@ -113,7 +112,7 @@ func TestInjectRefusesPlaintextHTTP(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := injectingHandler(client)
 
-	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "http://onyx.example.com/v1/data"), sys.Authorization{})
+	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "http://onyx.example.com/v1/data"))
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -130,7 +129,6 @@ func TestInjectRefusesPlaintextHTTP(t *testing.T) {
 func TestInjectAllowsLoopbackHTTP(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := internet.Handler{
-		Name:   "core.internet",
 		Client: client,
 		Injections: []internet.CredentialInjection{{
 			Methods: []string{"*"},
@@ -138,7 +136,7 @@ func TestInjectAllowsLoopbackHTTP(t *testing.T) {
 			Headers: map[string]string{"Authorization": "Bearer dev"},
 		}},
 	}
-	if _, err := handler.DispatchCall(context.Background(), internetCall("GET", "http://localhost:8080/v1/data"), sys.Authorization{}); err != nil {
+	if _, err := handler.DispatchCall(context.Background(), internetCall("GET", "http://localhost:8080/v1/data")); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if got := client.seen.Headers["Authorization"]; got != "Bearer dev" {
@@ -152,7 +150,7 @@ func TestInjectScopedToHost(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := injectingHandler(client)
 
-	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "https://elsewhere.example.com/collect"), sys.Authorization{})
+	result, err := handler.DispatchCall(context.Background(), internetCall("GET", "https://elsewhere.example.com/collect"))
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -169,7 +167,6 @@ func TestInjectScopedToHost(t *testing.T) {
 func TestInjectScopedToMethod(t *testing.T) {
 	client := &recordingClient{response: internet.Response{Status: 200}}
 	handler := internet.Handler{
-		Name:   "core.internet",
 		Client: client,
 		Injections: []internet.CredentialInjection{{
 			Methods: []string{"GET"},
@@ -178,7 +175,7 @@ func TestInjectScopedToMethod(t *testing.T) {
 			Labels:  []string{"credential:ONYX_TOKEN@abc123def456"},
 		}},
 	}
-	if _, err := handler.DispatchCall(context.Background(), internetCall("POST", "https://onyx.example.com/v1/data"), sys.Authorization{}); err != nil {
+	if _, err := handler.DispatchCall(context.Background(), internetCall("POST", "https://onyx.example.com/v1/data")); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if _, ok := client.seen.Headers["Authorization"]; ok {

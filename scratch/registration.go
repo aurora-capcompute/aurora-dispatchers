@@ -11,6 +11,7 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // Capability is the syscall/capability name of the session's scratch store.
@@ -36,9 +37,8 @@ type scratchConfig struct {
 // grant asks for it. In practice a scratch grant declares bare operations and no
 // policy at all.
 type Registration struct {
-	// Store is the calling session's space. Nil (as in a config check, where
-	// there is no process) builds a handler whose every call fails with errno
-	// internal.
+	// Store is the calling session's space. It is nil in a config check, which
+	// serves no call.
 	Store Store
 }
 
@@ -68,9 +68,10 @@ func (r Registration) Configure(_ context.Context, raw json.RawMessage, _ regist
 		names = append(names, operations[grant.Operation].description)
 	}
 
-	handler := Handler{Name: Capability, Store: r.Store}
+	h := handler{Store: r.Store}
 	entries := make([]capability.Entry, 0, len(grants))
 	for i, grant := range grants {
+		serve := operations[grant.Operation].serve
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: Capability, Operation: grant.Operation},
 			Discriminator:   "operation",
@@ -79,7 +80,9 @@ func (r Registration) Configure(_ context.Context, raw json.RawMessage, _ regist
 			Labels:          labels,
 			Forbid:          sinkTaints(grant.Operation, taints),
 			RequireApproval: requireApproval && isSink(grant.Operation),
-			Handler:         handler,
+			Handler: capability.HandlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+				return serve(h, ctx, call)
+			}),
 		})
 	}
 	return capability.Family{Entries: entries,
@@ -108,27 +111,32 @@ func parseConfig(raw json.RawMessage) (scratchConfig, []registry.OperationGrant,
 	return config, grants, nil
 }
 
-// operations is the operation vocabulary: the argument schema and the
-// description of each verb a scratch grant may name.
+// operations is the operation vocabulary: the argument schema, the
+// description, and the handler method of each verb a scratch grant may name.
 var operations = map[string]struct {
 	schema      json.RawMessage
 	description string
+	serve       func(handler, context.Context, sys.Syscall) (sys.SyscallResult, error)
 }{
 	"get": {
 		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1}},"required":["key"],"additionalProperties":false}`),
 		description: "get: read one key",
+		serve:       handler.get,
 	},
 	"put": {
 		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"value":{}},"required":["key","value"],"additionalProperties":false}`),
 		description: "put: write one key, replacing any value it held",
+		serve:       handler.put,
 	},
 	"list": {
 		schema:      json.RawMessage(`{"type":"object","properties":{"prefix":{"type":"string"}},"additionalProperties":false}`),
 		description: "list: list keys under a prefix",
+		serve:       handler.list,
 	},
 	"search": {
 		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"pattern":{"type":"string","minLength":1},"ignore_case":{"type":"boolean"},"context":{"type":"integer","minimum":0,"maximum":5},"max_matches":{"type":"integer","minimum":1,"maximum":100}},"required":["key","pattern"],"additionalProperties":false}`),
 		description: "search: grep a stored value with an RE2 regex — returns matching lines with line numbers (and optional surrounding context), bounded, so a large value is queried without reading it whole",
+		serve:       handler.search,
 	},
 }
 

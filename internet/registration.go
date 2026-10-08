@@ -95,7 +95,6 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	client.AllowPrivateNetwork = config.AllowPrivateNetwork
 	methods := internetMethodPolicies(config.Capabilities)
 	handler := Handler{
-		Name:       Capability,
 		Client:     client,
 		Injections: injections,
 	}

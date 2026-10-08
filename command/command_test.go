@@ -41,12 +41,12 @@ func echoCommand(t *testing.T) Command {
 	}
 }
 
-func dispatch(t *testing.T, h Handler, args string) sys.SyscallResult {
+func dispatch(t *testing.T, h Command, args string) sys.SyscallResult {
 	t.Helper()
 	result, err := h.DispatchCall(context.Background(), sys.Syscall{
 		Name: Capability,
 		Args: json.RawMessage(args),
-	}, sys.Authorization{Decision: sys.Approved})
+	})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -65,7 +65,7 @@ func decode(t *testing.T, result sys.SyscallResult) Response {
 // A granted call runs, and the child receives the host's argv with the guest's
 // values substituted — each as one element, never re-parsed.
 func TestRunSubstitutesDeclaredSlots(t *testing.T) {
-	h := Handler{Name: Capability, Commands: []Command{echoCommand(t)}}
+	h := echoCommand(t)
 	result := dispatch(t, h, `{"operation":"kubectl-get","params":{"context":"prod-eu","resource":"pods"}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("run => %v (%s)", result.Status(), result.Message())
@@ -83,7 +83,7 @@ func TestRunSubstitutesDeclaredSlots(t *testing.T) {
 // that merely contains a member is not a member. An unanchored pattern would
 // have admitted the last two of these.
 func TestClosedSetAdmitsOnlyItsMembers(t *testing.T) {
-	h := Handler{Name: Capability, Commands: []Command{echoCommand(t)}}
+	h := echoCommand(t)
 	for _, context := range []string{"prod-eu", "staging"} {
 		args := `{"operation":"kubectl-get","params":{"context":"` + context + `","resource":"pods"}}`
 		if result := dispatch(t, h, args); result.Status() != sys.StatusResult {
@@ -108,7 +108,7 @@ func TestParameterMayNotBecomeAFlag(t *testing.T) {
 		Args:   []string{"{value}"},
 		Params: map[string]Param{"value": {Pattern: anchored(t, `.*`), Source: `.*`}},
 	}
-	h := Handler{Name: Capability, Commands: []Command{free}}
+	h := free
 	// The slot's own pattern admits anything; the flag guard still refuses these.
 	for _, value := range []string{"-o", "--output=json", "-c core.sshCommand=x", "-rf"} {
 		args, _ := json.Marshal(Request{Operation: "echo", Params: map[string]string{"value": value}})
@@ -132,7 +132,7 @@ func TestShellMetacharactersAreInert(t *testing.T) {
 		Args:   []string{"{value}"},
 		Params: map[string]Param{"value": {Pattern: anchored(t, `.*`), Source: `.*`}},
 	}
-	h := Handler{Name: Capability, Commands: []Command{free}}
+	h := free
 	for _, value := range []string{
 		"a; rm -rf /tmp/nope",
 		"a && whoami",
@@ -161,7 +161,7 @@ func TestControlCharactersAreRefused(t *testing.T) {
 		Args:   []string{"{value}"},
 		Params: map[string]Param{"value": {Pattern: anchored(t, `(?s).*`), Source: `(?s).*`}},
 	}
-	h := Handler{Name: Capability, Commands: []Command{free}}
+	h := free
 	for _, value := range []string{"a\nb", "a\rb", "a\tb", "a\x00b", "a\x1bb"} {
 		args, _ := json.Marshal(Request{Operation: "echo", Params: map[string]string{"value": value}})
 		result := dispatch(t, h, string(args))
@@ -174,17 +174,16 @@ func TestControlCharactersAreRefused(t *testing.T) {
 	}
 }
 
-// A guest may not name a command it was not granted, nor pass a parameter the
-// command did not declare, nor omit one it did.
+// A guest may not pass a parameter the command did not declare, nor omit one
+// it did. (A command it was not granted never reaches here: the grant table
+// refuses it.)
 func TestAllowlistAndSlotDiscipline(t *testing.T) {
-	h := Handler{Name: Capability, Commands: []Command{echoCommand(t)}}
+	h := echoCommand(t)
 	cases := []struct {
 		name  string
 		args  string
 		errno sys.Errno
 	}{
-		{"ungranted operation", `{"operation":"rm","params":{}}`, sys.ErrnoDenied},
-		{"absent operation", `{"params":{}}`, sys.ErrnoDenied},
 		{"undeclared parameter", `{"operation":"kubectl-get","params":{"context":"staging","resource":"pods","extra":"x"}}`, sys.ErrnoInvalidArgs},
 		{"missing parameter", `{"operation":"kubectl-get","params":{"context":"staging"}}`, sys.ErrnoInvalidArgs},
 	}
@@ -206,12 +205,12 @@ func TestEnvironmentIsNotInherited(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
-	h := Handler{Name: Capability, Commands: []Command{{
+	h := Command{
 		Name: "show-env",
 		Path: "/bin/sh",
 		Args: []string{script},
 		Env:  map[string]string{"KUBECONFIG": "/etc/aurora/kubeconfig"},
-	}}}
+	}
 	result := dispatch(t, h, `{"operation":"show-env","params":{}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("run => %v (%s)", result.Status(), result.Message())
@@ -236,12 +235,12 @@ func TestTimeoutKillsTheProcessGroup(t *testing.T) {
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
-	h := Handler{Name: Capability, Commands: []Command{{
+	h := Command{
 		Name:    "slow",
 		Path:    "/bin/sh",
 		Args:    []string{script},
 		Timeout: 200 * time.Millisecond,
-	}}}
+	}
 
 	start := time.Now()
 	result := dispatch(t, h, `{"operation":"slow","params":{}}`)
@@ -266,12 +265,12 @@ func TestOutputIsBounded(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nyes aurora | head -c 200000\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
-	h := Handler{Name: Capability, Commands: []Command{{
+	h := Command{
 		Name:           "flood",
 		Path:           "/bin/sh",
 		Args:           []string{script},
 		MaxOutputBytes: 1024,
-	}}}
+	}
 	result := dispatch(t, h, `{"operation":"flood","params":{}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("run => %v (%s)", result.Status(), result.Message())
@@ -292,7 +291,7 @@ func TestNonZeroExitIsAResult(t *testing.T) {
 	if err := os.WriteFile(script, []byte(`#!/bin/sh`+"\n"+`echo "no such namespace" >&2`+"\n"+`exit 3`+"\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
-	h := Handler{Name: Capability, Commands: []Command{{Name: "failing", Path: "/bin/sh", Args: []string{script}}}}
+	h := Command{Name: "failing", Path: "/bin/sh", Args: []string{script}}
 	result := dispatch(t, h, `{"operation":"failing","params":{}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("a non-zero exit must be a result, got %v (%s)", result.Status(), result.Message())
@@ -309,7 +308,7 @@ func TestCommandThatLeavesAChildBehindStillReportsItsExit(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho started\nsleep 3 &\nexit 0\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
-	h := Handler{Name: Capability, Commands: []Command{{Name: "leave", Path: "/bin/sh", Args: []string{script}}}}
+	h := Command{Name: "leave", Path: "/bin/sh", Args: []string{script}}
 	result := dispatch(t, h, `{"operation":"leave","params":{}}`)
 	if result.Status() != sys.StatusResult {
 		t.Fatalf("got %v (%s), want a result", result.Status(), result.Message())
@@ -323,14 +322,14 @@ func TestCommandThatLeavesAChildBehindStillReportsItsExit(t *testing.T) {
 // may well pass on a retry, the second is a configuration fault that will not.
 func TestTimeoutIsTransientAndStartFailureIsNot(t *testing.T) {
 	slow := Command{Name: "slow", Path: "/bin/sleep", Args: []string{"5"}, Timeout: 150 * time.Millisecond}
-	h := Handler{Name: Capability, Commands: []Command{slow}}
+	h := slow
 	result := dispatch(t, h, `{"operation":"slow","params":{}}`)
 	if result.Errno() != sys.ErrnoTransient {
 		t.Fatalf("timeout errno = %v, want transient (a retry may succeed)", result.Errno())
 	}
 
 	missing := Command{Name: "missing", Path: "/nonexistent/aurora/binary"}
-	h = Handler{Name: Capability, Commands: []Command{missing}}
+	h = missing
 	result = dispatch(t, h, `{"operation":"missing","params":{}}`)
 	if result.Errno() != sys.ErrnoInternal {
 		t.Fatalf("missing-binary errno = %v, want internal (retrying will not fix it)", result.Errno())
@@ -342,7 +341,7 @@ func TestTimeoutIsTransientAndStartFailureIsNot(t *testing.T) {
 // PATH, the ambient authority this driver refuses to depend on. The registry
 // checks it too; this is the floor under a Handler built by hand.
 func TestRelativeExecutableIsRefusedAtRunTime(t *testing.T) {
-	h := Handler{Name: Capability, Commands: []Command{{Name: "relative", Path: "echo"}}}
+	h := Command{Name: "relative", Path: "echo"}
 	result := dispatch(t, h, `{"operation":"relative","params":{}}`)
 	if result.Status() != sys.StatusFailed {
 		t.Fatalf("a relative executable must be refused, got %v", result.Status())
@@ -362,12 +361,12 @@ func TestRelativeExecutableIsRefusedAtRunTime(t *testing.T) {
 // everything. A pattern written with * admits "" without its author noticing,
 // so the rule lives here rather than in each author's regular expression.
 func TestEmptyParameterIsRefused(t *testing.T) {
-	h := Handler{Name: Capability, Commands: []Command{{
+	h := Command{
 		Name: "list", Path: "/bin/echo", Args: []string{"--namespace={ns}"},
 		Params: map[string]Param{"ns": {Pattern: regexp.MustCompile(`\A(?:[a-z0-9-]*)\z`), Source: "[a-z0-9-]*"}},
-	}}}
+	}
 	args, _ := json.Marshal(Request{Operation: "list", Params: map[string]string{"ns": ""}})
-	result, err := h.DispatchCall(context.Background(), sys.Syscall{Name: Capability, Args: args}, sys.Authorization{})
+	result, err := h.DispatchCall(context.Background(), sys.Syscall{Name: Capability, Args: args})
 	if err != nil {
 		t.Fatal(err)
 	}

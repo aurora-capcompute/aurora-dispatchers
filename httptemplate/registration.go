@@ -89,8 +89,15 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	if err != nil {
 		return capability.Family{}, err
 	}
-	operations := make(map[string]Operation, len(config.Capabilities))
-	branches := make([]json.RawMessage, 0, len(config.Capabilities))
+	client := internet.NewConfiguredClient(
+		templatePolicy(config),
+		time.Duration(config.TimeoutMS)*time.Millisecond,
+		config.MaxResponseBytes,
+		config.MaxRequestBytes,
+	)
+	client.AllowPrivateNetwork = config.AllowPrivateNetwork
+
+	entries := make([]capability.Entry, 0, len(config.Capabilities))
 	for _, operation := range config.Capabilities {
 		// Resolve this operation's host-held credential at activation. A missing
 		// referenced secret fails the build here, never silently at request time.
@@ -102,35 +109,15 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		if err != nil {
 			return capability.Family{}, fmt.Errorf("operation %q: %w", operation.Operation, err)
 		}
-		operations[operation.Operation] = compiled
-		branches = append(branches, branch)
-	}
-
-	client := internet.NewConfiguredClient(
-		templatePolicy(config),
-		time.Duration(config.TimeoutMS)*time.Millisecond,
-		config.MaxResponseBytes,
-		config.MaxRequestBytes,
-	)
-	client.AllowPrivateNetwork = config.AllowPrivateNetwork
-
-	handler := Handler{
-		Name:       Capability,
-		Client:     client,
-		Operations: operations,
-	}
-	entries := make([]capability.Entry, 0, len(config.Capabilities))
-	for i, operation := range config.Capabilities {
-		compiled := operations[operation.Operation]
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: Capability, Operation: operation.Operation},
 			Discriminator:   "operation",
 			Description:     operation.Description,
-			Input:           branches[i],
+			Input:           branch,
 			Labels:          append(append([]string(nil), compiled.Labels...), compiled.CredentialLabels...),
 			Forbid:          compiled.Taints,
 			RequireApproval: compiled.RequireApproval,
-			Handler:         handler,
+			Handler:         Handler{Client: client, Operation: compiled},
 		})
 	}
 	return capability.Family{Entries: entries,

@@ -21,15 +21,18 @@ const SyscallType = "core.openaiApi"
 
 // openaiOperations are the cases a core.openaiApi grant may enable, each with
 // the field schema its args carry (minus the `operation` discriminator, which
-// registry.OperationBranch injects) and a one-line description.
+// registry.OperationBranch injects), a one-line description, the provider path,
+// and the field a request must carry (empty for models, a GET).
 var openaiOperations = map[string]struct {
-	schema      json.RawMessage
-	description string
+	schema        json.RawMessage
+	description   string
+	path          string
+	requiredField string
 }{
-	"chat":       {schemas["chat"], "chat: create a Chat Completions response"},
-	"responses":  {schemas["responses"], "responses: create a Responses API response"},
-	"embeddings": {schemas["embeddings"], "embeddings: create embeddings"},
-	"models":     {schemas["models"], "models: list provider models"},
+	"chat":       {schemas["chat"], "chat: create a Chat Completions response", "chat/completions", "messages"},
+	"responses":  {schemas["responses"], "responses: create a Responses API response", "responses", "input"},
+	"embeddings": {schemas["embeddings"], "embeddings: create embeddings", "embeddings", "input"},
+	"models":     {schemas["models"], "models: list provider models", "models", ""},
 }
 
 // Operations returns the operation names this driver exposes, sorted.
@@ -55,7 +58,7 @@ type Registration struct{}
 func (Registration) Matches(syscallType string) bool { return syscallType == SyscallType }
 
 // Configure publishes the single core.openaiApi capability — a oneOf over the
-// granted operations — and the handler that serves them. The grant is kept off
+// granted operations — and one handler per operation. The grant is kept off
 // the discoverable menu via the manifest `hidden` flag (the agent calls the LLM
 // itself; the model never sees it).
 func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
@@ -75,22 +78,16 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		return capability.Family{}, fmt.Errorf("core.openaiApi api_key: %w", err)
 	}
 	normalized.apiKey = apiKey
-	// One handler backs every operation of this grant. The table refuses a
-	// second Add for the same syscall, so the old find-or-create scan — which
-	// existed to share a handler across repeated grants — has nothing to find:
-	// the manifest already rejects a duplicate syscall.
-	client, err := NewClient(normalized)
+	client, err := newProvider(normalized)
 	if err != nil {
-		client = failedClient{err: err}
+		return capability.Family{}, fmt.Errorf("core.openaiApi: %w", err)
 	}
-	handler := NewHandler(client)
-	handler.connection = connectionFor(normalized)
 
 	entries := make([]capability.Entry, 0, len(grants))
 	descriptions := make([]string, 0, len(grants))
 	for _, grant := range grants {
-		handler.AddOperation(grant.Operation, normalized)
-		schema, err := allowModels(openaiOperations[grant.Operation].schema, normalized.AllowedModels)
+		op := openaiOperations[grant.Operation]
+		schema, err := allowModels(op.schema, normalized.AllowedModels)
 		if err != nil {
 			return capability.Family{}, err
 		}
@@ -101,7 +98,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 		entry := capability.Entry{
 			Key:           capability.Key{Syscall: SyscallType, Operation: grant.Operation},
 			Discriminator: "operation",
-			Description:   openaiOperations[grant.Operation].description,
+			Description:   op.description,
 			Input:         branch,
 			Labels:        grant.Labels,
 			// A provider call sends the prompt off-host — egress — so floor the
@@ -110,13 +107,20 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			// declaring it here is the whole of this driver's part.
 			Forbid:          registry.WithEgressFloor(grant.Taints),
 			RequireApproval: grant.RequireApproval != nil && *grant.RequireApproval,
-			Handler:         handler,
+			Handler: operation{
+				client:          client,
+				path:            op.path,
+				requiredField:   op.requiredField,
+				defaultModel:    normalized.DefaultModel,
+				models:          newModelPolicy(normalized.AllowedModels),
+				maxRequestBytes: normalized.MaxRequestBytes,
+			},
 		}
 		if grant.Operation != "models" {
 			entry.Prompt = modelPrompt(normalized.DefaultModel)
 		}
 		entries = append(entries, entry)
-		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
+		descriptions = append(descriptions, op.description)
 	}
 	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
@@ -185,46 +189,6 @@ func parseGrantConfig(raw json.RawMessage) (grantConfig, []registry.OperationGra
 		return grantConfig{}, nil, err
 	}
 	return config, grants, nil
-}
-
-func connectionFor(settings normalizedSettings) connectionSettings {
-	maxRetries := 0
-	maxRetriesSet := settings.MaxRetries != nil
-	if maxRetriesSet {
-		maxRetries = *settings.MaxRetries
-	}
-	headers := make([]string, 0, len(settings.Headers))
-	for header, value := range settings.Headers {
-		headers = append(headers, header+"="+value)
-	}
-	sort.Strings(headers)
-	return connectionSettings{
-		baseURL:        settings.BaseURL,
-		apiKey:         settings.apiKey,
-		apiKeyOptional: settings.APIKeyOptional,
-		organization:   settings.Organization,
-		project:        settings.Project,
-		timeout:        settings.timeout.String(),
-		maxRetries:     maxRetries,
-		maxRetriesSet:  maxRetriesSet,
-		insecureHTTP:   settings.AllowInsecureHTTP,
-		headers:        strings.Join(headers, "\n"),
-	}
-}
-
-type failedClient struct{ err error }
-
-func (c failedClient) Chat(context.Context, json.RawMessage) (json.RawMessage, error) {
-	return nil, c.err
-}
-func (c failedClient) Responses(context.Context, json.RawMessage) (json.RawMessage, error) {
-	return nil, c.err
-}
-func (c failedClient) Embeddings(context.Context, json.RawMessage) (json.RawMessage, error) {
-	return nil, c.err
-}
-func (c failedClient) Models(context.Context) (json.RawMessage, error) {
-	return nil, c.err
 }
 
 var schemas = map[string]json.RawMessage{

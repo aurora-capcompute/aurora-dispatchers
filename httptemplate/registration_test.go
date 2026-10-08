@@ -116,11 +116,11 @@ func TestTemplateConfigureSpansMultipleHosts(t *testing.T) {
 	if err := config.Add(contribution); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	handler, ok := config.Entries()[0].Handler.(httptemplate.Handler)
-	if !ok {
-		t.Fatalf("handler = %T, want httptemplate.Handler", config.Entries()[0].Handler)
+	operations := map[string]httptemplate.Operation{}
+	for _, entry := range config.Entries() {
+		operations[entry.Key.Operation] = entry.Handler.(httptemplate.Handler).Operation
 	}
-	search, weather := handler.Operations["search"], handler.Operations["weather"]
+	search, weather := operations["search"], operations["weather"]
 	if search.BaseURL != "https://onyx.example.com" || weather.BaseURL != "https://api.weather.example.com" {
 		t.Fatalf("operations did not keep their own origins: %q, %q", search.BaseURL, weather.BaseURL)
 	}

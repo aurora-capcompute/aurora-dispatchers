@@ -28,7 +28,6 @@ type Doer interface {
 // approval declaration, resolved from the call's HTTP method — the method is the
 // ADT discriminator of a single net capability.
 type Handler struct {
-	Name   string
 	Client Doer
 	// Injections attach host-held credential headers to matching (method, host)
 	// requests. The header values are resolved host-side and are never supplied
@@ -72,15 +71,10 @@ type MethodPolicy struct {
 	Taints          []string
 }
 
-func (h Handler) Handles(name string) bool { return name == h.Name }
-
-func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if h.Client == nil {
-		return sys.FailCode(sys.ErrnoNotFound, "internet client is not configured"), nil
-	}
+func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request Request
 	if err := json.Unmarshal(call.Args, &request); err != nil {
-		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", h.Name, err)), nil
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
 	// The method is read as sent: the entry this call resolved to was keyed on
 	// exactly this value, and flow policy and approval are that entry's,
