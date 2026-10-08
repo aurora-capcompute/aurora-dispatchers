@@ -20,7 +20,7 @@ func TestAllowedGETSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET", server.URL))
 	response, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err != nil {
 		t.Fatalf("do: %v", err)
@@ -51,7 +51,7 @@ func TestAllowedPOSTSendsBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "POST:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "POST", server.URL))
 	response, err := client.Do(context.Background(), internet.Request{
 		Method:  "POST",
 		URL:     server.URL,
@@ -75,7 +75,7 @@ func TestDisallowedDomainFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "GET:https://example.com"))
+	client := loopbackClient(mustPolicy(t, "GET", "https://example.com"))
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err == nil || !strings.Contains(err.Error(), "not allowlisted") {
 		t.Fatalf("error = %v, want not-allowlisted", err)
@@ -90,7 +90,7 @@ func TestDisallowedMethodFails(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET", server.URL))
 	_, err := client.Do(context.Background(), internet.Request{Method: "DELETE", URL: server.URL})
 	if err == nil || !strings.Contains(err.Error(), "not allowlisted") {
 		t.Fatalf("error = %v, want not-allowlisted", err)
@@ -99,31 +99,31 @@ func TestDisallowedMethodFails(t *testing.T) {
 
 // The method wildcard "*" lets a grant permit every method against a host.
 func TestMethodWildcardAllowsAnyMethod(t *testing.T) {
-	policy := mustPolicy(t, "*:https://api.example.com")
+	policy := mustPolicy(t, "*", "https://api.example.com")
 	for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
-		if err := policy.Allows(method, "https://api.example.com/x"); err != nil {
+		if err := policy.Check(method, mustURL(t, "https://api.example.com/x")); err != nil {
 			t.Fatalf("method %s: %v", method, err)
 		}
 	}
-	if err := policy.Allows("GET", "https://other.example.com"); err == nil {
+	if err := policy.Check("GET", mustURL(t, "https://other.example.com")); err == nil {
 		t.Fatal("wildcard method must still pin the host")
 	}
 }
 
 func TestHostWildcardPinsMethod(t *testing.T) {
-	policy := mustPolicy(t, "GET:*")
+	policy := mustPolicy(t, "GET", "*")
 	for _, target := range []string{"https://example.com/path", "http://localhost:8080/value"} {
-		if err := policy.Allows(http.MethodGet, target); err != nil {
+		if err := policy.Check(http.MethodGet, mustURL(t, target)); err != nil {
 			t.Fatalf("allow %s: %v", target, err)
 		}
 	}
-	if err := policy.Allows(http.MethodPost, "https://example.com"); err == nil {
+	if err := policy.Check(http.MethodPost, mustURL(t, "https://example.com")); err == nil {
 		t.Fatal("host wildcard must still pin the method")
 	}
 }
 
 func TestNonHTTPSchemeFails(t *testing.T) {
-	client := loopbackClient(mustPolicy(t, "GET:https://example.com"))
+	client := loopbackClient(mustPolicy(t, "GET", "https://example.com"))
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: "file:///tmp/data.txt"})
 	if err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("error = %v, want scheme-not-allowed", err)
@@ -141,7 +141,7 @@ func TestRedirectToDisallowedDomainFails(t *testing.T) {
 	}))
 	defer source.Close()
 
-	client := loopbackClient(mustPolicy(t, "GET:"+source.URL))
+	client := loopbackClient(mustPolicy(t, "GET", source.URL))
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: source.URL})
 	if err == nil || !strings.Contains(err.Error(), "not allowlisted") {
 		t.Fatalf("error = %v, want not-allowlisted", err)
@@ -154,7 +154,7 @@ func TestResponseBodyIsByteLimited(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET", server.URL))
 	client.MaxBytes = 3
 	response, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err != nil {
@@ -171,7 +171,7 @@ func TestRequestBodyIsByteLimited(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "POST:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "POST", server.URL))
 	client.MaxRequestBytes = 4
 	_, err := client.Do(context.Background(), internet.Request{Method: "POST", URL: server.URL, Body: "toolong"})
 	if err == nil || !strings.Contains(err.Error(), "request body exceeds") {
@@ -198,7 +198,7 @@ func TestInjectedCredentialStrippedOnCrossOriginRedirect(t *testing.T) {
 	// Both origins allowlisted — the exfil precondition (the redirect passes the
 	// policy re-check), so only header stripping stands between the credential
 	// and the other host.
-	client := loopbackClient(mustPolicy(t, "GET:"+source.URL+",GET:"+target.URL))
+	client := loopbackClient(mustPolicy(t, "GET", source.URL, "GET", target.URL))
 	ctx := internet.WithInjectedCredential(context.Background(), internet.OriginOf(mustURL(t, source.URL)), []string{"X-Api-Key"})
 	if _, err := client.Do(ctx, internet.Request{Method: "GET", URL: source.URL, Headers: map[string]string{"X-Api-Key": "SECRET"}}); err != nil {
 		t.Fatalf("do: %v", err)
@@ -222,7 +222,7 @@ func TestInjectedCredentialSurvivesSameOriginRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET", server.URL))
 	ctx := internet.WithInjectedCredential(context.Background(), internet.OriginOf(mustURL(t, server.URL)), []string{"X-Api-Key"})
 	if _, err := client.Do(ctx, internet.Request{Method: "GET", URL: server.URL + "/a", Headers: map[string]string{"X-Api-Key": "SECRET"}}); err != nil {
 		t.Fatalf("do: %v", err)
@@ -242,7 +242,7 @@ func TestRedirectCountIsCapped(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := loopbackClient(mustPolicy(t, "GET:"+server.URL))
+	client := loopbackClient(mustPolicy(t, "GET", server.URL))
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err == nil || !strings.Contains(err.Error(), "stopped after") {
 		t.Fatalf("error = %v, want the redirect cap", err)
@@ -275,20 +275,25 @@ func mustURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-func mustPolicy(t *testing.T, raw string) internet.Policy {
+// mustPolicy builds a policy from method, domain pairs.
+func mustPolicy(t *testing.T, pairs ...string) internet.Policy {
 	t.Helper()
-	policy, err := internet.ParseAllowlist(raw)
-	if err != nil {
-		t.Fatalf("parse policy: %v", err)
+	var rules []internet.Rule
+	for i := 0; i < len(pairs); i += 2 {
+		rule, err := internet.NewRule(pairs[i], pairs[i+1])
+		if err != nil {
+			t.Fatalf("rule %s %s: %v", pairs[i], pairs[i+1], err)
+		}
+		rules = append(rules, rule)
 	}
-	return policy
+	return internet.NewPolicy(rules...)
 }
 
 // loopbackClient allows private-network dials because these tests serve from
 // httptest (127.0.0.1). Production blocks them unless a grant opts in — see
 // TestBlocksPrivateNetworkByDefault.
 func loopbackClient(policy internet.Policy) *internet.Client {
-	c := internet.NewClient(policy)
+	c := internet.NewConfiguredClient(policy, 0, 0, 0)
 	c.AllowPrivateNetwork = true
 	return c
 }
@@ -307,7 +312,7 @@ func TestBlocksPrivateNetworkByDefault(t *testing.T) {
 
 	// The server is on 127.0.0.1; the policy allowlists exactly it, yet the
 	// default guard must still refuse the dial.
-	client := internet.NewClient(mustPolicy(t, "GET:"+server.URL))
+	client := internet.NewConfiguredClient(mustPolicy(t, "GET", server.URL), 0, 0, 0)
 	_, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err == nil {
 		t.Fatal("a loopback request succeeded with the SSRF guard on")
@@ -327,7 +332,7 @@ func TestAllowPrivateNetworkOptIn(t *testing.T) {
 	defer server.Close()
 
 	// The explicit opt-in is what a grant meant to reach an internal service sets.
-	client := internet.NewClient(mustPolicy(t, "GET:"+server.URL))
+	client := internet.NewConfiguredClient(mustPolicy(t, "GET", server.URL), 0, 0, 0)
 	client.AllowPrivateNetwork = true
 	response, err := client.Do(context.Background(), internet.Request{Method: "GET", URL: server.URL})
 	if err != nil {

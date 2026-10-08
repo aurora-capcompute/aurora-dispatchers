@@ -122,8 +122,7 @@ type Rule struct {
 }
 
 // NewPolicy builds a policy from explicit rules — the seam a grant uses to turn
-// its declared permissions into an allowlist without round-tripping through the
-// string form.
+// its declared permissions into an allowlist.
 func NewPolicy(rules ...Rule) Policy {
 	return Policy{rules: append([]Rule(nil), rules...)}
 }
@@ -163,33 +162,6 @@ func NewRule(method, domain string) (Rule, error) {
 	return Rule{Method: method, Scheme: strings.ToLower(parsed.Scheme), Host: strings.ToLower(parsed.Host)}, nil
 }
 
-// ParseAllowlist reads the string form of a policy — comma-separated
-// `METHOD:origin` entries, where METHOD may be "*" and origin may be "*" or a
-// bare host — for operator configuration.
-func ParseAllowlist(raw string) (Policy, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return Policy{}, nil
-	}
-	var rules []Rule
-	for _, entry := range strings.Split(raw, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		method, origin, ok := strings.Cut(entry, ":")
-		if !ok {
-			return Policy{}, fmt.Errorf("invalid allowlist entry %q: want METHOD:origin", entry)
-		}
-		rule, err := NewRule(method, origin)
-		if err != nil {
-			return Policy{}, fmt.Errorf("allowlist entry %q: %w", entry, err)
-		}
-		rules = append(rules, rule)
-	}
-	return Policy{rules: rules}, nil
-}
-
 // Check reports whether method+target is allowlisted, and validates the target
 // is a credential-free http(s) URL.
 func (p Policy) Check(method string, target *url.URL) error {
@@ -221,17 +193,8 @@ func (p Policy) Check(method string, target *url.URL) error {
 	return fmt.Errorf("%s %s://%s is not allowlisted", method, scheme, host)
 }
 
-// Allows is Check for a raw URL string.
-func (p Policy) Allows(method string, rawURL string) error {
-	target, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("parse url: %w", err)
-	}
-	return p.Check(method, target)
-}
-
 // Client makes allowlisted HTTP requests with a bounded response body. The zero
-// value is unusable; build one with NewClient or NewConfiguredClient.
+// value is unusable; build one with NewConfiguredClient.
 type Client struct {
 	Policy          Policy
 	HTTPClient      *http.Client
@@ -247,10 +210,6 @@ type Client struct {
 	// surprise of name resolution. Set true only when a grant is meant to talk to
 	// an internal service.
 	AllowPrivateNetwork bool
-}
-
-func NewClient(policy Policy) *Client {
-	return NewConfiguredClient(policy, DefaultTimeout, DefaultMaxResponseBytes, DefaultMaxRequestBytes)
 }
 
 func NewConfiguredClient(policy Policy, timeout time.Duration, maxResponseBytes, maxRequestBytes int64) *Client {
