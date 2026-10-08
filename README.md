@@ -2,7 +2,7 @@
 
 **The "device drivers" that let a sandboxed agent touch the real world — safely.**
 `aurora-dispatchers` is a Go library of ready‑made capability drivers for Aurora:
-make an HTTP call, read a file, run an allowlisted command, keep a per‑session
+make an HTTP call, run an allowlisted command, keep a per‑session
 scratch store, or call an LLM. Each driver
 runs the action *for* the agent, under a scoped, approval‑gated, recorded grant.
 
@@ -66,7 +66,7 @@ and replaying around it.
 | `core.scratch` | `scratch/` | Durable store shared by the processes of one session | `get`/`put`/`list`/`search` on the calling session's store, bound by the host — one process can leave data for a later one, even without session history (a place to offload a large read out of the model's context, notes, auxiliary output); preserves provenance labels |
 | `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
 | `core.httpTemplate` | `httptemplate/` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
-| `core.command` | `command/` | Host commands from an author‑declared allowlist | One operation per allowlisted command; no shell (exec with a fixed argv); every slot is a closed set or an anchored pattern; no value may begin with `-` or carry a control character; the child inherits no environment; approval on by default |
+| `core.command` | `command/` | Host commands from an author‑declared allowlist | One operation per allowlisted command; no shell (exec with a fixed argv); every slot is a closed set or an anchored pattern; no value may begin with `-` or carry a control character; the child inherits no environment and runs in the `dir` its rule states; approval on by default, and the prompt shows the resolved command line; a non‑zero exit is a result with `exit_code` |
 
 Two shared mechanisms make grants expressive and safe:
 

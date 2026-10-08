@@ -26,8 +26,9 @@ type CommandRule struct {
 	Path string `json:"path"`
 	// Args is the argument vector, with {slot} placeholders filled from params.
 	Args []string `json:"args,omitempty"`
-	// Dir is the working directory (absolute).
-	Dir string `json:"dir,omitempty"`
+	// Dir is the working directory (absolute). Required: a command never runs
+	// in the host process's own working directory.
+	Dir string `json:"dir"`
 	// Env is the child's entire environment — it inherits nothing. A value is a
 	// plain string, or a secret reference {"secret":"NAME"} resolved host-side;
 	// a secret goes in as a reference, never inline.
@@ -142,6 +143,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			Labels:          c.Labels,
 			Forbid:          c.Taints,
 			RequireApproval: c.RequireApproval,
+			Prompt:          c.prompt,
 			Handler:         handler,
 		})
 	}
@@ -296,8 +298,8 @@ func normalizeCommandRule(rule CommandRule) (CommandRule, error) {
 	if !filepath.IsAbs(rule.Path) || rule.Path != filepath.Clean(rule.Path) {
 		return CommandRule{}, fmt.Errorf("path %q must be an absolute, cleaned path (there is no PATH lookup)", rule.Path)
 	}
-	if rule.Dir != "" && (!filepath.IsAbs(rule.Dir) || rule.Dir != filepath.Clean(rule.Dir)) {
-		return CommandRule{}, fmt.Errorf("dir %q must be an absolute, cleaned path", rule.Dir)
+	if !filepath.IsAbs(rule.Dir) || rule.Dir != filepath.Clean(rule.Dir) {
+		return CommandRule{}, fmt.Errorf("dir %q must be an absolute, cleaned path (there is no default working directory)", rule.Dir)
 	}
 	for key := range rule.Env {
 		if strings.TrimSpace(key) == "" || strings.ContainsAny(key, "=\x00") {

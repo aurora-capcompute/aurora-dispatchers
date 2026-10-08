@@ -285,20 +285,37 @@ func TestOutputIsBounded(t *testing.T) {
 	}
 }
 
-// A non-zero exit is the command's own verdict: it comes back as a failure
-// carrying the command's stderr, so the model can read what went wrong.
-func TestNonZeroExitSurfacesStderr(t *testing.T) {
+// A non-zero exit is the command's own verdict: it comes back as a result with
+// the exit code and the command's stderr, and the program decides what it means.
+func TestNonZeroExitIsAResult(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "fail.sh")
 	if err := os.WriteFile(script, []byte(`#!/bin/sh`+"\n"+`echo "no such namespace" >&2`+"\n"+`exit 3`+"\n"), 0o700); err != nil {
 		t.Fatalf("write script: %v", err)
 	}
 	h := Handler{Name: Capability, Commands: []Command{{Name: "failing", Path: "/bin/sh", Args: []string{script}}}}
 	result := dispatch(t, h, `{"operation":"failing","params":{}}`)
-	if result.Status() != sys.StatusFailed {
-		t.Fatalf("a non-zero exit must fail, got %v", result.Status())
+	if result.Status() != sys.StatusResult {
+		t.Fatalf("a non-zero exit must be a result, got %v (%s)", result.Status(), result.Message())
 	}
-	if !strings.Contains(result.Message(), "no such namespace") || !strings.Contains(result.Message(), "3") {
-		t.Fatalf("the failure must carry the exit code and stderr: %q", result.Message())
+	if response := decode(t, result); response.ExitCode != 3 || !strings.Contains(response.Stderr, "no such namespace") {
+		t.Fatalf("response = %+v, want exit 3 and the stderr", response)
+	}
+}
+
+// A child left behind can hold the output open after the command exits. The
+// command still ran: its exit status comes back, not a start failure.
+func TestCommandThatLeavesAChildBehindStillReportsItsExit(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "leave.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho started\nsleep 3 &\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	h := Handler{Name: Capability, Commands: []Command{{Name: "leave", Path: "/bin/sh", Args: []string{script}}}}
+	result := dispatch(t, h, `{"operation":"leave","params":{}}`)
+	if result.Status() != sys.StatusResult {
+		t.Fatalf("got %v (%s), want a result", result.Status(), result.Message())
+	}
+	if response := decode(t, result); response.ExitCode != 0 || !strings.Contains(response.Stdout, "started") {
+		t.Fatalf("response = %+v, want exit 0 and the output", response)
 	}
 }
 

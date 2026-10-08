@@ -38,11 +38,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -71,7 +73,10 @@ type Request struct {
 // Response is what the program observes: the exit status and the bounded
 // output. Output is captured, never streamed — a command that writes more than
 // its bound is truncated and says so rather than filling the context window.
+// A non-zero exit is the command's own verdict, so it is a result like any
+// other, and the program decides what it means.
 type Response struct {
+	// ExitCode is -1 when a signal ended the command.
 	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
@@ -144,7 +149,8 @@ type Command struct {
 	// request's params. A placeholder may be embedded in a larger argument
 	// ("--ns={namespace}"); the result is still one argv element.
 	Args []string
-	// Dir is the working directory (absolute; empty means the host process's).
+	// Dir is the working directory (absolute). The manifest states it: a
+	// command never runs in the host process's own working directory.
 	Dir string
 	// Env is the child's entire environment. It is never inherited: an empty Env
 	// means an empty environment.
@@ -199,34 +205,30 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Au
 
 	// Flow policy and approval are this command's entry's, enforced by the
 	// runtime above and below the replay tape. This handler runs the effect.
-	summary := summarize(command, request.Params)
-
 	response, err := execCommand(ctx, command, argv)
-	if err != nil {
-		if ctx.Err() != nil {
-			return sys.SyscallResult{}, ctx.Err()
-		}
-		// A timeout may well pass on a retry — a slow cluster, a busy host — while
-		// a command that could not start at all (missing binary, bad working
-		// directory) is a configuration fault that retrying will not fix. Either
-		// way the run touched a labeled capability, so the failure carries its
-		// labels: an error channel must not launder them.
-		errno := sys.ErrnoInternal
-		var timedOut errTimeout
-		if errors.As(err, &timedOut) {
-			errno = sys.ErrnoTransient
-		}
-		return sys.FailCode(errno, fmt.Sprintf("%s: %v", summary, err)), nil
+	if err == nil {
+		return marshalResult(response)
 	}
-	if response.ExitCode != 0 {
-		// A non-zero exit is the command's own verdict, not an infrastructure
-		// failure. Surface it as a failure the model can read and react to, with
-		// the command's own stderr as the message.
-		return sys.FailCode(sys.ErrnoInvalidArgs, failureMessage(summary, response)), nil
+	if ctx.Err() != nil {
+		return sys.SyscallResult{}, ctx.Err()
 	}
+	// A timeout may well pass on a retry — a slow cluster, a busy host — while
+	// a command that could not start at all (missing binary, bad working
+	// directory) is a configuration fault that retrying will not fix. Either
+	// way the run touched a labeled capability, so the failure carries its
+	// labels: an error channel must not launder them.
+	errno := sys.ErrnoInternal
+	var timedOut errTimeout
+	if errors.As(err, &timedOut) {
+		errno = sys.ErrnoTransient
+	}
+	return sys.FailCode(errno, fmt.Sprintf("%s: %v", summarize(command, request.Params), err)), nil
+}
+
+func marshalResult(response Response) (sys.SyscallResult, error) {
 	encoded, err := json.Marshal(response)
 	if err != nil {
-		return sys.FailCode(sys.ErrnoInternal, fmt.Sprintf("encode run result: %v", err)), nil
+		return sys.SyscallResult{}, err
 	}
 	return sys.Result(encoded), nil
 }
@@ -272,13 +274,36 @@ func resolve(command Command, params map[string]string) ([]string, error) {
 			return nil, err
 		}
 	}
-	argv := make([]string, 0, len(command.Args))
-	for _, arg := range command.Args {
+	return substitute(command.Args, params), nil
+}
+
+// substitute fills each {slot} in an argument template from params.
+func substitute(args []string, params map[string]string) []string {
+	argv := make([]string, 0, len(args))
+	for _, arg := range args {
 		argv = append(argv, placeholder.ReplaceAllStringFunc(arg, func(match string) string {
 			return params[placeholder.FindStringSubmatch(match)[1]]
 		}))
 	}
-	return argv, nil
+	return argv
+}
+
+// prompt shows the human approving a call what will run: the executable and
+// its exact arguments, each quoted, the working directory, and the names —
+// never the values — of the environment it gets.
+func (c Command) prompt(call sys.Syscall) string {
+	// The Validator admitted these arguments against this command's schema.
+	var request Request
+	_ = json.Unmarshal(call.Args, &request)
+	quoted := []string{strconv.Quote(c.Path)}
+	for _, arg := range substitute(c.Args, request.Params) {
+		quoted = append(quoted, strconv.Quote(arg))
+	}
+	prompt := fmt.Sprintf("run: %s\ndir: %s", strings.Join(quoted, " "), c.Dir)
+	if len(c.Env) > 0 {
+		prompt += "\nenv: " + strings.Join(slices.Sorted(maps.Keys(c.Env)), ", ")
+	}
+	return prompt
 }
 
 // execCommand runs the resolved command with a bounded lifetime, a bounded
@@ -335,26 +360,21 @@ func execCommand(ctx context.Context, command Command, argv []string) (Response,
 	cmd.Stderr = stderr
 
 	err := cmd.Run()
-	response := Response{
-		Stdout:    stdout.String(),
-		Stderr:    stderr.String(),
-		Truncated: stdout.truncated || stderr.truncated,
-	}
 	switch {
-	case err == nil:
-		response.ExitCode = 0
-	case errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil:
+	case err != nil && ctx.Err() != nil:
 		return Response{}, errTimeout{after: timeout}
-	default:
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			response.ExitCode = exitErr.ExitCode()
-			break
-		}
+	case cmd.ProcessState == nil:
 		// Could not start at all: no such binary, bad working directory.
 		return Response{}, err
 	}
-	return response, nil
+	// The command ran, and its exit status stands — also when a child it left
+	// behind held the output open past WaitDelay (exec.ErrWaitDelay).
+	return Response{
+		ExitCode:  cmd.ProcessState.ExitCode(),
+		Stdout:    stdout.String(),
+		Stderr:    stderr.String(),
+		Truncated: stdout.truncated || stderr.truncated,
+	}, nil
 }
 
 // errTimeout is a command stopped by its own deadline, as opposed to one that
@@ -407,17 +427,4 @@ func summarize(command Command, params map[string]string) string {
 	}
 	b.WriteString(")")
 	return b.String()
-}
-
-// failureMessage renders a non-zero exit for the model: the command's own
-// stderr where it wrote one, its stdout otherwise.
-func failureMessage(summary string, response Response) string {
-	detail := strings.TrimSpace(response.Stderr)
-	if detail == "" {
-		detail = strings.TrimSpace(response.Stdout)
-	}
-	if detail == "" {
-		return fmt.Sprintf("%s: exited %d", summary, response.ExitCode)
-	}
-	return fmt.Sprintf("%s: exited %d: %s", summary, response.ExitCode, detail)
 }

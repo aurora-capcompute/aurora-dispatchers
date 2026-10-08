@@ -22,6 +22,7 @@ const kubectlGrant = `{"capabilities":[{
   "operation":"kubectl-get",
   "description":"List Kubernetes objects in a cluster",
   "path":"/bin/bash",
+  "dir":"/opt/aurora",
   "args":["/opt/aurora/bin/kubectl-get.sh","{context}","{resource}","{namespace}"],
   "env":{"KUBECONFIG":"/etc/aurora/kubeconfig","PATH":"/usr/bin:/bin"},
   "params":{
@@ -76,8 +77,8 @@ func TestPublishedSchemaCarriesTheClosedSet(t *testing.T) {
 // order, so the schema would not even be the same twice.
 func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 	grant := `{"capabilities":[
-	  {"operation":"read-eu","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-eu"]}},
-	  {"operation":"read-us","path":"/bin/echo","args":["{context}"],"params":{"context":["prod-us"]}}
+	  {"operation":"read-eu","path":"/bin/echo","dir":"/","args":["{context}"],"params":{"context":["prod-eu"]}},
+	  {"operation":"read-us","path":"/bin/echo","dir":"/","args":["{context}"],"params":{"context":["prod-us"]}}
 	]}`
 	first := string(configure(t, grant).Descriptors()[0].InputSchema)
 	if !strings.Contains(first, `"prod-eu"`) || !strings.Contains(first, `"prod-us"`) {
@@ -99,7 +100,7 @@ func TestPerCommandSchemasDoNotCollide(t *testing.T) {
 // admit more than it appears to.
 func TestPatternsAreAnchored(t *testing.T) {
 	grant := `{"capabilities":[{
-	  "operation":"echo","path":"/bin/echo","args":["{env}"],
+	  "operation":"echo","path":"/bin/echo","dir":"/","args":["{env}"],
 	  "params":{"env":"prod"}}]}`
 	out := configure(t, grant)
 	handler, ok := out.Entries()[0].Handler.(command.Handler)
@@ -121,7 +122,7 @@ func TestPatternsAreAnchored(t *testing.T) {
 // Approval defaults on. This driver runs host commands: an author who wants it
 // unattended says so explicitly.
 func TestApprovalDefaultsOn(t *testing.T) {
-	grant := `{"capabilities":[{"operation":"echo","path":"/bin/echo"}]}`
+	grant := `{"capabilities":[{"operation":"echo","path":"/bin/echo","dir":"/"}]}`
 	out := configure(t, grant)
 	handler := out.Entries()[0].Handler.(command.Handler)
 	if !handler.Commands[0].RequireApproval {
@@ -138,18 +139,19 @@ func TestCommandConfigErrors(t *testing.T) {
 		want  string
 	}{
 		{"no capabilities", `{}`, "at least one operation"},
-		{"no operation", `{"capabilities":[{"path":"/bin/echo"}]}`, "lowercase identifier"},
+		{"no operation", `{"capabilities":[{"path":"/bin/echo","dir":"/"}]}`, "lowercase identifier"},
 		{"relative path", `{"capabilities":[{"operation":"a","path":"echo"}]}`, "absolute"},
 		{"uncleaned path", `{"capabilities":[{"operation":"a","path":"/usr/bin/../bin/echo"}]}`, "cleaned"},
 		{"relative dir", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"work"}]}`, "absolute"},
-		{"undeclared placeholder", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"]}]}`, "undeclared parameter"},
-		{"unused parameter", `{"capabilities":[{"operation":"a","path":"/bin/echo","params":{"ctx":["x"]}}]}`, "never referenced"},
-		{"flag in permitted value", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":["-o"]}}]}`, "flag"},
-		{"pattern admitting empty", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":"[a-z]*"}}]}`, "admits the empty string"},
-		{"bad pattern", `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["{ctx}"],"params":{"ctx":"("}}]}`, "pattern"},
-		{"duplicate operation", `{"capabilities":[{"operation":"a","path":"/bin/echo"},{"operation":"a","path":"/bin/echo"}]}`, "more than once"},
-		{"bad operation name", `{"capabilities":[{"operation":"Bad Name","path":"/bin/echo"}]}`, "lowercase identifier"},
-		{"unknown field", `{"capabilities":[{"operation":"a","path":"/bin/echo"}],"shell":true}`, "unknown field"},
+		{"no dir", `{"capabilities":[{"operation":"a","path":"/bin/echo"}]}`, "no default working directory"},
+		{"undeclared placeholder", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/","args":["{ctx}"]}]}`, "undeclared parameter"},
+		{"unused parameter", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/","params":{"ctx":["x"]}}]}`, "never referenced"},
+		{"flag in permitted value", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/","args":["{ctx}"],"params":{"ctx":["-o"]}}]}`, "flag"},
+		{"pattern admitting empty", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/","args":["{ctx}"],"params":{"ctx":"[a-z]*"}}]}`, "admits the empty string"},
+		{"bad pattern", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/","args":["{ctx}"],"params":{"ctx":"("}}]}`, "pattern"},
+		{"duplicate operation", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/"},{"operation":"a","path":"/bin/echo","dir":"/"}]}`, "more than once"},
+		{"bad operation name", `{"capabilities":[{"operation":"Bad Name","path":"/bin/echo","dir":"/"}]}`, "lowercase identifier"},
+		{"unknown field", `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/"}],"shell":true}`, "unknown field"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -169,7 +171,7 @@ func TestCommandConfigErrors(t *testing.T) {
 // fails the build rather than the call.
 func TestEnvSecretFailsClosed(t *testing.T) {
 	grant := `{"capabilities":[{
-	  "operation":"a","path":"/bin/echo","env":{"TOKEN":{"secret":"absent"}}}]}`
+	  "operation":"a","path":"/bin/echo","dir":"/","env":{"TOKEN":{"secret":"absent"}}}]}`
 	if _, err := (command.Registration{}).Configure(
 		context.Background(), json.RawMessage(grant), registry.Services{}); err == nil {
 		t.Fatal("a grant referencing an unknown secret must fail to build")
@@ -181,7 +183,7 @@ func TestEnvSecretFailsClosed(t *testing.T) {
 // holds it.
 func TestEnvTakesPlainValuesAndReferences(t *testing.T) {
 	grant := `{"capabilities":[{
-	  "operation":"a","path":"/bin/echo","env":{"PATH":"/usr/bin","TOKEN":{"secret":"API_TOKEN"}}}]}`
+	  "operation":"a","path":"/bin/echo","dir":"/","env":{"PATH":"/usr/bin","TOKEN":{"secret":"API_TOKEN"}}}]}`
 	family, err := (command.Registration{}).Configure(context.Background(), json.RawMessage(grant),
 		registry.Services{Secrets: anySecret{}})
 	if err != nil {
@@ -197,7 +199,7 @@ func TestEnvTakesPlainValuesAndReferences(t *testing.T) {
 // that happens to match "" is refused where it is written, so the two ways of
 // declaring a slot cannot disagree about whether nothing is a permitted value.
 func TestEmptyArgumentMustBeEnumerated(t *testing.T) {
-	grant := `{"capabilities":[{"operation":"a","path":"/bin/echo","args":["--ns={ns}"],"params":{"ns":["","prod"]}}]}`
+	grant := `{"capabilities":[{"operation":"a","path":"/bin/echo","dir":"/","args":["--ns={ns}"],"params":{"ns":["","prod"]}}]}`
 	table := capability.NewTable()
 	family, err := (command.Registration{}).Configure(context.Background(), json.RawMessage(grant), registry.Services{})
 	if err != nil {
@@ -218,5 +220,30 @@ func TestEmptyArgumentMustBeEnumerated(t *testing.T) {
 	}
 	if !strings.Contains(string(result.Result()), `--ns=`) {
 		t.Fatalf("the empty value did not reach the argument: %s", result.Result())
+	}
+}
+
+// The approver sees what will run: the executable and its exact arguments, the
+// working directory, and the environment's names — never its values.
+func TestApprovalPromptShowsTheCommandLine(t *testing.T) {
+	grant := strings.Replace(kubectlGrant, `"require_approval":false`, `"require_approval":true`, 1)
+	call := sys.Syscall{Name: command.Capability, Args: json.RawMessage(
+		`{"operation":"kubectl-get","params":{"context":"staging","resource":"pods","namespace":"default"}}`)}
+	result, err := capability.NewDispatcher[string](configure(t, grant)).Dispatch(context.Background(), "p1", call, sys.Authorization{})
+	if err != nil || result.Status() != sys.StatusYield {
+		t.Fatalf("dispatch = %#v, %v; want a yield for approval", result, err)
+	}
+	prompt := result.Message()
+	for _, want := range []string{
+		`run: "/bin/bash" "/opt/aurora/bin/kubectl-get.sh" "staging" "pods" "default"`,
+		"dir: /opt/aurora",
+		"env: KUBECONFIG, PATH",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt %q does not show %q", prompt, want)
+		}
+	}
+	if strings.Contains(prompt, "/etc/aurora/kubeconfig") {
+		t.Fatalf("prompt %q shows an environment value", prompt)
 	}
 }
