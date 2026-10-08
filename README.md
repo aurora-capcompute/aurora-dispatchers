@@ -1,174 +1,143 @@
 # aurora-dispatchers
 
-**The "device drivers" that let a sandboxed agent touch the real world — safely.**
-`aurora-dispatchers` is a Go library of ready‑made capability drivers for Aurora:
-make an HTTP call, run an allowlisted command, keep a per‑session
-scratch store, or call an LLM. Each driver
-runs the action *for* the agent, under a scoped, approval‑gated, recorded grant.
+`aurora-dispatchers` is a Go library of capability drivers for Aurora. A driver
+does one kind of work for an agent: an HTTP call, an allowlisted host command, a
+session store, an LLM call. It works only inside the grant that the agent's
+manifest states.
 
-> New here? The first two sections explain what a "dispatcher" is and where it fits.
-> Then see [Quick start](#quick-start-5-minutes) and the
-> [assembly example](#example-assembling-a-dispatcher).
+An Aurora agent is a Wasm program with no ambient authority. It cannot open a
+socket or call an API. It sends a **syscall**, and the matching driver does the
+work. Every grant has three controls:
 
----
+1. **Least privilege.** The grant states exactly what is allowed (domains,
+   commands, operations). The runtime denies everything else.
+2. **Approval.** With `require_approval: true`, the call yields until a human
+   approves it.
+3. **Flow labels.** Results carry provenance labels (`labels`), and the runtime
+   refuses a call when the process carries a label that the operation forbids
+   (`taints`).
 
-## What is this, in plain words?
+This module is drivers only. The runtime
+([aurora-capcompute](https://github.com/aurora-capcompute/aurora-capcompute))
+owns processes, the journal, approval tasks and the monitor. An assembly such as
+[aurora-dist](https://github.com/aurora-capcompute/aurora-dist) builds a
+`registry.Registry`, calls `Registry.Build` with a process's grants, and gives
+the resulting table to the runtime.
 
-An Aurora agent is a Wasm program with **zero ambient authority** — it can't open a
-socket, read a file, or call an API by itself. Instead it emits a **syscall**
-("please GET https://example.com"), and the matching **dispatcher** performs that
-action on its behalf — but only within the limits of a **grant** you wrote in the
-agent's manifest.
+## Drivers
 
-Every grant in this repo carries the same three safety mechanisms:
-
-1. **Least privilege** — a grant scopes exactly what's allowed (which domains,
-   which files, which operations). Anything outside it is denied.
-2. **Approval gating** — mark a grant `require_approval: true` and the call
-   *yields* ("Approve this?") instead of acting, until a human says yes.
-3. **Data‑flow tracking** — results are stamped with provenance **labels**, and the
-   runtime refuses a call whose inputs are too "tainted" to flow into that action.
-
-This module is **drivers only**. The durable processes, journal, approval tasks,
-and guest instances are owned by the runtime
-([aurora-capcompute](https://github.com/aurora-capcompute/aurora-capcompute)).
-
-## Where this fits in the Aurora system
-
-```
-        you (a human)
-              │
-   aurora-cli / aurora-slack-connector      ← clients you talk to
-              │  HTTP /v1
-         aurora-dist                         ← the server (one binary you run)
-              │  assembled from…
-   ┌──────────┴──────────┐
- aurora-capcompute    aurora-dispatchers     ← orchestration runtime + capability drivers
-                      ◀ YOU ARE HERE
-   └──────────┬──────────┘
-              │  both built on
-         capcompute                          ← the processor (the foundation)
-
-   aurora-brains  →  Wasm agent programs that emit the syscalls
-```
-
-An assembly (like [aurora-dist](https://github.com/aurora-capcompute/aurora-dist))
-builds a `registry.Registry` from these drivers, calls `Registry.Build(...)` with a
-process's granted syscalls, and hands the resulting grant table to the runtime. The
-runtime then feeds each agent syscall to that dispatcher — journaling, approving,
-and replaying around it.
-
-## The drivers (features)
-
-| Capability | Package | What it does | Key safety limits |
+| Capability | Package | What it does | Limits |
 | --- | --- | --- | --- |
-| `core.internet` | `internet/` | Bounded HTTP client, any method | Allowlist of `METHOD:origin`; **SSRF guard** blocks loopback/private/metadata IPs (post‑DNS, defeats rebinding); size + time bounds; policy re‑checked on every redirect |
-| `core.scratch` | `scratch/` | Durable store shared by the processes of one session | `get`/`put`/`list`/`search` on the calling session's store, bound by the host — one process can leave data for a later one, even without session history (a place to offload a large read out of the model's context, notes, auxiliary output); preserves provenance labels |
-| `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
-| `core.httpTemplate` | `httptemplate/` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
-| `core.command` | `command/` | Host commands from an author‑declared allowlist | One operation per allowlisted command; no shell (exec with a fixed argv); every slot is a closed set or an anchored pattern; no value may begin with `-` or carry a control character; the child inherits no environment and runs in the `dir` its rule states; approval on by default, and the prompt shows the resolved command line; a non‑zero exit is a result with `exit_code` |
+| `core.internet` | `internet/` | HTTP client, any method | Method and domain allowlist, checked again on every redirect. A dial guard refuses loopback, private, link-local and CGNAT addresses after DNS. Size and time bounds. Optional host-held credential, bound to one origin. |
+| `core.httpTemplate` | `httptemplate/` | HTTP requests fixed in the manifest | The agent fills declared `{{param}}` slots. It cannot change the URL or the method. |
+| `core.command` | `command/` | Host commands from an allowlist | See [Host commands](#host-commands). |
+| `core.scratch` | `scratch/` | The session's durable key-value store | `get`, `put`, `list`, `search` on the calling session's store. Values keep the writer's labels. |
+| `core.openaiApi` | `openaillm/` | Any OpenAI-compatible LLM | `chat`, `responses`, `embeddings`, `models`. Base URL, key and model in the grant. Model allowlist. No streaming. Usually `hidden` from the agent's menu. |
 
-Two shared mechanisms make grants expressive and safe:
+Each capability has one name. Its operations are cases selected by a field in
+the arguments (`operation`, or `method` for `core.internet`), never by new
+names. A grant names a secret as `{"secret":"NAME"}`. The host resolves the
+value. It never enters the manifest, the journal or the guest.
 
-- **Discriminated‑union capabilities** — one capability name per syscall; its
-  multiple operations are selected by an `"operation"` (or HTTP `"method"`)
-  discriminator *inside the args*, never by inventing new names.
-- **Host‑held secrets** — a grant references a secret by name (`{"secret":"OPENAI_KEY"}`);
-  the value is resolved host‑side and never enters the manifest, journal, or guest.
+## Host commands
 
-## Quick start (5 minutes)
+The manifest author owns the whole command line. The agent only fills declared
+slots. The driver enforces:
 
-This is a **library** — there's no binary to run. "Setup" is building and testing it.
+- an absolute executable, with no `PATH` lookup and no shell.
+- slot values from a closed set or an anchored pattern, never starting with
+  `-`, never with control characters.
+- an absolute `dir`, stated in the rule.
+- an environment that the rule declares, with nothing inherited.
+- approval on by default, with the resolved command line, `dir` and env names
+  in the prompt.
+- the bounds: a timeout and a cap on output size.
 
-**Prerequisites:** Go 1.26+.
+A non-zero exit is a result with `exit_code`, `stdout` and `stderr`. The
+program decides what it means.
 
-```sh
-git clone https://github.com/aurora-capcompute/aurora-dispatchers
-cd aurora-dispatchers
+The driver does **not** confine what the binary does after it starts. The binary
+runs with the server's operating-system rights. The author vouches for every
+allowed command and slot value. Some binaries read meaning into a value with no
+dash: `curl -d @file` uploads a local file. Confine the server in its deployment
+(a dedicated user, a container, egress rules), and give each command
+least-privilege credentials in its `env`.
 
-go build ./...
-go test ./...          # every driver, plus registry
-go vet ./...
-```
-
-The tests double as worked examples — read `registry/build_test.go`,
-`openaillm/registration_test.go`, `internet/registration_test.go`, and
-`command/registration_test.go`.
-
-## Example: assembling a table
-
-You pick which registrations to include, then `Build` the grant table for one
-process. Nothing registers itself — there is no global `init()`.
+## Use
 
 ```go
 reg := registry.New(
     internet.Registration{},
-    scratch.Registration{},
+    scratch.Registration{Store: sessionStore}, // the calling session's store
     command.Registration{},
     httptemplate.Registration{},
-    openaillm.Registration{},  // carries credentials, so include it deliberately
+    openaillm.Registration{},
 )
-
-services := registry.Services{
-    Secrets:  mySecretResolver, // resolves {"secret":"OPENAI_KEY"} host-side
-    AuditKey: auditKey,         // keys the credential fingerprints on results
-}
 
 table, err := reg.Build(ctx, []registry.Entry{
     {Syscall: "core.internet",
      Config: json.RawMessage(`{"capabilities":[{"methods":["GET"],"domain":"example.com"}]}`)},
-    {Syscall: "core.scratch",
-     Config: json.RawMessage(`{"capabilities":[{"operation":"get"},{"operation":"put"}]}`)},
     {Syscall: "core.openaiApi", Hidden: true,
      Config: json.RawMessage(`{"api_key":{"secret":"OPENAI_KEY"},"default_model":"gpt-4o","capabilities":[{"operation":"chat"}]}`)},
-}, services)
+}, registry.Services{
+    Secrets:  secretResolver, // resolves {"secret":"NAME"}
+    AuditKey: auditKey,       // keys the credential fingerprints on results
+})
 ```
 
-The table is the grant: the runtime routes with `capability.NewDispatcher(table)`
-and its reference monitor judges every call against the same index.
+Nothing registers itself. There is no global `init()`. The table is the grant:
+the runtime routes with `capability.NewDispatcher(table)`, and its monitor
+checks every call against the same table.
 
-## Configuration
+## Grant configuration
 
-There are no env vars read directly here — config arrives as JSON grant configs
-plus an injected `registry.Services`. Highlights per driver:
+All configuration comes from the grant JSON and `registry.Services`. The module
+reads no environment variables.
 
-- **openaillm** — `base_url` (default `https://api.openai.com/v1`), `api_key`
-  (`{"secret":"NAME"}` only — an inline key is refused), `default_model`, `allowed_models`, `timeout`
-  (2m), `max_request_bytes`, `headers` (Authorization/Host forbidden). The OpenAI
-  SDK is built with explicit options so stray `OPENAI_*` env vars can't override a
+- **internet:** `capabilities[]{methods, domain, description, require_approval,
+  inject_headers, labels, taints}`, `timeout_ms`, `max_response_bytes`,
+  `max_request_bytes`, `allow_private_network`.
+- **httptemplate:** `base_url`, `capabilities[]{operation, description, method,
+  base_url, path, query, body, params, inject_headers, require_approval, labels,
+  taints}`, `timeout_ms`, `max_response_bytes`, `max_request_bytes`,
+  `allow_private_network`. A `params` entry is `{type, required, description,
+  enum}`.
+- **command:** `capabilities[]{operation, description, path, dir, args, env,
+  params, timeout_ms, max_output_bytes, require_approval, labels, taints}`. A
+  `params` value is a list (a closed set) or a string (a pattern that the
+  driver anchors). An `env` value is a string or `{"secret":"NAME"}`.
+- **scratch:** `capabilities[]{operation, require_approval, labels, taints}`. The
+  host binds the store to the session. A grant cannot name another session.
+- **openaillm:** `base_url` (default `https://api.openai.com/v1`), `api_key`
+  (`{"secret":"NAME"}` only), `api_key_optional`, `default_model`,
+  `allowed_models`, `organization`, `project`, `timeout` (2m), `max_retries`,
+  `max_request_bytes`, `allow_insecure_http`, `headers` (no `Authorization`,
+  `Host` or `Content-Length`). Approval is on by default for every operation
+  except `models`. Stray `OPENAI_*` environment variables cannot change a
   configured provider.
-- **internet** — `capabilities[]{methods, domain, require_approval, inject_headers,
-  labels, taints}`, `timeout_ms`, `max_response_bytes`, `allow_private_network`.
-- **scratch** — `capabilities[]{operation, require_approval, labels, taints}`.
-  The store is the calling session's: the host builds `scratch.Registration`
-  per process over that session's `Store`. A grant has no scope selector and
-  cannot name another session.
-- **httptemplate** — `base_url` (grant default), `capabilities[]{operation, method,
-  base_url, path, query, body, params, inject_headers, require_approval}`, bounds.
 
-## Project layout
+## Build and test
 
-```
-internet/      core.internet: bounded, allowlisted HTTP client + SSRF guard
-command/       core.command: host commands from an allowlist, one operation each
-httptemplate/  core.httpTemplate: manifest-fixed requests the agent only fills in
-scratch/       core.scratch: the session's durable KV — handler, Store contract,
-               MapStore (the in-memory store), registration
-openaillm/     core.openaiApi: the LLM driver (client / handler / settings)
-registry/      the Registration interface + Registry.Build, the grant vocabulary
-               (adt.go) and secret resolution (secret.go) — depends on no driver
+```sh
+go build ./...
+go vet ./...
+go test ./...
 ```
 
-## Dependencies
+The tests are also examples: `registry/build_test.go`,
+`internet/registration_test.go`, `openaillm/registration_test.go`,
+`command/registration_test.go`.
 
-Three direct dependencies: `github.com/aurora-capcompute/capcompute` (the `sys`
-vocabulary every driver speaks), `github.com/aurora-capcompute/aurora-capcompute`
-(the `capability` index every driver contributes to), and
-`github.com/openai/openai-go/v3` (used only by `openaillm`).
+## Layout
 
-## Related repos
+```
+internet/      core.internet: allowlisted HTTP client and dial guard
+httptemplate/  core.httpTemplate: requests fixed in the manifest
+command/       core.command: allowlisted host commands
+scratch/       core.scratch: handler, Store contract, MapStore, registration
+openaillm/     core.openaiApi: client, handler, settings
+registry/      Registration, Registry.Build, the grant vocabulary, secrets
+```
 
-- [capcompute](https://github.com/aurora-capcompute/capcompute) — the processor whose `sys` vocabulary these drivers speak
-- [aurora-capcompute](https://github.com/aurora-capcompute/aurora-capcompute) — the runtime that drives these dispatchers
-- [aurora-dist](https://github.com/aurora-capcompute/aurora-dist) — the assembly that wires them into a server
-- [aurora-brains](https://github.com/aurora-capcompute/aurora-brains) — the agent programs that emit the syscalls
+Direct dependencies: `capcompute` (the `sys` vocabulary), `aurora-capcompute`
+(the `capability` table) and `openai-go` (only in `openaillm`).
