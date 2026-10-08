@@ -3,7 +3,6 @@ package scratch_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -155,7 +154,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 		return replay.NewDispatcher(tape, handlerDispatcher{handler})
 	}
 
-	if _, err := store.Put(context.Background(), "prefs/tone", json.RawMessage(`"casual"`), nil, scratch.PutAny); err != nil {
+	if err := store.Put(context.Background(), "prefs/tone", json.RawMessage(`"casual"`), nil); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 	read := sys.Syscall{Abi: sys.ABIVersion, Name: handler.Name, Args: json.RawMessage(memArgs("get", `{"key":"prefs/tone"}`))}
@@ -166,7 +165,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	}
 
 	// Another process mutates the shared value…
-	if _, err := store.Put(context.Background(), "prefs/tone", json.RawMessage(`"formal"`), nil, scratch.PutAny); err != nil {
+	if err := store.Put(context.Background(), "prefs/tone", json.RawMessage(`"formal"`), nil); err != nil {
 		t.Fatalf("mutate store: %v", err)
 	}
 
@@ -279,93 +278,6 @@ func TestMemoryPoisoningSurfacesAcrossProcesses(t *testing.T) {
 	}
 }
 
-func TestMemoryCompareAndSet(t *testing.T) {
-	store := scratch.NewMapStore()
-	handler := scratch.Handler{Name: "mem", Store: store}
-
-	// Create-only (if_version 0) succeeds on an absent key…
-	result := dispatch(t, handler, "put", `{"key":"prefs/tone","value":"casual","if_version":0}`, sys.Authorization{})
-	var put scratch.PutResponse
-	if err := json.Unmarshal(result.Result(), &put); err != nil {
-		t.Fatalf("decode put: %v", err)
-	}
-	if put.Version != 1 {
-		t.Fatalf("first write version = %d, want 1", put.Version)
-	}
-
-	// …and conflicts once the key exists.
-	result = dispatch(t, handler, "put", `{"key":"prefs/tone","value":"formal","if_version":0}`, sys.Authorization{})
-	if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoConflict {
-		t.Fatalf("create-only on existing key = %#v, want failed/conflict", result)
-	}
-
-	// A stale version conflicts; the current one replaces and bumps.
-	result = dispatch(t, handler, "put", `{"key":"prefs/tone","value":"formal","if_version":7}`, sys.Authorization{})
-	if result.Errno() != sys.ErrnoConflict {
-		t.Fatalf("stale CAS = %#v, want conflict", result)
-	}
-	result = dispatch(t, handler, "put", `{"key":"prefs/tone","value":"formal","if_version":1}`, sys.Authorization{})
-	if err := json.Unmarshal(result.Result(), &put); err != nil {
-		t.Fatalf("decode put: %v", err)
-	}
-	if put.Version != 2 {
-		t.Fatalf("CAS write version = %d, want 2", put.Version)
-	}
-
-	// Reads surface the version the next CAS needs.
-	result = dispatch(t, handler, "get", `{"key":"prefs/tone"}`, sys.Authorization{})
-	var get scratch.GetResponse
-	if err := json.Unmarshal(result.Result(), &get); err != nil {
-		t.Fatalf("decode get: %v", err)
-	}
-	if get.Version != 2 || string(get.Value) != `"formal"` {
-		t.Fatalf("get = %+v, want version 2 of formal", get)
-	}
-
-	// Unconditional writes still win (last-writer-wins is the default)…
-	result = dispatch(t, handler, "put", `{"key":"prefs/tone","value":"terse"}`, sys.Authorization{})
-	if err := json.Unmarshal(result.Result(), &put); err != nil {
-		t.Fatalf("decode put: %v", err)
-	}
-	if put.Version != 3 {
-		t.Fatalf("unconditional write version = %d, want 3", put.Version)
-	}
-
-	// …and negative expectations are rejected before the store sees them.
-	result = dispatch(t, handler, "put", `{"key":"prefs/tone","value":"x","if_version":-2}`, sys.Authorization{})
-	if result.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("negative if_version = %#v, want invalid_args", result)
-	}
-}
-
-// MapStore's compare-and-set: create-only refuses an existing key, a stale
-// version conflicts and changes nothing, the current version replaces and
-// bumps, and an unconditional write always wins.
-func TestMapStoreCompareAndSet(t *testing.T) {
-	ctx := context.Background()
-	store := scratch.NewMapStore()
-
-	if v, err := store.Put(ctx, "notes/a", json.RawMessage(`"one"`), []string{"untrusted_web"}, scratch.PutAbsent); err != nil || v != 1 {
-		t.Fatalf("create = %d, %v", v, err)
-	}
-	if _, err := store.Put(ctx, "notes/a", json.RawMessage(`"again"`), nil, scratch.PutAbsent); !errors.Is(err, scratch.ErrConflict) {
-		t.Fatalf("create on an existing key = %v, want ErrConflict", err)
-	}
-	if _, err := store.Put(ctx, "notes/a", json.RawMessage(`"x"`), nil, 7); !errors.Is(err, scratch.ErrConflict) {
-		t.Fatalf("stale CAS = %v, want ErrConflict", err)
-	}
-	value, labels, version, ok, err := store.Get(ctx, "notes/a")
-	if err != nil || !ok || string(value) != `"one"` || version != 1 || len(labels) != 1 {
-		t.Fatalf("get = %s %v v=%d ok=%v err=%v; a refused put must change nothing", value, labels, version, ok, err)
-	}
-	if v, err := store.Put(ctx, "notes/a", json.RawMessage(`"two"`), nil, 1); err != nil || v != 2 {
-		t.Fatalf("CAS = %d, %v", v, err)
-	}
-	if v, err := store.Put(ctx, "notes/a", json.RawMessage(`"lww"`), nil, scratch.PutAny); err != nil || v != 3 {
-		t.Fatalf("unconditional put = %d, %v", v, err)
-	}
-}
-
 // TestMemorySearch greps a stored multi-line value: the RE2 pattern matches by
 // line, ignore_case and context widen the result, a missing key is found:false,
 // and a malformed pattern is a clean error. The full value stays host-side; only
@@ -417,33 +329,5 @@ func TestMemorySearch(t *testing.T) {
 	bad := dispatch(t, h, "search", `{"key":"doc","pattern":"[unclosed"}`, sys.Authorization{})
 	if bad.Status() != sys.StatusFailed || bad.Errno() != sys.ErrnoInvalidArgs {
 		t.Fatalf("bad pattern = %#v", bad)
-	}
-}
-
-// A crash between a compare-and-set put and its completion record re-drives the
-// put after its first run may already have written. Finding its own write in
-// place — this value, at the version this put makes — it succeeds instead of
-// reporting a conflict with itself, and writes nothing more.
-func TestCompareAndSetPutSurvivesItsOwnReDrive(t *testing.T) {
-	store := scratch.NewMapStore()
-	handler := scratch.Handler{Name: "mem", Store: store}
-	put := `{"key":"plan","value":"step two","if_version":0}`
-
-	first := dispatch(t, handler, "put", put, sys.Authorization{})
-	redriven := dispatch(t, handler, "put", put, sys.Authorization{})
-	if redriven.Status() != sys.StatusResult || string(redriven.Result()) != string(first.Result()) {
-		t.Fatalf("re-driven put = %#v, want the first run's result %s", redriven, first.Result())
-	}
-	if _, _, version, _, _ := store.Get(context.Background(), "plan"); version != 1 {
-		t.Fatalf("version = %d, want 1: the re-drive must not write again", version)
-	}
-
-	// A different value, or the same value further along, is a real conflict.
-	if r := dispatch(t, handler, "put", `{"key":"plan","value":"other","if_version":0}`, sys.Authorization{}); r.Errno() != sys.ErrnoConflict {
-		t.Fatalf("different value = %#v, want conflict", r)
-	}
-	dispatch(t, handler, "put", `{"key":"plan","value":"step three"}`, sys.Authorization{})
-	if r := dispatch(t, handler, "put", put, sys.Authorization{}); r.Errno() != sys.ErrnoConflict {
-		t.Fatalf("stale create of an old value = %#v, want conflict", r)
 	}
 }
