@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -15,7 +14,6 @@ type capabilityConfig struct {
 	defaultModel    string
 	modelPolicy     modelPolicy
 	maxRequestBytes int
-	requireApproval bool
 }
 
 type connectionSettings struct {
@@ -44,25 +42,20 @@ func NewHandler(client Client) *Handler {
 	return &Handler{client: client, operations: make(map[string]capabilityConfig)}
 }
 
-// AddOperation records one granted operation's per-call policy: its model
-// defaults and limits (from the connection settings) plus its approval
-// requirement and data-flow policy (from the grant entry).
-func (h *Handler) AddOperation(operation string, settings normalizedSettings, grant registry.OperationGrant) {
-	requireApproval := operation != "models"
-	if grant.RequireApproval != nil {
-		requireApproval = *grant.RequireApproval
-	}
+// AddOperation records one granted operation's model defaults and limits. Its
+// approval and flow policy are the grant table entry's, enforced before the
+// call reaches this handler.
+func (h *Handler) AddOperation(operation string, settings normalizedSettings) {
 	h.operations[operation] = capabilityConfig{
 		defaultModel:    settings.DefaultModel,
 		modelPolicy:     newModelPolicy(settings.AllowedModels),
 		maxRequestBytes: settings.MaxRequestBytes,
-		requireApproval: requireApproval,
 	}
 }
 
 func (h *Handler) Handles(name string) bool { return name == SyscallType }
 
-func (h *Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
+func (h *Handler) DispatchCall(ctx context.Context, call sys.Syscall, _ sys.Authorization) (sys.SyscallResult, error) {
 	operation, err := peekOperation(call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
@@ -77,13 +70,13 @@ func (h *Handler) DispatchCall(ctx context.Context, call sys.Syscall, auth sys.A
 	var result sys.SyscallResult
 	switch operation {
 	case "chat":
-		result, err = h.dispatchModelRequest(ctx, call, capability, operation, "messages", h.client.Chat, auth)
+		result, err = h.dispatchModelRequest(ctx, call, capability, operation, "messages", h.client.Chat)
 	case "responses":
-		result, err = h.dispatchModelRequest(ctx, call, capability, operation, "input", h.client.Responses, auth)
+		result, err = h.dispatchModelRequest(ctx, call, capability, operation, "input", h.client.Responses)
 	case "embeddings":
-		result, err = h.dispatchModelRequest(ctx, call, capability, operation, "input", h.client.Embeddings, auth)
+		result, err = h.dispatchModelRequest(ctx, call, capability, operation, "input", h.client.Embeddings)
 	case "models":
-		result, err = h.dispatchModels(ctx, capability, auth)
+		result, err = h.dispatchModels(ctx)
 	default:
 		return sys.FailCode(sys.ErrnoNotFound, "unsupported openai operation: "+operation), nil
 	}
@@ -114,14 +107,9 @@ func (h *Handler) dispatchModelRequest(
 	operation string,
 	requiredField string,
 	invoke func(context.Context, json.RawMessage) (json.RawMessage, error),
-	auth sys.Authorization,
 ) (sys.SyscallResult, error) {
 	payload, outcome := preparePayload(call, capability, operation, requiredField)
 	if outcome != nil {
-		return *outcome, nil
-	}
-	model, _ := payload["model"].(string)
-	if outcome := approval(auth, capability, fmt.Sprintf("%s using model %s", operation, model)); outcome != nil {
 		return *outcome, nil
 	}
 	body, err := json.Marshal(payload)
@@ -132,10 +120,7 @@ func (h *Handler) dispatchModelRequest(
 	return providerResult(ctx, response, err)
 }
 
-func (h *Handler) dispatchModels(ctx context.Context, capability capabilityConfig, auth sys.Authorization) (sys.SyscallResult, error) {
-	if outcome := approval(auth, capability, "models.list"); outcome != nil {
-		return *outcome, nil
-	}
+func (h *Handler) dispatchModels(ctx context.Context) (sys.SyscallResult, error) {
 	response, err := h.client.Models(ctx)
 	return providerResult(ctx, response, err)
 }
@@ -184,17 +169,6 @@ func preparePayload(
 	}
 	payload["model"] = model
 	return payload, nil
-}
-
-func approval(auth sys.Authorization, capability capabilityConfig, summary string) *sys.SyscallResult {
-	if !capability.requireApproval {
-		return nil
-	}
-	if auth.Decision == sys.Approved {
-		return nil
-	}
-	outcome := sys.Yield("Approve: " + strings.TrimSpace(summary))
-	return &outcome
 }
 
 // providerResult classifies the outcome of a provider call the driver actually

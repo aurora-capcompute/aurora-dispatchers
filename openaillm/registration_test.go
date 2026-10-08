@@ -9,6 +9,7 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 func TestCapabilitySchemasAreValidJSON(t *testing.T) {
@@ -164,5 +165,39 @@ func TestConfigurePublishesFlowPolicyPerOperation(t *testing.T) {
 			t.Fatalf("SECURITY: forbid = %v, want %q (declared taint plus the egress floor)",
 				entries[0].Forbid, want)
 		}
+	}
+}
+
+// Approval is the grant table entry's, like every other driver's: off unless
+// the grant asks, and asked by the routing dispatcher before the handler runs,
+// with a prompt that names the model. The allowed models are in the schema, so
+// the Validator refuses another model before anyone is asked.
+func TestApprovalIsTheEntrys(t *testing.T) {
+	raw := json.RawMessage(`{"api_key":{"secret":"OPENAI_KEY"},"default_model":"model-a","allowed_models":["model-a"],
+		"capabilities":[{"operation":"chat","require_approval":true},{"operation":"embeddings"}]}`)
+	table := capability.NewTable()
+	contribution, err := (Registration{}).Configure(context.Background(), raw, keyed)
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if err := table.Add(contribution); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	for _, entry := range table.Entries() {
+		if want := entry.Key.Operation == "chat"; entry.RequireApproval != want {
+			t.Errorf("%s RequireApproval = %v, want %v", entry.Key, entry.RequireApproval, want)
+		}
+	}
+	if schema := string(table.Descriptors()[0].InputSchema); !strings.Contains(schema, `"enum":["model-a"]`) {
+		t.Fatalf("schema does not narrow the model: %s", schema)
+	}
+
+	call := sys.Syscall{Name: SyscallType, Args: json.RawMessage(`{"operation":"chat","messages":[{"role":"user","content":"hi"}]}`)}
+	result, err := capability.NewDispatcher[string](table).Dispatch(context.Background(), "p1", call, sys.Authorization{})
+	if err != nil || result.Status() != sys.StatusYield {
+		t.Fatalf("dispatch = %#v, %v; want a yield for approval", result, err)
+	}
+	if prompt := result.Message(); !strings.Contains(prompt, "core.openaiApi/chat") || !strings.Contains(prompt, "model: model-a") {
+		t.Fatalf("prompt = %q, want the operation and the model", prompt)
 	}
 }

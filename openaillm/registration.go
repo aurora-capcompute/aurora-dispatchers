@@ -10,6 +10,7 @@ import (
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 // SyscallType is the manifest `syscall` for an OpenAI-compatible cognition
@@ -88,12 +89,16 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	entries := make([]capability.Entry, 0, len(grants))
 	descriptions := make([]string, 0, len(grants))
 	for _, grant := range grants {
-		handler.AddOperation(grant.Operation, normalized, grant)
-		branch, err := registry.OperationBranch(grant.Operation, openaiOperations[grant.Operation].schema)
+		handler.AddOperation(grant.Operation, normalized)
+		schema, err := allowModels(openaiOperations[grant.Operation].schema, normalized.AllowedModels)
 		if err != nil {
 			return capability.Family{}, err
 		}
-		entries = append(entries, capability.Entry{
+		branch, err := registry.OperationBranch(grant.Operation, schema)
+		if err != nil {
+			return capability.Family{}, err
+		}
+		entry := capability.Entry{
 			Key:           capability.Key{Syscall: SyscallType, Operation: grant.Operation},
 			Discriminator: "operation",
 			Description:   openaiOperations[grant.Operation].description,
@@ -103,15 +108,56 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			// reserved secret class into the sink guard on top of any declared
 			// taints. Enforcement is the runtime monitor's, above the journal;
 			// declaring it here is the whole of this driver's part.
-			Forbid:  registry.WithEgressFloor(grant.Taints),
-			Handler: handler,
-		})
+			Forbid:          registry.WithEgressFloor(grant.Taints),
+			RequireApproval: grant.RequireApproval != nil && *grant.RequireApproval,
+			Handler:         handler,
+		}
+		if grant.Operation != "models" {
+			entry.Prompt = modelPrompt(normalized.DefaultModel)
+		}
+		entries = append(entries, entry)
 		descriptions = append(descriptions, openaiOperations[grant.Operation].description)
 	}
 	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("OpenAI-compatible cognition. Provider: %s; %s. Choose an operation:\n- %s.",
 			normalized.BaseURL, modelScope(normalized), strings.Join(descriptions, "\n- ")),
 	}, nil
+}
+
+// allowModels narrows an operation's model field to the allowed models, so the
+// Validator refuses any other model before a human is asked to approve the
+// call. An empty list allows any model.
+func allowModels(schema json.RawMessage, allowed []string) (json.RawMessage, error) {
+	if len(allowed) == 0 {
+		return schema, nil
+	}
+	var document map[string]any
+	if err := json.Unmarshal(schema, &document); err != nil {
+		return nil, err
+	}
+	properties, _ := document["properties"].(map[string]any)
+	if _, ok := properties["model"]; !ok {
+		return schema, nil
+	}
+	properties["model"] = map[string]any{"type": "string", "enum": allowed}
+	return json.Marshal(document)
+}
+
+// modelPrompt shows the human approving a model call which model it runs on:
+// the call's own, else the grant's default.
+func modelPrompt(defaultModel string) func(sys.Syscall) string {
+	return func(call sys.Syscall) string {
+		// The Validator admitted these arguments against the operation's schema.
+		var args struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(call.Args, &args)
+		model := strings.TrimSpace(args.Model)
+		if model == "" {
+			model = defaultModel
+		}
+		return "model: " + model
+	}
 }
 
 func modelScope(settings normalizedSettings) string {

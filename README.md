@@ -108,12 +108,14 @@ reads no environment variables.
   driver anchors). An `env` value is a string or `{"secret":"NAME"}`.
 - **scratch:** `capabilities[]{operation, require_approval, labels, taints}`. The
   host binds the store to the session. A grant cannot name another session.
-- **openaillm:** `base_url` (default `https://api.openai.com/v1`), `api_key`
+- **openaillm:** `capabilities[]{operation, require_approval, labels, taints}`,
+  `base_url` (default `https://api.openai.com/v1`), `api_key`
   (`{"secret":"NAME"}` only), `api_key_optional`, `default_model`,
   `allowed_models`, `organization`, `project`, `timeout` (2m), `max_retries`,
   `max_request_bytes`, `allow_insecure_http`, `headers` (no `Authorization`,
-  `Host` or `Content-Length`). Approval is on by default for every operation
-  except `models`. Stray `OPENAI_*` environment variables cannot change a
+  `Host` or `Content-Length`). `allowed_models` also narrows the `model` field
+  in the published schema, so the runtime refuses another model before any
+  approval. Stray `OPENAI_*` environment variables cannot change a
   configured provider.
 
 ## Build and test
