@@ -152,7 +152,7 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	chain := func(t *testing.T) sys.Dispatcher[string] {
 		t.Helper()
 		tape := journaled.NewTape(journal)
-		return replay.NewDispatcher(tape, handlerDispatcher{handler}, nil)
+		return replay.NewDispatcher(tape, handlerDispatcher{handler})
 	}
 
 	if _, err := store.Put(context.Background(), "prefs/tone", json.RawMessage(`"casual"`), nil, scratch.PutAny); err != nil {
