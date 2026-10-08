@@ -63,7 +63,6 @@ and replaying around it.
 | Capability | Package | What it does | Key safety limits |
 | --- | --- | --- | --- |
 | `core.internet` | `internet/` | Bounded HTTP client, any method | Allowlist of `METHOD:origin`; **SSRF guard** blocks loopback/private/metadata IPs (post‑DNS, defeats rebinding); size + time bounds; policy re‑checked on every redirect |
-| `core.filesystem` | `filesystem/` | **Read‑only** host‑file reads | Chrooted to declared `roots`; rejects symlink escapes; whole‑file or 1‑based line range; byte/line caps; optional extension allowlist; returns a SHA‑256 hash |
 | `core.scratch` | `scratch/` | Durable store shared by the processes of one session | `get`/`put`/`list`/`search` on the calling session's store, bound by the host — one process can leave data for a later one, even without session history (a place to offload a large read out of the model's context, notes, auxiliary output); preserves provenance labels |
 | `core.openaiApi` | `openaillm/` | The LLM driver — any OpenAI‑compatible provider | `chat`/`responses`/`embeddings`/`models`; base URL + key + model on the grant; model allowlist; refuses `stream:true`; usually `Hidden` from the agent's menu |
 | `core.httpTemplate` | `httptemplate/` | Manifest‑fixed HTTP requests the agent only fills in | The agent fills declared `{{param}}` holes (percent‑ or JSON‑encoded) — it can't rewrite the URL or method |
@@ -104,7 +103,6 @@ process. Nothing registers itself — there is no global `init()`.
 ```go
 reg := registry.New(
     internet.Registration{},
-    filesystem.Registration{},
     scratch.Registration{},
     command.Registration{},
     httptemplate.Registration{},
@@ -141,8 +139,6 @@ plus an injected `registry.Services`. Highlights per driver:
   configured provider.
 - **internet** — `capabilities[]{methods, domain, require_approval, inject_headers,
   labels, taints}`, `timeout_ms`, `max_response_bytes`, `allow_private_network`.
-- **filesystem** — `roots[]` (required, existing absolute dirs), `extensions[]`,
-  `max_read_bytes` (2 MiB), `max_lines` (10000), `follow_symlinks`.
 - **scratch** — `capabilities[]{operation, require_approval, labels, taints}`.
   The store is the calling session's: the host builds `scratch.Registration`
   per process over that session's `Store`. A grant has no scope selector and
@@ -154,7 +150,6 @@ plus an injected `registry.Services`. Highlights per driver:
 
 ```
 internet/      core.internet: bounded, allowlisted HTTP client + SSRF guard
-filesystem/    core.filesystem: read-only, chrooted file reads
 command/       core.command: host commands from an allowlist, one operation each
 httptemplate/  core.httpTemplate: manifest-fixed requests the agent only fills in
 scratch/       core.scratch: the session's durable KV — handler, Store contract,
