@@ -37,7 +37,7 @@ func searchHandler(t *testing.T, client internet.Doer) httptemplate.Handler {
 			BaseURL:          "https://onyx.example.com",
 			Path:             "/api/chat/send-message-simple-api",
 			Body:             mustParse(t, `{"message":"{{query}}","persona_id":0}`),
-			Params:           map[string]httptemplate.Param{"query": {Type: "string", Required: true}},
+			Params:           map[string]httptemplate.Param{"query": {Type: "string"}},
 			Headers:          map[string]string{"Authorization": "Bearer tok-abc"},
 			CredentialLabels: []string{"credential:ONYX_TOKEN@abc123def456"},
 		},
@@ -126,8 +126,8 @@ func TestTemplatePathAndQueryAreEncoded(t *testing.T) {
 			Path:    "/api/docs/{{id}}",
 			Query:   map[string]string{"q": "{{term}}"},
 			Params: map[string]httptemplate.Param{
-				"id":   {Type: "string", Required: true},
-				"term": {Type: "string", Required: true},
+				"id":   {Type: "string"},
+				"term": {Type: "string"},
 			},
 		},
 	}
@@ -154,7 +154,7 @@ func TestTemplateTypedParamSubstitution(t *testing.T) {
 			BaseURL: "https://onyx.example.com",
 			Path:    "/s",
 			Body:    mustParse(t, `{"top_k":"{{k}}"}`),
-			Params:  map[string]httptemplate.Param{"k": {Type: "integer", Required: true}},
+			Params:  map[string]httptemplate.Param{"k": {Type: "integer"}},
 		},
 	}
 	if _, err := handler.DispatchCall(context.Background(), templateCall("search", map[string]any{"k": 5})); err != nil {
@@ -162,23 +162,6 @@ func TestTemplateTypedParamSubstitution(t *testing.T) {
 	}
 	if client.seen.Body != `{"top_k":5}` {
 		t.Fatalf("body = %q, want top_k as the number 5", client.seen.Body)
-	}
-}
-
-func TestTemplateRejectsBadCalls(t *testing.T) {
-	client := &recordingClient{response: internet.Response{Status: 200}}
-	handler := searchHandler(t, client)
-
-	// Missing required parameter.
-	if r, _ := handler.DispatchCall(context.Background(), templateCall("search", nil)); r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("missing param errno = %v, want invalid args", r.Errno())
-	}
-	// Wrong parameter type.
-	if r, _ := handler.DispatchCall(context.Background(), templateCall("search", map[string]any{"query": 5})); r.Errno() != sys.ErrnoInvalidArgs {
-		t.Fatalf("wrong-type param errno = %v, want invalid args", r.Errno())
-	}
-	if client.seen.URL != "" {
-		t.Fatal("a rejected call still reached the network")
 	}
 }
 

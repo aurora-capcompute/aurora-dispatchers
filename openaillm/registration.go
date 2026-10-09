@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
@@ -22,27 +24,38 @@ const SyscallType = "core.openaiApi"
 // openaiOperations are the cases a core.openaiApi grant may enable, each with
 // the field schema its args carry (minus the `operation` discriminator, which
 // registry.OperationBranch injects), a one-line description, the provider path,
-// and the field a request must carry (empty for models, a GET).
+// and the HTTP method. The schemas refuse streaming, and the Validator holds
+// every call to them before it reaches the handler.
 var openaiOperations = map[string]struct {
-	schema        json.RawMessage
-	description   string
-	path          string
-	requiredField string
+	schema      json.RawMessage
+	description string
+	path        string
+	method      string
 }{
-	"chat":       {schemas["chat"], "chat: create a Chat Completions response", "chat/completions", "messages"},
-	"responses":  {schemas["responses"], "responses: create a Responses API response", "responses", "input"},
-	"embeddings": {schemas["embeddings"], "embeddings: create embeddings", "embeddings", "input"},
-	"models":     {schemas["models"], "models: list provider models", "models", ""},
-}
-
-// Operations returns the operation names this driver exposes, sorted.
-func Operations() []string {
-	names := make([]string, 0, len(openaiOperations))
-	for name := range openaiOperations {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	"chat": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string"},"content":{}},"required":["role","content"],"additionalProperties":true}},"temperature":{"type":"number","minimum":0,"maximum":2},"top_p":{"type":"number","minimum":0,"maximum":1},"max_tokens":{"type":"integer","minimum":1},"max_completion_tokens":{"type":"integer","minimum":1},"response_format":{"type":"object"},"tools":{"type":"array"},"tool_choice":{},"stream":{"const":false}},"required":["messages"],"additionalProperties":true}`),
+		description: "chat: create a Chat Completions response",
+		path:        "chat/completions",
+		method:      http.MethodPost,
+	},
+	"responses": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{},"instructions":{"type":"string"},"max_output_tokens":{"type":"integer","minimum":1},"temperature":{"type":"number","minimum":0,"maximum":2},"tools":{"type":"array"},"stream":{"const":false}},"required":["input"],"additionalProperties":true}`),
+		description: "responses: create a Responses API response",
+		path:        "responses",
+		method:      http.MethodPost,
+	},
+	"embeddings": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},"dimensions":{"type":"integer","minimum":1},"encoding_format":{"enum":["float","base64"]}},"required":["input"],"additionalProperties":true}`),
+		description: "embeddings: create embeddings",
+		path:        "embeddings",
+		method:      http.MethodPost,
+	},
+	"models": {
+		schema:      json.RawMessage(`{"type":"object","additionalProperties":true}`),
+		description: "models: list provider models",
+		path:        "models",
+		method:      http.MethodGet,
+	},
 }
 
 // grantConfig is a core.openaiApi grant's driver configuration: the operations
@@ -110,9 +123,8 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			Handler: operation{
 				client:          client,
 				path:            op.path,
-				requiredField:   op.requiredField,
+				method:          op.method,
 				defaultModel:    normalized.DefaultModel,
-				models:          newModelPolicy(normalized.AllowedModels),
 				maxRequestBytes: normalized.MaxRequestBytes,
 			},
 		}
@@ -184,16 +196,9 @@ func parseGrantConfig(raw json.RawMessage) (grantConfig, []registry.OperationGra
 			return grantConfig{}, nil, err
 		}
 	}
-	grants, err := registry.ParseOperationGrants(config.Capabilities, "openai", Operations())
+	grants, err := registry.ParseOperationGrants(config.Capabilities, "openai", slices.Sorted(maps.Keys(openaiOperations)))
 	if err != nil {
 		return grantConfig{}, nil, err
 	}
 	return config, grants, nil
-}
-
-var schemas = map[string]json.RawMessage{
-	"chat":       json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string"},"content":{}},"required":["role","content"],"additionalProperties":true}},"temperature":{"type":"number","minimum":0,"maximum":2},"top_p":{"type":"number","minimum":0,"maximum":1},"max_tokens":{"type":"integer","minimum":1},"max_completion_tokens":{"type":"integer","minimum":1},"response_format":{"type":"object"},"tools":{"type":"array"},"tool_choice":{},"stream":{"const":false}},"required":["messages"],"additionalProperties":true}`),
-	"responses":  json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{},"instructions":{"type":"string"},"max_output_tokens":{"type":"integer","minimum":1},"temperature":{"type":"number","minimum":0,"maximum":2},"tools":{"type":"array"},"stream":{"const":false}},"required":["input"],"additionalProperties":true}`),
-	"embeddings": json.RawMessage(`{"type":"object","properties":{"model":{"type":"string"},"input":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]},"dimensions":{"type":"integer","minimum":1},"encoding_format":{"enum":["float","base64"]}},"required":["input"],"additionalProperties":true}`),
-	"models":     json.RawMessage(`{"type":"object","additionalProperties":true}`),
 }

@@ -39,18 +39,17 @@ func (s Secret) IsZero() bool { return s.ref == "" }
 func (s Secret) Ref() string { return s.ref }
 
 func (s *Secret) UnmarshalJSON(data []byte) error {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || string(trimmed) == "null" {
+	if string(data) == "null" {
 		*s = Secret{}
 		return nil
 	}
-	if trimmed[0] == '"' {
+	if data[0] == '"' {
 		return fmt.Errorf(`a secret is a reference {"secret":"NAME"}, never an inline value; provide the value to the host (aurora-dist: AURORA_SECRET_NAME)`)
 	}
 	var ref struct {
 		Secret string `json:"secret"`
 	}
-	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&ref); err != nil {
 		return fmt.Errorf(`secret must be {"secret":"NAME"}: %w`, err)

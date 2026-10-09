@@ -76,3 +76,11 @@ func TestSensitiveHeadersCannotBeSet(t *testing.T) {
 		t.Fatal("expected Authorization header validation error")
 	}
 }
+
+// A call that names no model runs on the default, so a default the grant does
+// not allow is refused with the config.
+func TestDefaultModelMustBeAllowed(t *testing.T) {
+	if _, err := normalizeSettings(Settings{DefaultModel: "model-b", AllowedModels: []string{"model-a"}}); err == nil {
+		t.Fatal("a default model outside allowed_models was accepted")
+	}
+}

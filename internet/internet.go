@@ -169,9 +169,6 @@ func (p Policy) Check(method string, target *url.URL) error {
 	if method == "" {
 		return errors.New("method is required")
 	}
-	if target == nil {
-		return errors.New("url is required")
-	}
 	if err := validateScheme(target.Scheme); err != nil {
 		return err
 	}
@@ -193,8 +190,9 @@ func (p Policy) Check(method string, target *url.URL) error {
 	return fmt.Errorf("%s %s://%s is not allowlisted", method, scheme, host)
 }
 
-// Client makes allowlisted HTTP requests with a bounded response body. The zero
-// value is unusable; build one with NewConfiguredClient.
+// Client makes allowlisted HTTP requests with a bounded response body. Build one
+// with NewConfiguredClient: its transport carries the SSRF dial guard and the
+// configured bounds.
 type Client struct {
 	Policy          Policy
 	HTTPClient      *http.Client
@@ -294,18 +292,12 @@ func GuardDialAddress(address string) error {
 // isPublicIP reports whether ip is a globally routable unicast address — the
 // only class the internet driver dials without an explicit private-network opt-in.
 func isPublicIP(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() || ip.IsInterfaceLocalMulticast() {
 		return false
 	}
-	if cgnatBlock != nil && cgnatBlock.Contains(ip) {
-		return false
-	}
-	return true
+	return !cgnatBlock.Contains(ip)
 }
 
 // Do makes one request. The method is unconstrained by the client — the policy
@@ -313,9 +305,6 @@ func isPublicIP(ip net.IP) bool {
 // GET can read. The response body is read up to MaxBytes.
 func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
-	if method == "" {
-		return Response{}, errors.New("method is required")
-	}
 	target, err := url.Parse(strings.TrimSpace(request.URL))
 	if err != nil {
 		return Response{}, fmt.Errorf("parse url: %w", err)
@@ -323,8 +312,8 @@ func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
 	if err := c.Policy.Check(method, target); err != nil {
 		return Response{}, err
 	}
-	if int64(len(request.Body)) > c.maxRequestBytes() {
-		return Response{}, fmt.Errorf("request body exceeds %d bytes", c.maxRequestBytes())
+	if int64(len(request.Body)) > c.MaxRequestBytes {
+		return Response{}, fmt.Errorf("request body exceeds %d bytes", c.MaxRequestBytes)
 	}
 
 	var body io.Reader
@@ -340,20 +329,13 @@ func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
 		httpRequest.Header.Set(name, value)
 	}
 
-	// The client must be built through NewClient/NewConfiguredClient so its
-	// transport carries the SSRF dial guard and configured bounds. Refuse a
-	// zero-value client rather than silently fabricating a default that would
-	// drop that configuration.
-	if c.HTTPClient == nil {
-		return Response{}, fmt.Errorf("internet client is not configured")
-	}
 	httpResponse, err := c.HTTPClient.Do(httpRequest)
 	if err != nil {
 		return Response{}, err
 	}
 	defer httpResponse.Body.Close()
 
-	content, truncated, err := readBounded(httpResponse.Body, c.maxBytes())
+	content, truncated, err := readBounded(httpResponse.Body, c.MaxBytes)
 	if err != nil {
 		return Response{}, fmt.Errorf("read response body: %w", err)
 	}
@@ -364,20 +346,6 @@ func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
 		Body:      content,
 		Truncated: truncated,
 	}, nil
-}
-
-func (c *Client) maxBytes() int64 {
-	if c == nil || c.MaxBytes <= 0 {
-		return DefaultMaxResponseBytes
-	}
-	return c.MaxBytes
-}
-
-func (c *Client) maxRequestBytes() int64 {
-	if c == nil || c.MaxRequestBytes <= 0 {
-		return DefaultMaxRequestBytes
-	}
-	return c.MaxRequestBytes
 }
 
 func validateScheme(scheme string) error {

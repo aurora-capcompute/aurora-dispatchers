@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -37,9 +39,8 @@ func operationHandler(t *testing.T, client Client, name string, settings Setting
 	return operation{
 		client:          client,
 		path:            op.path,
-		requiredField:   op.requiredField,
+		method:          op.method,
 		defaultModel:    normalized.DefaultModel,
-		models:          newModelPolicy(normalized.AllowedModels),
 		maxRequestBytes: normalized.MaxRequestBytes,
 	}
 }
@@ -106,25 +107,29 @@ func TestModelsIsAGet(t *testing.T) {
 	}
 }
 
-func TestModelPolicyRejectsBeforeProviderCall(t *testing.T) {
-	client := &recordingClient{}
-	handler := operationHandler(t, client, "embeddings", Settings{DefaultModel: "model-a", AllowedModels: []string{"model-a"}})
-	outcome, err := handler.DispatchCall(context.Background(), openaiCall("embeddings", `"model":"model-b","input":"hello"`))
+// The operation schemas refuse a model the grant does not allow, and a
+// streaming request, before any provider call.
+func TestSchemaRefusesBeforeProviderCall(t *testing.T) {
+	raw := json.RawMessage(`{"api_key":{"secret":"OPENAI_KEY"},"default_model":"model-a","allowed_models":["model-a"],"capabilities":[{"operation":"embeddings"},{"operation":"responses"}]}`)
+	family, err := (Registration{}).Configure(context.Background(), raw, keyed)
 	if err != nil {
-		t.Fatalf("dispatch embeddings: %v", err)
+		t.Fatalf("configure: %v", err)
 	}
-	if outcome.Status() != sys.StatusFailed || len(client.calls) != 0 {
-		t.Fatalf("outcome = %s, calls = %v; want a failure before any provider call", outcome.Status(), client.calls)
+	table := capability.NewTable()
+	if err := table.Add(family); err != nil {
+		t.Fatalf("add: %v", err)
 	}
-}
-
-func TestStreamingIsRejected(t *testing.T) {
-	handler := operationHandler(t, &recordingClient{}, "responses", Settings{DefaultModel: "model-a"})
-	outcome, err := handler.DispatchCall(context.Background(), openaiCall("responses", `"input":"hello","stream":true`))
-	if err != nil {
-		t.Fatalf("dispatch responses: %v", err)
-	}
-	if outcome.Status() != sys.StatusFailed {
-		t.Fatalf("outcome = %s, want failed", outcome.Status())
+	validated := monitor.NewValidator(table, sys.Dispatcher[string](capability.NewDispatcher[string](table)))
+	for _, call := range []sys.Syscall{
+		openaiCall("embeddings", `"model":"model-b","input":"hello"`),
+		openaiCall("responses", `"input":"hello","stream":true`),
+	} {
+		outcome, err := validated.Dispatch(context.Background(), "p1", call, sys.Authorization{})
+		if err != nil {
+			t.Fatalf("dispatch %s: %v", call.Args, err)
+		}
+		if outcome.Status() != sys.StatusFailed || outcome.Errno() != sys.ErrnoInvalidArgs {
+			t.Fatalf("%s = %s/%v, want failed/invalid_args", call.Args, outcome.Status(), outcome.Errno())
+		}
 	}
 }

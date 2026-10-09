@@ -13,8 +13,8 @@ import (
 )
 
 func TestCapabilitySchemasAreValidJSON(t *testing.T) {
-	for name, schema := range schemas {
-		if !json.Valid(schema) {
+	for name, op := range openaiOperations {
+		if !json.Valid(op.schema) {
 			t.Fatalf("%s schema is invalid JSON", name)
 		}
 	}

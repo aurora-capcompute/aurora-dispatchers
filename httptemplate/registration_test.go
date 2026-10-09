@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-capcompute/monitor"
 	"github.com/aurora-capcompute/aurora-dispatchers/httptemplate"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
+	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 func TestTemplateMatches(t *testing.T) {
@@ -159,5 +161,34 @@ func TestTemplateNormalizeKeepsSecretReference(t *testing.T) {
 	}
 	if strings.Contains(string(normalized), "tok-abc") {
 		t.Fatalf("normalized leaked a resolved value: %s", normalized)
+	}
+}
+
+// The operation's schema refuses a call that misses a required parameter or
+// gives one the wrong type, before anything reaches the network.
+func TestTemplateSchemaRefusesBadCalls(t *testing.T) {
+	services := registry.Services{Secrets: mapResolver{"ONYX_TOKEN": "tok-abc"}, AuditKey: []byte("k")}
+	family, err := (httptemplate.Registration{}).Configure(context.Background(), json.RawMessage(templateConfigJSON()), services)
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	table := capability.NewTable()
+	if err := table.Add(family); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	validated := monitor.NewValidator(table, sys.Dispatcher[string](capability.NewDispatcher[string](table)))
+	for _, args := range []string{
+		`{"operation":"search"}`,
+		`{"operation":"search","query":5}`,
+		`{"operation":"search","query":"q","extra":1}`,
+	} {
+		call := sys.Syscall{Abi: sys.ABIVersion, Name: httptemplate.Capability, Args: json.RawMessage(args)}
+		result, err := validated.Dispatch(context.Background(), "p1", call, sys.Authorization{})
+		if err != nil {
+			t.Fatalf("dispatch %s: %v", args, err)
+		}
+		if result.Status() != sys.StatusFailed || result.Errno() != sys.ErrnoInvalidArgs {
+			t.Fatalf("%s = %s/%v, want failed/invalid_args", args, result.Status(), result.Errno())
+		}
 	}
 }

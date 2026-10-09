@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -101,13 +101,8 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	// One handler, many keys: every granted method indexes to the same client
 	// and allowlist, and it is the entry — not the handler — that the call was
 	// matched against.
-	granted := make([]string, 0, len(methods))
-	for method := range methods {
-		granted = append(granted, method)
-	}
-	sort.Strings(granted)
-	entries := make([]capability.Entry, 0, len(granted))
-	for _, method := range granted {
+	entries := make([]capability.Entry, 0, len(methods))
+	for _, method := range slices.Sorted(maps.Keys(methods)) {
 		policy := methods[method]
 		entries = append(entries, capability.Entry{
 			Key:             capability.Key{Syscall: Capability, Operation: method},
@@ -239,22 +234,19 @@ func ValidateInjection(domain string, headers map[string]HeaderInjection) error 
 // never persisted (Normalize keeps only the reference).
 func buildInjections(permissions []Permission, services registry.Services) ([]CredentialInjection, error) {
 	var out []CredentialInjection
-	for i := range permissions {
-		permission := permissions[i]
+	for i, permission := range permissions {
 		if len(permission.InjectHeaders) == 0 {
 			continue
 		}
-		origin, err := NewRule(AnyMethod, permission.Domain)
-		if err != nil {
-			return nil, fmt.Errorf("permission %d: %w", i, err)
-		}
+		// parseInternetConfig validated the domain.
+		origin, _ := NewRule(AnyMethod, permission.Domain)
 		headers, labels, err := ResolveInjectedHeaders(permission.InjectHeaders, services)
 		if err != nil {
 			return nil, fmt.Errorf("permission %d: %w", i, err)
 		}
 		out = append(out, CredentialInjection{
 			Methods: permission.Methods,
-			Host:    strings.ToLower(origin.Host),
+			Host:    origin.Host,
 			Headers: headers,
 			Labels:  labels,
 		})
@@ -311,18 +303,12 @@ func canonicalMethods(methods []string) []string {
 	if len(methods) == 0 {
 		return []string{"GET"}
 	}
-	seen := make(map[string]struct{}, len(methods))
 	out := make([]string, 0, len(methods))
 	for _, method := range methods {
 		method = strings.ToUpper(strings.TrimSpace(method))
-		if method == "" {
-			continue
+		if method != "" && !slices.Contains(out, method) {
+			out = append(out, method)
 		}
-		if _, dup := seen[method]; dup {
-			continue
-		}
-		seen[method] = struct{}{}
-		out = append(out, method)
 	}
 	return out
 }
@@ -390,7 +376,7 @@ func injectedHeaderNote(headers map[string]HeaderInjection) string {
 	for name := range headers {
 		names = append(names, http.CanonicalHeaderKey(strings.TrimSpace(name)))
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	pronoun := "it"
 	if len(names) > 1 {
 		pronoun = "them"

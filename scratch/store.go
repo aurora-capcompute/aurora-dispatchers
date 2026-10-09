@@ -22,7 +22,6 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -107,9 +106,10 @@ type SearchRequest struct {
 	// IgnoreCase makes the match case-insensitive (an RE2 (?i) prefix).
 	IgnoreCase bool `json:"ignore_case,omitempty"`
 	// Context is the number of surrounding lines to return with each match
-	// (grep -C), clamped to a small maximum.
+	// (grep -C). The schema bounds it.
 	Context int `json:"context,omitempty"`
-	// MaxMatches caps how many matches come back (default 20), clamped.
+	// MaxMatches caps how many matches come back (default 20). The schema
+	// bounds it.
 	MaxMatches int `json:"max_matches,omitempty"`
 }
 
@@ -133,8 +133,6 @@ type SearchResponse struct {
 // result so it never re-floods the context it was meant to keep small.
 const (
 	searchDefaultMaxMatches = 20
-	searchMaxMatches        = 100
-	searchMaxContextLines   = 5
 	searchMaxMatchBytes     = 512
 	searchMaxTotalBytes     = 16 * 1024
 )
@@ -153,11 +151,10 @@ func (h handler) get(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify(request.Key)
-	if err != nil {
+	if err := checkKey(request.Key); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	value, labels, found, err := h.Store.Get(ctx, qualified)
+	value, labels, found, err := h.Store.Get(ctx, request.Key)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
@@ -176,20 +173,16 @@ func (h handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify(request.Key)
-	if err != nil {
+	if err := checkKey(request.Key); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	if len(request.Value) == 0 {
-		return sys.FailCode(sys.ErrnoInvalidArgs, "value is required"), nil
-	}
-	if strings.HasPrefix(qualified, savedPrefix) {
+	if strings.HasPrefix(request.Key, savedPrefix) {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("keys under %s hold saved values, which never change", savedPrefix)), nil
 	}
 	// The written value derives from anything the process has observed (the guest
 	// is opaque), so it is stored with the process's taint, handed down by the
 	// flow monitor.
-	if err := h.Store.Put(ctx, qualified, request.Value, capability.Taint(ctx)); err != nil {
+	if err := h.Store.Put(ctx, request.Key, request.Value, capability.Taint(ctx)); err != nil {
 		return storeFailure(ctx, err)
 	}
 	return marshalResult(PutResponse{Key: request.Key})
@@ -204,10 +197,9 @@ func (h handler) store(ctx context.Context, call sys.Syscall) (sys.SyscallResult
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
+	// The value decoded as JSON, so it compacts.
 	var value bytes.Buffer
-	if err := json.Compact(&value, request.Value); err != nil {
-		return sys.FailCode(sys.ErrnoInvalidArgs, "value is required"), nil
-	}
+	_ = json.Compact(&value, request.Value)
 	sum := sha256.Sum256(value.Bytes())
 	key := savedPrefix + hex.EncodeToString(sum[:8])
 	_, saved, _, err := h.Store.Get(ctx, key)
@@ -222,20 +214,15 @@ func (h handler) store(ctx context.Context, call sys.Syscall) (sys.SyscallResult
 
 func (h handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
 	var request ListRequest
-	if len(call.Args) > 0 {
-		if err := json.Unmarshal(call.Args, &request); err != nil {
-			return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
-		}
+	if err := json.Unmarshal(call.Args, &request); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	prefix := ""
 	if request.Prefix != "" {
-		qualified, err := qualify(request.Prefix)
-		if err != nil {
+		if err := checkKey(request.Prefix); err != nil {
 			return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 		}
-		prefix = qualified
 	}
-	entries, err := h.Store.List(ctx, prefix)
+	entries, err := h.Store.List(ctx, request.Prefix)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
@@ -248,7 +235,7 @@ func (h handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult,
 		keys = append(keys, entry.Key)
 		labels = append(labels, entry.Labels...)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	result, err := marshalResult(ListResponse{Keys: keys})
 	if err != nil {
 		return result, err
@@ -261,8 +248,7 @@ func (h handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResul
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	qualified, err := qualify(request.Key)
-	if err != nil {
+	if err := checkKey(request.Key); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
 	pattern := request.Pattern
@@ -275,7 +261,7 @@ func (h handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResul
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("invalid pattern: %v", err)), nil
 	}
-	value, labels, found, err := h.Store.Get(ctx, qualified)
+	value, labels, found, err := h.Store.Get(ctx, request.Key)
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
@@ -292,15 +278,13 @@ func (h handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResul
 	return result.WithLabels(labels...), nil
 }
 
-// grepValue scans the value line by line, returning up to a bounded number of
-// matches — each with its 1-based line number and any requested surrounding
-// context — and whether a cap cut the scan short. The lines are valueText's.
+// grepValue scans the value line by line, returning up to maxMatches matches —
+// each with its 1-based line number and any requested surrounding context — and
+// whether a cap cut the scan short. The lines are valueText's.
 func grepValue(value json.RawMessage, re *regexp.Regexp, contextLines, maxMatches int) ([]Match, bool) {
-	contextLines = clampInt(contextLines, 0, searchMaxContextLines)
-	if maxMatches <= 0 {
+	if maxMatches == 0 {
 		maxMatches = searchDefaultMaxMatches
 	}
-	maxMatches = clampInt(maxMatches, 1, searchMaxMatches)
 
 	lines := strings.Split(valueText(value), "\n")
 	matches := make([]Match, 0, maxMatches)
@@ -312,14 +296,8 @@ func grepValue(value json.RawMessage, re *regexp.Regexp, contextLines, maxMatche
 		if len(matches) >= maxMatches {
 			return matches, true
 		}
-		start := i - contextLines
-		if start < 0 {
-			start = 0
-		}
-		end := i + contextLines + 1
-		if end > len(lines) {
-			end = len(lines)
-		}
+		start := max(i-contextLines, 0)
+		end := min(i+contextLines+1, len(lines))
 		block := truncateBytes(strings.Join(lines[start:end], "\n"), searchMaxMatchBytes)
 		matches = append(matches, Match{Line: i + 1, Text: block})
 		if total += len(block); total >= searchMaxTotalBytes {
@@ -329,8 +307,6 @@ func grepValue(value json.RawMessage, re *regexp.Regexp, contextLines, maxMatche
 	return matches, false
 }
 
-// valueText decodes a stored value to searchable text: a JSON string yields its
-// unescaped content (with real newlines); anything else yields its raw JSON.
 // valueText is the text search reads. A JSON string is its decoded text, so
 // real newlines are line breaks. Any other value is flattened to one
 // "path: value" line per field, in key order, and a string field gives one line
@@ -388,44 +364,31 @@ func flatten(path string, value any, lines *[]string) {
 	}
 }
 
-func clampInt(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
-}
-
-// truncateBytes caps a string at max bytes on a rune boundary, marking the cut.
-func truncateBytes(s string, max int) string {
-	if len(s) <= max {
+// truncateBytes caps a string at limit bytes on a rune boundary, marking the cut.
+func truncateBytes(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	cut := max
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
 	return s[:cut] + "…"
 }
 
-// qualify validates a guest key: a relative slash-path whose traversal attempts
-// are rejected rather than resolved.
-func qualify(key string) (string, error) {
-	if key == "" {
-		return "", fmt.Errorf("key is required")
-	}
+// checkKey refuses a guest key that is not a relative slash-path: traversal
+// attempts are rejected rather than resolved.
+func checkKey(key string) error {
 	if strings.HasPrefix(key, "/") {
-		return "", fmt.Errorf("key %q must be relative", key)
+		return fmt.Errorf("key %q must be relative", key)
 	}
 	for _, segment := range strings.Split(key, "/") {
 		switch segment {
 		case "", ".", "..":
-			return "", fmt.Errorf("key %q contains an invalid path segment", key)
+			return fmt.Errorf("key %q contains an invalid path segment", key)
 		}
 	}
-	return key, nil
+	return nil
 }
 
 func storeFailure(ctx context.Context, err error) (sys.SyscallResult, error) {
@@ -486,6 +449,5 @@ func (s *MapStore) List(_ context.Context, prefix string) ([]ListedKey, error) {
 			keys = append(keys, ListedKey{Key: key, Labels: append([]string(nil), stored.labels...)})
 		}
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
 	return keys, nil
 }

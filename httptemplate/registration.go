@@ -5,8 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,13 +20,8 @@ import (
 // each operation is self-contained, so one grant can front several APIs.
 const Capability = "core.httpTemplate"
 
-// templatePlaceholderName matches a {{param}} placeholder and captures the name.
-var templatePlaceholderName = regexp.MustCompile(`\{\{(\w+)\}\}`)
-
-// validParamTypes are the parameter types a template operation may declare.
-var validParamTypes = map[string]struct{}{
-	"string": {}, "integer": {}, "number": {}, "boolean": {},
-}
+// paramTypes are the parameter types a template operation may declare.
+var paramTypes = []string{"string", "integer", "number", "boolean"}
 
 // templateConfig is a core.httpTemplate grant's driver configuration: its
 // capabilities — a set of named operations — plus the shared transport bounds.
@@ -114,7 +108,7 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 			Discriminator:   "operation",
 			Description:     operation.Description,
 			Input:           branch,
-			Labels:          append(append([]string(nil), compiled.Labels...), compiled.CredentialLabels...),
+			Labels:          slices.Concat(compiled.Labels, compiled.CredentialLabels),
 			Forbid:          compiled.Taints,
 			RequireApproval: compiled.RequireApproval,
 			Handler:         Handler{Client: client, Operation: compiled},
@@ -182,7 +176,7 @@ func parseTemplateConfig(raw json.RawMessage) (templateConfig, error) {
 		}
 		seen[operation.Operation] = struct{}{}
 	}
-	sort.Slice(config.Capabilities, func(i, j int) bool { return config.Capabilities[i].Operation < config.Capabilities[j].Operation })
+	slices.SortFunc(config.Capabilities, func(a, b templateOperation) int { return strings.Compare(a.Operation, b.Operation) })
 
 	config.TimeoutMS = defaultIfZero(config.TimeoutMS, int64(internet.DefaultTimeout/time.Millisecond))
 	config.MaxResponseBytes = defaultIfZero(config.MaxResponseBytes, internet.DefaultMaxResponseBytes)
@@ -226,7 +220,7 @@ func normalizeOperation(operation *templateOperation) error {
 		return fmt.Errorf("body must be valid JSON")
 	}
 	for name, param := range operation.Params {
-		if _, ok := validParamTypes[param.Type]; !ok {
+		if !slices.Contains(paramTypes, param.Type) {
 			return fmt.Errorf("parameter %q has invalid type %q (want string|integer|number|boolean)", name, param.Type)
 		}
 	}
@@ -248,7 +242,7 @@ func normalizeOperation(operation *templateOperation) error {
 func placeholderRefs(operation *templateOperation) []string {
 	var refs []string
 	collect := func(text string) {
-		for _, match := range templatePlaceholderName.FindAllStringSubmatch(text, -1) {
+		for _, match := range placeholder.FindAllStringSubmatch(text, -1) {
 			refs = append(refs, match[1])
 		}
 	}
@@ -271,7 +265,7 @@ func compileOperation(operation templateOperation, headers map[string]string, cr
 	}
 	params := make(map[string]Param, len(operation.Params))
 	for name, param := range operation.Params {
-		params[name] = Param{Type: param.Type, Required: param.Required}
+		params[name] = Param{Type: param.Type}
 	}
 	compiled := Operation{
 		Name:             operation.Operation,
@@ -314,7 +308,7 @@ func operationParamSchema(operation templateOperation) json.RawMessage {
 			required = append(required, name)
 		}
 	}
-	sort.Strings(required)
+	slices.Sort(required)
 	schema := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -328,18 +322,12 @@ func operationParamSchema(operation templateOperation) json.RawMessage {
 }
 
 // templatePolicy is the egress allowlist: each operation's method against its own
-// origin (unioned, deduplicated), so a constructed request can reach only what
-// the grant's operations define.
+// origin, so a constructed request can reach only what the grant's operations
+// define.
 func templatePolicy(config templateConfig) internet.Policy {
-	seen := make(map[string]struct{}, len(config.Capabilities))
-	var rules []internet.Rule
+	rules := make([]internet.Rule, 0, len(config.Capabilities))
 	for _, operation := range config.Capabilities {
-		key := operation.Method + " " + operation.BaseURL
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		// Origin and method already validated in parseTemplateConfig.
+		// parseTemplateConfig validated the origin and the method.
 		rule, _ := internet.NewRule(operation.Method, operation.BaseURL)
 		rules = append(rules, rule)
 	}

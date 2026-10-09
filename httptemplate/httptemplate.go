@@ -9,26 +9,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
+	"maps"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
-// Handler serves one manifest-defined HTTP operation whose method, host,
-// path, headers, and body shape are fixed by the manifest — the guest supplies
-// only the declared parameters. A grant builds one handler per operation. It is the operation-level
-// least-privilege counterpart to InternetHandler: where core.internet hands the
-// guest the whole request (any method/url the allowlist permits), a template
-// grant lets the guest fill named holes in one exact request and reach nothing
-// else. Credentials are host-attached (never guest-supplied), and guest values
-// enter the request only through encoding-safe substitution — percent-encoded in
-// the path/query, structurally in the JSON body — so a value can never break out
-// of its slot to alter the method, host, path, or JSON shape.
+// Handler serves one manifest-defined HTTP operation whose method, host, path,
+// headers, and body shape are fixed by the manifest — the guest supplies only
+// the declared parameters. A grant builds one handler per operation. Where
+// core.internet hands the guest the whole request (any method and URL the
+// allowlist permits), a template lets the guest fill named holes in one exact
+// request and reach nothing else. Credentials are host-attached (never
+// guest-supplied), and guest values enter the request only through
+// encoding-safe substitution — percent-encoded in the path and query,
+// structurally in the JSON body — so a value can never break out of its slot to
+// alter the method, host, path, or JSON shape.
 type Handler struct {
 	Client internet.Doer
 	// Operation is the one request this handler sends. Each operation carries
@@ -73,65 +73,46 @@ type Operation struct {
 	RequireApproval bool
 }
 
-// Param is one guest-fillable parameter's contract.
+// Param is one guest-fillable parameter's declared JSON type: "string",
+// "integer", "number" or "boolean".
 type Param struct {
-	Type     string // "string" | "integer" | "number" | "boolean"
-	Required bool
+	Type string
 }
 
 var placeholder = regexp.MustCompile(`\{\{(\w+)\}\}`)
 
+// DispatchCall renders the operation's request and sends it. Flow policy and
+// approval are the operation's entry's, enforced by the runtime above and below
+// the replay tape.
 func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
-	operation := h.Operation
-	params, err := extractParams(operation, call.Args)
+	params, err := decodeParams(h.Operation, call.Args)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	// Flow policy and approval are the operation's entry's, enforced by the
-	// runtime above and below the replay tape. This handler renders and sends.
-
-	request, err := render(operation, params)
+	request, err := render(h.Operation, params)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, err.Error()), nil
 	}
-	reqCtx := ctx
-	if len(operation.Headers) > 0 {
-		// The operation's host-held headers are bound to its fixed BaseURL origin;
-		// bind them so a redirect off that origin drops them rather than carrying
-		// this operation's credential to another operation's (or an attacker's) host.
-		if u, perr := url.Parse(operation.BaseURL); perr == nil && u.Host != "" {
-			reqCtx = internet.WithInjectedCredential(ctx, internet.OriginOf(u), credentialHeaderNames(operation.Headers))
-		}
+	if len(h.Operation.Headers) > 0 {
+		// The operation's host-held headers are bound to its fixed origin, so a
+		// redirect off that origin drops them rather than carrying this
+		// operation's credential to another host. The registration validated
+		// the origin.
+		origin, _ := url.Parse(h.Operation.BaseURL)
+		ctx = internet.WithInjectedCredential(ctx, internet.OriginOf(origin), slices.Collect(maps.Keys(h.Operation.Headers)))
 	}
-	response, err := h.Client.Do(reqCtx, request)
+	response, err := h.Client.Do(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		// A failed attempt still carries the operation's source labels (plus its
-		// credential provenance): the error is derived from a request to a labeled
-		// origin, so taint the run as if the read happened rather than let a failed
-		// call's message reach a forbidding sink untainted.
 		return sys.FailCode(sys.ErrnoTransient, err.Error()), nil
 	}
-	result, err := marshalResult(response)
+	raw, err := json.Marshal(response)
 	if err != nil {
-		return result, err
+		return sys.SyscallResult{}, err
 	}
-	return result, nil
-}
-
-// credentialHeaderNames returns the host-held header names bound to an
-// operation's origin, for redirect-time stripping.
-func credentialHeaderNames(headers map[string]string) []string {
-	if len(headers) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(headers))
-	for name := range headers {
-		names = append(names, name)
-	}
-	return names
+	return sys.Result(raw), nil
 }
 
 // render assembles the concrete request from the operation's fixed template and
@@ -159,9 +140,7 @@ func render(operation Operation, params map[string]any) (internet.Request, error
 	}
 
 	headers := make(map[string]string, len(operation.Headers)+1)
-	for name, value := range operation.Headers {
-		headers[name] = value
-	}
+	maps.Copy(headers, operation.Headers)
 	// The template body is JSON, so declare it — without Content-Type a JSON API
 	// (FastAPI and the like) ignores the body and rejects the request as if the
 	// fields were missing (a 422). A host-set header of the same name wins.
@@ -249,61 +228,21 @@ func valueString(v any) string {
 	}
 }
 
-// extractParams validates the guest's call arguments against the operation's
-// declared parameters and coerces them to typed Go values for substitution. The
-// kernel already validates the args against the published schema; this is the
-// driver's own defensive check.
-func extractParams(operation Operation, raw json.RawMessage) (map[string]any, error) {
-	var all map[string]any
-	if err := json.Unmarshal(raw, &all); err != nil {
+// decodeParams decodes the call's parameters for substitution. The Validator
+// held them to the operation's schema — the declared types, the required ones
+// present, and no others — so only an integer needs converting from JSON's
+// float.
+func decodeParams(operation Operation, raw json.RawMessage) (map[string]any, error) {
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
 		return nil, fmt.Errorf("decode parameters: %w", err)
 	}
-	params := make(map[string]any, len(operation.Params))
-	for name, spec := range operation.Params {
-		value, present := all[name]
-		if !present {
-			if spec.Required {
-				return nil, fmt.Errorf("missing required parameter %q", name)
-			}
-			continue
+	// The `operation` discriminator selects the case. It is not a parameter.
+	delete(params, "operation")
+	for name, value := range params {
+		if operation.Params[name].Type == "integer" {
+			params[name] = int64(value.(float64))
 		}
-		coerced, err := coerceParam(name, spec.Type, value)
-		if err != nil {
-			return nil, err
-		}
-		params[name] = coerced
 	}
 	return params, nil
-}
-
-func coerceParam(name, kind string, value any) (any, error) {
-	switch kind {
-	case "string":
-		if s, ok := value.(string); ok {
-			return s, nil
-		}
-	case "boolean":
-		if b, ok := value.(bool); ok {
-			return b, nil
-		}
-	case "number":
-		if f, ok := value.(float64); ok {
-			return f, nil
-		}
-	case "integer":
-		if f, ok := value.(float64); ok && f == math.Trunc(f) {
-			return int64(f), nil
-		}
-	default:
-		return value, nil
-	}
-	return nil, fmt.Errorf("parameter %q must be %s", name, strings.TrimSpace(kind))
-}
-
-func marshalResult(value any) (sys.SyscallResult, error) {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return sys.SyscallResult{}, err
-	}
-	return sys.Result(raw), nil
 }

@@ -5,32 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 )
 
-// UnionLabels concatenates two already-normalized label sets, dropping
-// duplicates. Order is not significant for flow decisions or result labels
-// (WithLabels re-sorts).
+// UnionLabels is the sorted union of two label sets, in a fresh slice.
 func UnionLabels(a, b []string) []string {
-	if len(a) == 0 {
-		return b
-	}
-	if len(b) == 0 {
-		return a
-	}
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, label := range append(append([]string(nil), a...), b...) {
-		if _, dup := seen[label]; dup {
-			continue
-		}
-		seen[label] = struct{}{}
-		out = append(out, label)
-	}
-	return out
+	return slices.Compact(slices.Sorted(slices.Values(slices.Concat(a, b))))
 }
 
 // EgressForbidFloor is the reserved taint every network-egress sink refuses by
@@ -46,11 +28,9 @@ var EgressForbidFloor = []string{"secret"}
 
 // WithEgressFloor unions the egress forbid floor onto an operation's declared
 // sink taints. Applied at every network-egress driver's build so a sink is never
-// a fully open channel for the reserved secret class. Returns a fresh slice: for
-// an op with no declared taints, UnionLabels would otherwise return the shared
-// EgressForbidFloor backing array, so every such sink would alias one slice.
+// a fully open channel for the reserved secret class.
 func WithEgressFloor(taints []string) []string {
-	return append([]string(nil), UnionLabels(taints, EgressForbidFloor)...)
+	return UnionLabels(taints, EgressForbidFloor)
 }
 
 // FlowPolicy is the per-operation data-flow declaration carried on a leaf grant's
@@ -125,7 +105,7 @@ func ParseOperationGrants(raw json.RawMessage, family string, known []string) ([
 		}
 		grants[i].FlowPolicy = flow
 	}
-	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
+	slices.SortFunc(grants, func(a, b OperationGrant) int { return strings.Compare(a.Operation, b.Operation) })
 	return grants, nil
 }
 

@@ -45,45 +45,46 @@ type Registration struct {
 func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
 func (r Registration) Configure(_ context.Context, raw json.RawMessage, _ registry.Services) (capability.Family, error) {
-	_, grants, err := parseConfig(raw)
+	grants, err := parseConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
 	}
 
 	requireApproval := false
 	var labels, taints []string
-	branches := make([]json.RawMessage, 0, len(grants))
-	names := make([]string, 0, len(grants))
 	for _, grant := range grants {
-		if grant.RequireApproval != nil && *grant.RequireApproval {
-			requireApproval = true
-		}
+		requireApproval = requireApproval || (grant.RequireApproval != nil && *grant.RequireApproval)
 		labels = registry.UnionLabels(labels, grant.Labels)
 		taints = registry.UnionLabels(taints, grant.Taints)
-		branch, err := registry.OperationBranch(grant.Operation, operations[grant.Operation].schema)
-		if err != nil {
-			return capability.Family{}, err
-		}
-		branches = append(branches, branch)
-		names = append(names, operations[grant.Operation].description)
 	}
 
 	h := handler{Store: r.Store}
 	entries := make([]capability.Entry, 0, len(grants))
-	for i, grant := range grants {
-		serve := operations[grant.Operation].serve
-		entries = append(entries, capability.Entry{
-			Key:             capability.Key{Syscall: Capability, Operation: grant.Operation},
-			Discriminator:   "operation",
-			Description:     operations[grant.Operation].description,
-			Input:           branches[i],
-			Labels:          labels,
-			Forbid:          sinkTaints(grant.Operation, taints),
-			RequireApproval: requireApproval && isSink(grant.Operation),
+	names := make([]string, 0, len(grants))
+	for _, grant := range grants {
+		operation := operations[grant.Operation]
+		branch, err := registry.OperationBranch(grant.Operation, operation.schema)
+		if err != nil {
+			return capability.Family{}, err
+		}
+		entry := capability.Entry{
+			Key:           capability.Key{Syscall: Capability, Operation: grant.Operation},
+			Discriminator: "operation",
+			Description:   operation.description,
+			Input:         branch,
+			Labels:        labels,
 			Handler: capability.HandlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
-				return serve(h, ctx, call)
+				return operation.serve(h, ctx, call)
 			}),
-		})
+		}
+		// Only a write is a sink — a read is a source — so the grant's forbid set
+		// and its approval gate apply to the writes alone.
+		if grant.Operation == "put" || grant.Operation == "store" {
+			entry.Forbid = taints
+			entry.RequireApproval = requireApproval
+		}
+		entries = append(entries, entry)
+		names = append(names, operation.description)
 	}
 	return capability.Family{Entries: entries,
 		Description: fmt.Sprintf("Session scratch memory — durable, shared by every process in this session, private to it. Keys are relative slash-paths. Stash large content or notes here for this run or a later one, and query large values with search rather than carrying them in the conversation. Choose an operation:\n- %s.",
@@ -91,24 +92,20 @@ func (r Registration) Configure(_ context.Context, raw json.RawMessage, _ regist
 	}, nil
 }
 
-// parseConfig validates and canonicalizes a core.scratch grant — the
-// single parse the door check and the build share. It rejects unknown fields,
-// requires at least one known operation (get/put/store/list/search) with no
-// duplicates, and normalizes each operation's flow policy.
-func parseConfig(raw json.RawMessage) (scratchConfig, []registry.OperationGrant, error) {
+// parseConfig validates and canonicalizes a core.scratch grant — the single
+// parse the door check and the build share. It rejects unknown fields, requires
+// at least one known operation with no duplicates, and normalizes each
+// operation's flow policy.
+func parseConfig(raw json.RawMessage) ([]registry.OperationGrant, error) {
 	var config scratchConfig
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&config); err != nil {
-			return scratchConfig{}, nil, err
+			return nil, err
 		}
 	}
-	grants, err := registry.ParseOperationGrants(config.Capabilities, "scratch", slices.Sorted(maps.Keys(operations)))
-	if err != nil {
-		return scratchConfig{}, nil, err
-	}
-	return config, grants, nil
+	return registry.ParseOperationGrants(config.Capabilities, "scratch", slices.Sorted(maps.Keys(operations)))
 }
 
 // operations is the operation vocabulary: the argument schema, the
@@ -143,17 +140,4 @@ var operations = map[string]struct {
 		description: "search: grep a stored value with an RE2 regex — returns matching lines with line numbers (and optional surrounding context), bounded, so a large value is queried without reading it whole. A value that is not a string is searched as one \"path: value\" line per field, and a long string field as its lines",
 		serve:       handler.search,
 	},
-}
-
-// isSink is true for the operations that write. Only a write is a sink —
-// a read is a source — so the grant's forbid set and its approval gate apply to
-// those alone.
-func isSink(operation string) bool { return operation == "put" || operation == "store" }
-
-// sinkTaints is a grant's forbid set, applied only where it means something.
-func sinkTaints(operation string, taints []string) []string {
-	if !isSink(operation) {
-		return nil
-	}
-	return taints
 }

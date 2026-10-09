@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/aurora-capcompute/capcompute/sys"
@@ -22,11 +23,10 @@ type Doer interface {
 	Do(context.Context, Request) (Response, error)
 }
 
-// Handler adapts an Doer to the Handler interface, bound to
-// the published capability name (core.internet). Its allowlist lives in the
-// client's Policy; the per-method policy here is the grant's data-flow and
-// approval declaration, resolved from the call's HTTP method — the method is the
-// ADT discriminator of a single net capability.
+// Handler serves core.internet calls through a Doer. Its allowlist lives in the
+// client's Policy. The per-method data-flow and approval policy is the entry's,
+// resolved from the call's HTTP method — the method is the ADT discriminator of
+// a single net capability.
 type Handler struct {
 	Client Doer
 	// Injections attach host-held credential headers to matching (method, host)
@@ -42,29 +42,21 @@ type Handler struct {
 // never sees Headers and cannot override them (host wins). Labels are stamped on
 // the result so the journal records which credential was used, never the value.
 type CredentialInjection struct {
-	Methods []string          // uppercase HTTP methods, or ["*"] for any
+	Methods []string          // uppercase HTTP methods
 	Host    string            // lowercased request host[:port] this applies to
 	Headers map[string]string // header name -> full host-held value
 	Labels  []string          // provenance labels stamped when applied
 }
 
 func (c CredentialInjection) applies(method, host string) bool {
-	if !strings.EqualFold(c.Host, host) {
-		return false
-	}
-	for _, m := range c.Methods {
-		if m == AnyMethod || strings.EqualFold(m, method) {
-			return true
-		}
-	}
-	return false
+	return c.Host == host && slices.Contains(c.Methods, method)
 }
 
 // MethodPolicy is one HTTP method's grant policy, carried from the manifest to
 // that method's entry. Nothing here enforces it — the runtime does, above and
-// below the replay tape: whether the request
-// needs human approval, the source classes its response carries (Labels), and
-// the labels barred from flowing into the request (Taints, the sink guard).
+// below the replay tape: whether the request needs human approval, the source
+// classes its response carries (Labels), and the labels barred from flowing into
+// the request (Taints, the sink guard).
 type MethodPolicy struct {
 	RequireApproval bool
 	Labels          []string
@@ -76,41 +68,30 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall) (sys.Syscal
 	if err := json.Unmarshal(call.Args, &request); err != nil {
 		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
 	}
-	// The method is read as sent: the entry this call resolved to was keyed on
-	// exactly this value, and flow policy and approval are that entry's,
-	// enforced by the runtime above and below the replay tape.
-	method := request.Method
-
 	// Attach any host-held credential for this (method, host). Host wins over a
 	// guest header of the same name, so the guest can neither read nor override
-	// it; the value is never in the call args, so it never reaches the journaled
+	// it. The value is never in the call args, so it never reaches the journaled
 	// intent. The returned labels name the credential (not its value) for audit.
-	credentialLabels, binding, err := h.inject(&request, method)
+	credentialLabels, binding, err := h.inject(&request)
 	if err != nil {
 		return sys.FailCode(sys.ErrnoDenied, err.Error()), nil
 	}
-	reqCtx := ctx
 	if len(binding.headers) > 0 {
 		// Bind the credential to this request's origin so the client drops it on
 		// any redirect that leaves that origin.
-		reqCtx = WithInjectedCredential(ctx, binding.origin, binding.headers)
+		ctx = WithInjectedCredential(ctx, binding.origin, binding.headers)
 	}
 
-	response, err := h.Client.Do(reqCtx, request)
+	response, err := h.Client.Do(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return sys.SyscallResult{}, ctx.Err()
 		}
-		// A failed attempt still carries the operation's source labels AND its
-		// credential provenance: the error text is derived from the request to a
-		// labeled source (e.g. a redirect target host echoed by the allowlist
-		// check), so taint the run as if the read happened. Conservative — an
-		// attempted read of a labeled source taints, closing an error-channel
-		// launder where a failed fetch's message flows to a forbidding sink
-		// untainted.
 		// The credential provenance is dynamic — which injection matched depends
 		// on the request's host — so it is stamped here rather than declared on
-		// the entry. The method's own source labels are the entry's.
+		// the entry. A failed attempt carries it too: its error text derives from
+		// a request made with that credential. The monitor stamps the method's
+		// own source labels.
 		return sys.FailCode(sys.ErrnoTransient, err.Error()).WithLabels(credentialLabels...), nil
 	}
 	result, err := marshalResult(response)
@@ -120,9 +101,6 @@ func (h Handler) DispatchCall(ctx context.Context, call sys.Syscall) (sys.Syscal
 	return result.WithLabels(credentialLabels...), nil
 }
 
-// inject attaches matching credential headers to the request (host wins over a
-// guest-supplied header) and returns the provenance labels to stamp on the
-// result. The injected values are host-held and never echoed to the guest.
 // credentialBinding is the origin a request's injected credential is bound to,
 // plus the header names carrying it — handed to the internet client so a
 // redirect leaving the origin drops them before they reach another host.
@@ -131,7 +109,10 @@ type credentialBinding struct {
 	headers []string
 }
 
-func (h Handler) inject(request *Request, method string) ([]string, credentialBinding, error) {
+// inject attaches matching credential headers to the request (host wins over a
+// guest-supplied header) and returns the provenance labels to stamp on the
+// result. The injected values are host-held and never echoed to the guest.
+func (h Handler) inject(request *Request) ([]string, credentialBinding, error) {
 	if len(h.Injections) == 0 {
 		return nil, credentialBinding{}, nil
 	}
@@ -143,7 +124,7 @@ func (h Handler) inject(request *Request, method string) ([]string, credentialBi
 	var labels []string
 	var injected []string
 	for _, rule := range h.Injections {
-		if !rule.applies(method, host) {
+		if !rule.applies(request.Method, host) {
 			continue
 		}
 		// A host-held credential rides only TLS (loopback exempt). The manifest

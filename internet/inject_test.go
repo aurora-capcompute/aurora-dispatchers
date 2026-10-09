@@ -34,7 +34,7 @@ func injectingHandler(client internet.Doer) internet.Handler {
 	return internet.Handler{
 		Client: client,
 		Injections: []internet.CredentialInjection{{
-			Methods: []string{"*"},
+			Methods: []string{"GET", "POST"},
 			Host:    "onyx.example.com",
 			Headers: map[string]string{"Authorization": "Bearer tok-abc"},
 			Labels:  []string{"credential:ONYX_TOKEN@abc123def456"},
@@ -131,7 +131,7 @@ func TestInjectAllowsLoopbackHTTP(t *testing.T) {
 	handler := internet.Handler{
 		Client: client,
 		Injections: []internet.CredentialInjection{{
-			Methods: []string{"*"},
+			Methods: []string{"GET", "POST"},
 			Host:    "localhost:8080",
 			Headers: map[string]string{"Authorization": "Bearer dev"},
 		}},

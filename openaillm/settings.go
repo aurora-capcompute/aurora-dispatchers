@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -59,6 +59,11 @@ func normalizeSettings(settings Settings) (normalizedSettings, error) {
 	settings.Organization = strings.TrimSpace(settings.Organization)
 	settings.Project = strings.TrimSpace(settings.Project)
 	settings.AllowedModels = cleanList(settings.AllowedModels)
+	// A call that names no model runs on the default, so the default must be
+	// one the grant allows.
+	if settings.DefaultModel != "" && len(settings.AllowedModels) > 0 && !slices.Contains(settings.AllowedModels, settings.DefaultModel) {
+		return normalizedSettings{}, fmt.Errorf("default_model %q is not in allowed_models", settings.DefaultModel)
+	}
 
 	timeout := defaultTimeout
 	if strings.TrimSpace(settings.Timeout) != "" {
@@ -125,51 +130,14 @@ func validateBaseURL(raw string, allowInsecureHTTP bool) error {
 	}
 }
 
-type modelPolicy struct {
-	allowed map[string]struct{}
-}
-
-func newModelPolicy(models []string) modelPolicy {
-	allowed := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		allowed[model] = struct{}{}
-	}
-	return modelPolicy{allowed: allowed}
-}
-
-func (p modelPolicy) check(model string) error {
-	if len(p.allowed) == 0 {
-		return nil
-	}
-	if _, ok := p.allowed[model]; !ok {
-		return fmt.Errorf("model %q is not allowed (allowed: %s)", model, strings.Join(p.list(), ", "))
-	}
-	return nil
-}
-
-func (p modelPolicy) list() []string {
-	models := make([]string, 0, len(p.allowed))
-	for model := range p.allowed {
-		models = append(models, model)
-	}
-	sort.Strings(models)
-	return models
-}
-
+// cleanList trims, sorts and deduplicates a list, dropping empty values.
 func cleanList(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
 	cleaned := make([]string, 0, len(values))
 	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
+		if value = strings.TrimSpace(value); value != "" {
+			cleaned = append(cleaned, value)
 		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		cleaned = append(cleaned, value)
 	}
-	sort.Strings(cleaned)
-	return cleaned
+	slices.Sort(cleaned)
+	return slices.Compact(cleaned)
 }

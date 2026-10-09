@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -56,20 +56,19 @@ type CommandParam struct {
 }
 
 func (p *CommandParam) UnmarshalJSON(data []byte) error {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || string(trimmed) == "null" {
+	if string(data) == "null" {
 		return fmt.Errorf(`a parameter must be a list of values or a pattern string`)
 	}
-	if trimmed[0] == '[' {
+	if data[0] == '[' {
 		var values []string
-		if err := json.Unmarshal(trimmed, &values); err != nil {
+		if err := json.Unmarshal(data, &values); err != nil {
 			return fmt.Errorf("parameter value list: %w", err)
 		}
 		*p = CommandParam{oneOf: values}
 		return nil
 	}
 	var expr string
-	if err := json.Unmarshal(trimmed, &expr); err != nil {
+	if err := json.Unmarshal(data, &expr); err != nil {
 		return fmt.Errorf(`a parameter must be a list of values or a pattern string: %w`, err)
 	}
 	*p = CommandParam{pattern: expr}
@@ -105,11 +104,12 @@ type Registration struct{}
 func (Registration) Matches(syscall string) bool { return syscall == Capability }
 
 func (Registration) Configure(_ context.Context, raw json.RawMessage, services registry.Services) (capability.Family, error) {
-	_, grants, err := parseCommandConfig(raw)
+	grants, err := parseCommandConfig(raw)
 	if err != nil {
 		return capability.Family{}, err
 	}
 
+	// The grants come sorted by operation, so the commands do too.
 	commands := make([]Command, 0, len(grants))
 	for _, rule := range grants {
 		built, err := buildCommand(rule, services)
@@ -122,10 +122,8 @@ func (Registration) Configure(_ context.Context, raw json.RawMessage, services r
 	// One entry per command: two commands may declare the same slot name with
 	// different constraints, and a merged params object would have to pick one of
 	// them — publishing a constraint that does not match the command being called.
-	sorted := append([]Command(nil), commands...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-	entries := make([]capability.Entry, 0, len(sorted))
-	for _, c := range sorted {
+	entries := make([]capability.Entry, 0, len(commands))
+	for _, c := range commands {
 		branch, err := registry.OperationBranch(c.Name, commandParamsSchema(c))
 		if err != nil {
 			return capability.Family{}, err
@@ -155,11 +153,10 @@ type EnvValue struct {
 }
 
 func (v *EnvValue) UnmarshalJSON(data []byte) error {
-	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '"' {
-		*v = EnvValue{}
-		return json.Unmarshal(trimmed, &v.plain)
-	}
 	*v = EnvValue{}
+	if data[0] == '"' {
+		return json.Unmarshal(data, &v.plain)
+	}
 	return json.Unmarshal(data, &v.secret)
 }
 
@@ -200,7 +197,7 @@ func buildCommand(rule CommandRule, services registry.Services) (Command, error)
 		Name:            rule.Operation,
 		Description:     rule.Description,
 		Path:            rule.Path,
-		Args:            append([]string(nil), rule.Args...),
+		Args:            rule.Args,
 		Dir:             rule.Dir,
 		Env:             env,
 		Params:          params,
@@ -219,20 +216,14 @@ func buildCommand(rule CommandRule, services registry.Services) (Command, error)
 // author read it as admitting.
 func (p CommandParam) compile(name string) (Param, error) {
 	if len(p.oneOf) > 0 {
-		values := make([]string, 0, len(p.oneOf))
-		seen := make(map[string]struct{}, len(p.oneOf))
 		for _, value := range p.oneOf {
 			if strings.HasPrefix(value, "-") {
 				return Param{}, fmt.Errorf("parameter %q: permitted value %q begins with %q and would be read as a flag", name, value, "-")
 			}
-			if _, dup := seen[value]; dup {
-				continue
-			}
-			seen[value] = struct{}{}
-			values = append(values, value)
 		}
-		sort.Strings(values)
-		return Param{OneOf: values}, nil
+		values := slices.Clone(p.oneOf)
+		slices.Sort(values)
+		return Param{OneOf: slices.Compact(values)}, nil
 	}
 	if strings.TrimSpace(p.pattern) == "" {
 		return Param{}, fmt.Errorf("parameter %q declares neither permitted values nor a pattern", name)
@@ -251,33 +242,34 @@ func (p CommandParam) compile(name string) (Param, error) {
 }
 
 // parseCommandConfig validates and canonicalizes a core.command grant's config.
-func parseCommandConfig(raw json.RawMessage) (commandConfig, []CommandRule, error) {
+// The rules come back sorted by operation.
+func parseCommandConfig(raw json.RawMessage) ([]CommandRule, error) {
 	var config commandConfig
 	if len(raw) > 0 {
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&config); err != nil {
-			return commandConfig{}, nil, err
+			return nil, err
 		}
 	}
 	if len(config.Capabilities) == 0 {
-		return commandConfig{}, nil, fmt.Errorf("capabilities must grant at least one operation")
+		return nil, fmt.Errorf("capabilities must grant at least one operation")
 	}
 	seen := make(map[string]struct{}, len(config.Capabilities))
 	grants := make([]CommandRule, len(config.Capabilities))
 	for i, rule := range config.Capabilities {
 		normalized, err := normalizeCommandRule(rule)
 		if err != nil {
-			return commandConfig{}, nil, fmt.Errorf("capability %d: %w", i, err)
+			return nil, fmt.Errorf("capability %d: %w", i, err)
 		}
 		if _, dup := seen[normalized.Operation]; dup {
-			return commandConfig{}, nil, fmt.Errorf("operation %q is granted more than once", normalized.Operation)
+			return nil, fmt.Errorf("operation %q is granted more than once", normalized.Operation)
 		}
 		seen[normalized.Operation] = struct{}{}
 		grants[i] = normalized
 	}
-	sort.Slice(grants, func(i, j int) bool { return grants[i].Operation < grants[j].Operation })
-	return config, grants, nil
+	slices.SortFunc(grants, func(a, b CommandRule) int { return strings.Compare(a.Operation, b.Operation) })
+	return grants, nil
 }
 
 // normalizeCommandRule validates one allowlisted command: its identity, its
@@ -315,7 +307,7 @@ func normalizeCommandRule(rule CommandRule) (CommandRule, error) {
 	}
 	referenced := map[string]struct{}{}
 	for _, arg := range rule.Args {
-		for _, match := range placeholderPattern.FindAllStringSubmatch(arg, -1) {
+		for _, match := range placeholder.FindAllStringSubmatch(arg, -1) {
 			name := match[1]
 			if _, declared := rule.Params[name]; !declared {
 				return CommandRule{}, fmt.Errorf("argument references undeclared parameter {%s}", name)
@@ -339,9 +331,6 @@ func normalizeCommandRule(rule CommandRule) (CommandRule, error) {
 	rule.FlowPolicy = flow
 	return rule, nil
 }
-
-// placeholderPattern mirrors the driver's own placeholder syntax.
-var placeholderPattern = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 
 // commandParamsSchema types the params object of one command's call: exactly
 // that command's slots with their own enum or pattern, all required.
@@ -378,9 +367,7 @@ func paramSchema(param Param) json.RawMessage {
 func commandDescription(commands []Command) string {
 	var b strings.Builder
 	b.WriteString("Run one of the allowlisted host commands. The command line is fixed by the host; you choose one with `operation` and supply values for its declared parameters. Commands:")
-	sorted := append([]Command(nil), commands...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-	for _, c := range sorted {
+	for _, c := range commands {
 		fmt.Fprintf(&b, "\n- %q", c.Name)
 		if c.Description != "" {
 			fmt.Fprintf(&b, ": %s", c.Description)

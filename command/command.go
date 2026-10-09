@@ -43,7 +43,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -168,12 +167,7 @@ type Command struct {
 
 // ParamNames lists the declared slots in a stable order.
 func (c Command) ParamNames() []string {
-	names := make([]string, 0, len(c.Params))
-	for name := range c.Params {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(c.Params))
 }
 
 // DispatchCall runs the command: it checks the guest's values against the
@@ -194,30 +188,24 @@ func (command Command) DispatchCall(ctx context.Context, call sys.Syscall) (sys.
 	// runtime above and below the replay tape. This handler runs the effect.
 	response, err := execCommand(ctx, command, argv)
 	if err == nil {
-		return marshalResult(response)
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return sys.SyscallResult{}, err
+		}
+		return sys.Result(encoded), nil
 	}
 	if ctx.Err() != nil {
 		return sys.SyscallResult{}, ctx.Err()
 	}
 	// A timeout may well pass on a retry — a slow cluster, a busy host — while
 	// a command that could not start at all (missing binary, bad working
-	// directory) is a configuration fault that retrying will not fix. Either
-	// way the run touched a labeled capability, so the failure carries its
-	// labels: an error channel must not launder them.
+	// directory) is a configuration fault that retrying will not fix.
 	errno := sys.ErrnoInternal
 	var timedOut errTimeout
 	if errors.As(err, &timedOut) {
 		errno = sys.ErrnoTransient
 	}
 	return sys.FailCode(errno, fmt.Sprintf("%s: %v", summarize(command, request.Params), err)), nil
-}
-
-func marshalResult(response Response) (sys.SyscallResult, error) {
-	encoded, err := json.Marshal(response)
-	if err != nil {
-		return sys.SyscallResult{}, err
-	}
-	return sys.Result(encoded), nil
 }
 
 // placeholder matches a {slot} reference in an argument template.
@@ -305,7 +293,7 @@ func execCommand(ctx context.Context, command Command, argv []string) (Response,
 	for key, value := range command.Env {
 		env = append(env, key+"="+value)
 	}
-	sort.Strings(env)
+	slices.Sort(env)
 	cmd.Env = env
 
 	// Its own process group, so cancellation reaches the whole tree. Killing only
@@ -360,40 +348,26 @@ type boundedBuffer struct {
 	truncated bool
 }
 
+// Write keeps what fits and drops the rest. It reports the whole write as done:
+// the writer must not see a short write.
 func (b *boundedBuffer) Write(p []byte) (int, error) {
-	remaining := b.limit - int64(b.buf.Len())
-	if remaining <= 0 {
-		b.truncated = true
-		return len(p), nil // absorbed and dropped; the writer must not see a short write
-	}
-	if int64(len(p)) > remaining {
-		b.buf.Write(p[:remaining])
-		b.truncated = true
-		return len(p), nil
-	}
-	b.buf.Write(p)
+	keep := min(int64(len(p)), b.limit-int64(b.buf.Len()))
+	b.buf.Write(p[:keep])
+	b.truncated = b.truncated || keep < int64(len(p))
 	return len(p), nil
 }
 
 func (b *boundedBuffer) String() string { return b.buf.String() }
 
-// summarize renders a command and its arguments for an approval prompt and for
-// error messages.
+// summarize renders a command and its arguments for an error message.
 func summarize(command Command, params map[string]string) string {
-	var b strings.Builder
-	b.WriteString("command ")
-	b.WriteString(command.Name)
 	names := command.ParamNames()
 	if len(names) == 0 {
-		return b.String()
+		return "command " + command.Name
 	}
-	b.WriteString(" (")
-	for i, name := range names {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		fmt.Fprintf(&b, "%s=%s", name, params[name])
+	pairs := make([]string, 0, len(names))
+	for _, name := range names {
+		pairs = append(pairs, name+"="+params[name])
 	}
-	b.WriteString(")")
-	return b.String()
+	return fmt.Sprintf("command %s (%s)", command.Name, strings.Join(pairs, ", "))
 }
