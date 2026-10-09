@@ -31,7 +31,7 @@ the resulting table to the runtime.
 | `core.internet` | `internet/` | HTTP client, any method | Method and domain allowlist, checked again on every redirect. A dial guard refuses loopback, private, link-local and CGNAT addresses after DNS. Size and time bounds. Optional host-held credential, bound to one origin. |
 | `core.httpTemplate` | `httptemplate/` | HTTP requests fixed in the manifest | The agent fills declared `{{param}}` slots. It cannot change the URL or the method. |
 | `core.command` | `command/` | Host commands from an allowlist | See [Host commands](#host-commands). |
-| `core.scratch` | `scratch/` | The session's durable key-value store | `get`, `put`, `list`, `search` on the calling session's store. Values keep the writer's labels. |
+| `core.scratch` | `scratch/` | The session's durable key-value store | `get`, `put`, `store`, `list`, `search` on the calling session's store. `store` saves a value under `io/<hash>`, which never changes. Values keep the writer's labels. |
 | `core.openaiApi` | `openaillm/` | Any OpenAI-compatible LLM | `chat`, `responses`, `embeddings`, `models`. Base URL, key and model in the grant. Model allowlist. No streaming. Usually `hidden` from the agent's menu. |
 
 Each capability has one name. Its operations are cases selected by a field in

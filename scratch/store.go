@@ -1,28 +1,34 @@
 // Package scratch provides core.scratch: a labelled key-value
-// handler over one session's Store — get, put, list and search, each an ADT
-// case selected by `operation` — and the registration that grants it. The two
+// handler over one session's Store — get, put, store, list and search, each an
+// ADT case selected by `operation` — and the registration that grants it. The two
 // kernel laws fix the handler's form: determinism — reads travel
 // the journaled syscall path, so replay re-reads the recorded value regardless
 // of later mutations; no ambient authority — the host hands the handler one
 // space, so a guest names keys only inside it.
 //
-// Its one effect, put, is at-least-once: the kernel journals an intent before a
-// syscall executes, so a crash between intent and completion re-drives the
-// write, which repeats harmlessly. A session runs one process at a time, so a
-// space has one writer.
+// Its effects, put and store, are at-least-once: the kernel journals an intent
+// before a syscall executes, so a crash between intent and completion re-drives
+// the write, which repeats harmlessly. A session runs one process at a time, so
+// a space has one writer.
 package scratch
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
+	"github.com/aurora-capcompute/aurora-dispatchers/registry"
 	"github.com/aurora-capcompute/capcompute/sys"
 )
 
@@ -68,6 +74,19 @@ type PutRequest struct {
 }
 
 type PutResponse struct {
+	Key string `json:"key"`
+}
+
+// savedPrefix holds the values store saved. Each key is made from its value's
+// content, and put may not write under it, so a saved value never changes.
+const savedPrefix = "io/"
+
+// StoreRequest saves one value under a key made from its content.
+type StoreRequest struct {
+	Value json.RawMessage `json:"value"`
+}
+
+type StoreResponse struct {
 	Key string `json:"key"`
 }
 
@@ -164,6 +183,9 @@ func (h handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	if len(request.Value) == 0 {
 		return sys.FailCode(sys.ErrnoInvalidArgs, "value is required"), nil
 	}
+	if strings.HasPrefix(qualified, savedPrefix) {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("keys under %s hold saved values, which never change", savedPrefix)), nil
+	}
 	// The written value derives from anything the process has observed (the guest
 	// is opaque), so it is stored with the process's taint, handed down by the
 	// flow monitor.
@@ -171,6 +193,31 @@ func (h handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 		return storeFailure(ctx, err)
 	}
 	return marshalResult(PutResponse{Key: request.Key})
+}
+
+// store saves a value under io/<hash of its compact JSON>. The same content
+// always gets the same key, so a re-driven store lands where the first one did.
+// Saving content that is already there adds the writer's taint to the labels
+// the value carries.
+func (h handler) store(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+	var request StoreRequest
+	if err := json.Unmarshal(call.Args, &request); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, fmt.Sprintf("decode %s request: %v", call.Name, err)), nil
+	}
+	var value bytes.Buffer
+	if err := json.Compact(&value, request.Value); err != nil {
+		return sys.FailCode(sys.ErrnoInvalidArgs, "value is required"), nil
+	}
+	sum := sha256.Sum256(value.Bytes())
+	key := savedPrefix + hex.EncodeToString(sum[:8])
+	_, saved, _, err := h.Store.Get(ctx, key)
+	if err != nil {
+		return storeFailure(ctx, err)
+	}
+	if err := h.Store.Put(ctx, key, value.Bytes(), registry.UnionLabels(saved, capability.Taint(ctx))); err != nil {
+		return storeFailure(ctx, err)
+	}
+	return marshalResult(StoreResponse{Key: key})
 }
 
 func (h handler) list(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
@@ -247,9 +294,7 @@ func (h handler) search(ctx context.Context, call sys.Syscall) (sys.SyscallResul
 
 // grepValue scans the value line by line, returning up to a bounded number of
 // matches — each with its 1-based line number and any requested surrounding
-// context — and whether a cap cut the scan short. A JSON string value is
-// searched as its decoded text (so real newlines are line breaks); any other
-// value is searched as its stored JSON bytes.
+// context — and whether a cap cut the scan short. The lines are valueText's.
 func grepValue(value json.RawMessage, re *regexp.Regexp, contextLines, maxMatches int) ([]Match, bool) {
 	contextLines = clampInt(contextLines, 0, searchMaxContextLines)
 	if maxMatches <= 0 {
@@ -286,12 +331,61 @@ func grepValue(value json.RawMessage, re *regexp.Regexp, contextLines, maxMatche
 
 // valueText decodes a stored value to searchable text: a JSON string yields its
 // unescaped content (with real newlines); anything else yields its raw JSON.
+// valueText is the text search reads. A JSON string is its decoded text, so
+// real newlines are line breaks. Any other value is flattened to one
+// "path: value" line per field, in key order, and a string field gives one line
+// per line of it: a long text inside a saved result is searched line by line,
+// and each hit says which field it is in.
 func valueText(value json.RawMessage) string {
 	var text string
 	if json.Unmarshal(value, &text) == nil {
 		return text
 	}
-	return string(value)
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.UseNumber()
+	var decoded any
+	if decoder.Decode(&decoded) != nil {
+		return string(value)
+	}
+	var lines []string
+	flatten("", decoded, &lines)
+	return strings.Join(lines, "\n")
+}
+
+func flatten(path string, value any, lines *[]string) {
+	line := func(text string) {
+		if path != "" {
+			text = path + ": " + text
+		}
+		*lines = append(*lines, text)
+	}
+	switch v := value.(type) {
+	case map[string]any:
+		if len(v) == 0 {
+			line("{}")
+		}
+		for _, key := range slices.Sorted(maps.Keys(v)) {
+			field := key
+			if path != "" {
+				field = path + "." + key
+			}
+			flatten(field, v[key], lines)
+		}
+	case []any:
+		if len(v) == 0 {
+			line("[]")
+		}
+		for i, item := range v {
+			flatten(fmt.Sprintf("%s[%d]", path, i), item, lines)
+		}
+	case string:
+		for _, text := range strings.Split(v, "\n") {
+			line(text)
+		}
+	default:
+		raw, _ := json.Marshal(v)
+		line(string(raw))
+	}
 }
 
 func clampInt(v, lo, hi int) int {

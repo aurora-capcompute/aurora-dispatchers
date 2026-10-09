@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func memArgs(operation, fields string) string {
 func scratchOver(t *testing.T, store scratch.Store) sys.Dispatcher[string] {
 	t.Helper()
 	return capability.NewDispatcher[string](buildScratchTable(t,
-		`{"capabilities":[{"operation":"get"},{"operation":"put"},{"operation":"list"},{"operation":"search"}]}`, store))
+		`{"capabilities":[{"operation":"get"},{"operation":"put"},{"operation":"store"},{"operation":"list"},{"operation":"search"}]}`, store))
 }
 
 func dispatch(t *testing.T, h sys.Dispatcher[string], operation, fields string, auth sys.Authorization) sys.SyscallResult {
@@ -331,5 +332,64 @@ func TestMemorySearch(t *testing.T) {
 	bad := dispatch(t, h, "search", `{"key":"doc","pattern":"[unclosed"}`, sys.Authorization{})
 	if bad.Status() != sys.StatusFailed || bad.Errno() != sys.ErrnoInvalidArgs {
 		t.Fatalf("bad pattern = %#v", bad)
+	}
+}
+
+// store saves a value under a key made from its content: the same content gets
+// the same key, other content another key, and put cannot change a saved value.
+// Saving content again adds the second writer's taint to the value's labels.
+func TestStoreSavesUnderAnUnchangingKey(t *testing.T) {
+	store := scratch.NewMapStore()
+	h := scratchOver(t, store)
+	save := func(ctx context.Context, value string) string {
+		t.Helper()
+		r := dispatchCtx(t, ctx, h, "store", `{"value":`+value+`}`, sys.Authorization{})
+		if r.Status() != sys.StatusResult {
+			t.Fatalf("store = %#v", r)
+		}
+		var saved scratch.StoreResponse
+		if err := json.Unmarshal(r.Result(), &saved); err != nil {
+			t.Fatalf("decode store: %v", err)
+		}
+		return saved.Key
+	}
+
+	key := save(capability.WithTaint(context.Background(), []string{"untrusted_web"}), `{"body": "page", "status": 200}`)
+	if !strings.HasPrefix(key, "io/") || len(key) != len("io/")+16 {
+		t.Fatalf("key = %q, want io/ and 16 hex digits", key)
+	}
+	if again := save(capability.WithTaint(context.Background(), []string{"onyx_data"}), `{"body":"page","status":200}`); again != key {
+		t.Fatalf("same content saved under %q and %q", key, again)
+	}
+	if other := save(context.Background(), `{"body":"other page","status":200}`); other == key {
+		t.Fatalf("other content got the same key %q", key)
+	}
+
+	if r := dispatch(t, h, "put", `{"key":"`+key+`","value":"changed"}`, sys.Authorization{}); r.Errno() != sys.ErrnoInvalidArgs {
+		t.Fatalf("put over a saved value = %#v, want invalid_args", r)
+	}
+	value, labels, found, err := store.Get(context.Background(), key)
+	if err != nil || !found || string(value) != `{"body":"page","status":200}` {
+		t.Fatalf("saved value = %s, %v, %v", value, found, err)
+	}
+	if !slices.Contains(labels, "untrusted_web") || !slices.Contains(labels, "onyx_data") {
+		t.Fatalf("labels = %v, want both writers' taint", labels)
+	}
+}
+
+// A value that is not a string is searched as one "path: value" line per field,
+// and a long string field as its lines, so a hit inside a saved result names
+// its field.
+func TestSearchReadsAnObjectByField(t *testing.T) {
+	h := scratchOver(t, scratch.NewMapStore())
+	dispatch(t, h, "put", `{"key":"result","value":{"url":"https://example.com","body":"first line\nTHE MARKER line\nlast line","status":200}}`, sys.Authorization{})
+
+	r := dispatch(t, h, "search", `{"key":"result","pattern":"MARKER"}`, sys.Authorization{})
+	var sr scratch.SearchResponse
+	if err := json.Unmarshal(r.Result(), &sr); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if len(sr.Matches) != 1 || sr.Matches[0].Text != "body: THE MARKER line" || sr.Matches[0].Line != 2 {
+		t.Fatalf("search = %+v, want the body line that holds the marker", sr)
 	}
 }

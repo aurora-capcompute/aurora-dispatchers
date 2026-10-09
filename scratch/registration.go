@@ -24,7 +24,7 @@ type scratchConfig struct {
 	Capabilities json.RawMessage `json:"capabilities,omitempty"`
 }
 
-// Registration provides core.scratch: a durable KV (get/put/list/search) that
+// Registration provides core.scratch: a durable KV (get/put/store/list/search) that
 // the processes of one session share. A process can leave data for the next
 // one — a large fetched page offloaded out of the model's context, notes, an
 // auxiliary output — even when the next one sees no session history. The host
@@ -93,7 +93,7 @@ func (r Registration) Configure(_ context.Context, raw json.RawMessage, _ regist
 
 // parseConfig validates and canonicalizes a core.scratch grant — the
 // single parse the door check and the build share. It rejects unknown fields,
-// requires at least one known operation (get/put/list/search) with no
+// requires at least one known operation (get/put/store/list/search) with no
 // duplicates, and normalizes each operation's flow policy.
 func parseConfig(raw json.RawMessage) (scratchConfig, []registry.OperationGrant, error) {
 	var config scratchConfig
@@ -128,6 +128,11 @@ var operations = map[string]struct {
 		description: "put: write one key, replacing any value it held",
 		serve:       handler.put,
 	},
+	"store": {
+		schema:      json.RawMessage(`{"type":"object","properties":{"value":{}},"required":["value"],"additionalProperties":false}`),
+		description: "store: save a value under a key made from its content (io/...); a saved value never changes",
+		serve:       handler.store,
+	},
 	"list": {
 		schema:      json.RawMessage(`{"type":"object","properties":{"prefix":{"type":"string"}},"additionalProperties":false}`),
 		description: "list: list keys under a prefix",
@@ -135,7 +140,7 @@ var operations = map[string]struct {
 	},
 	"search": {
 		schema:      json.RawMessage(`{"type":"object","properties":{"key":{"type":"string","minLength":1},"pattern":{"type":"string","minLength":1},"ignore_case":{"type":"boolean"},"context":{"type":"integer","minimum":0,"maximum":5},"max_matches":{"type":"integer","minimum":1,"maximum":100}},"required":["key","pattern"],"additionalProperties":false}`),
-		description: "search: grep a stored value with an RE2 regex — returns matching lines with line numbers (and optional surrounding context), bounded, so a large value is queried without reading it whole",
+		description: "search: grep a stored value with an RE2 regex — returns matching lines with line numbers (and optional surrounding context), bounded, so a large value is queried without reading it whole. A value that is not a string is searched as one \"path: value\" line per field, and a long string field as its lines",
 		serve:       handler.search,
 	},
 }
@@ -143,7 +148,7 @@ var operations = map[string]struct {
 // isSink is true for the operations that write. Only a write is a sink —
 // a read is a source — so the grant's forbid set and its approval gate apply to
 // those alone.
-func isSink(operation string) bool { return operation == "put" }
+func isSink(operation string) bool { return operation == "put" || operation == "store" }
 
 // sinkTaints is a grant's forbid set, applied only where it means something.
 func sinkTaints(operation string, taints []string) []string {
