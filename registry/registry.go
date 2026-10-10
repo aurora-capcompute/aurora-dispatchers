@@ -5,7 +5,7 @@
 // Each driver's registration lives with its driver — internet.Registration,
 // command.Registration, and so on — and depends on this package, never the
 // reverse. What is here is only what every one of them shares: the assembler,
-// the grant vocabulary (adt.go) and secret resolution (secret.go).
+// the grant vocabulary (grants.go) and secret resolution (secret.go).
 package registry
 
 import (
