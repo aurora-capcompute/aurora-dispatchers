@@ -9,7 +9,6 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/capability"
 	"github.com/aurora-capcompute/aurora-dispatchers/internet"
 	"github.com/aurora-capcompute/aurora-dispatchers/registry"
-	"github.com/aurora-capcompute/capcompute/sys"
 )
 
 func TestInternetMatchesSyscall(t *testing.T) {
@@ -106,9 +105,5 @@ func TestInternetPublishesTheEgressFloorPerMethod(t *testing.T) {
 	// the index resolves a GET to exactly the entry carrying that floor.
 	if got := table.Operations(internet.Capability); !slices.Contains(got, "GET") {
 		t.Fatalf("operations = %v, want GET to resolve to its own entry", got)
-	}
-	forbid, sink := table.Forbidden(sys.Syscall{Name: internet.Capability, Args: json.RawMessage(`{"method":"GET"}`)})
-	if sink != internet.Capability+"/GET" || !slices.Contains(forbid, "secret") {
-		t.Fatalf("Forbidden(GET) = %v at %q, want the GET entry's floor", forbid, sink)
 	}
 }

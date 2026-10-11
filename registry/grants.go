@@ -19,11 +19,11 @@ func UnionLabels(a, b []string) []string {
 // default, unioned on top of a manifest's declared per-operation taints. It
 // makes the flow policy fail CLOSED on omission: labeling a SOURCE with the
 // reserved class once — e.g. a filesystem read over a secrets dir,
-// {"operation":"read","labels":["secret"]} — guarantees that data cannot flow to
-// any network egress (internet of any method, http templates, the LLM provider)
-// even when a sink's own "taints" list forgets it. Lift it only through the
-// governed sys.declassify. A manifest that never uses the reserved label is
-// unaffected (the floor is inert unless something is labeled with it).
+// {"operation":"read","labels":["secret"]} — guarantees that data reaches no
+// network egress (internet of any method, http templates, the LLM provider)
+// without a human's approval of the call, even when a sink's own "taints" list
+// forgets it. A manifest that never uses the reserved label is unaffected (the
+// floor is inert unless something is labeled with it).
 var EgressForbidFloor = []string{"secret"}
 
 // WithEgressFloor unions the egress forbid floor onto an operation's declared

@@ -83,7 +83,7 @@ func TestListCarriesValueLabels(t *testing.T) {
 	store := scratch.NewMapStore()
 	h := scratchOver(t, store)
 
-	tainted := capability.WithTaint(context.Background(), []string{"untrusted_web"})
+	tainted := capability.WithTaint(context.Background(), capability.Taint{"untrusted_web": {"core.internet"}})
 	if r := dispatchCtx(t, tainted, h, "put", `{"key":"notes/x","value":"v"}`, sys.Authorization{}); r.Status() != sys.StatusResult {
 		t.Fatalf("put = %v", r.Status())
 	}
@@ -189,58 +189,42 @@ func TestMemoryReadReplaysJournaledValue(t *testing.T) {
 	}
 }
 
-// routedChain is the production stack over one run: flow monitor above,
-// labeler below, routing between the memory handler and scripted leaf tools.
-type routedChain struct {
-	handler sys.Dispatcher[string]
-}
-
-func (d routedChain) Dispatch(ctx context.Context, _ string, call sys.Syscall, auth sys.Authorization) (sys.SyscallResult, error) {
-	if call.Name == scratch.Capability {
-		return d.handler.Dispatch(ctx, "", call, auth)
-	}
-	return sys.Result(json.RawMessage(`{"from":"` + call.Name + `"}`)), nil
-}
-
-// memTable is the grant index the flow layer reads its policy from: a web
-// source, a protected sink, and the memory handler under test.
-func memTable() *capability.Table {
+// memTable is the grant index of one run: a web source, a protected sink, and
+// the memory handler under test. The flow layer reads its policy, and the
+// routing dispatcher beneath resolves through it, as in production.
+func memTable(memory sys.Dispatcher[string]) *capability.Table {
 	table := capability.NewTable()
-	add := func(name string, labels, forbid []string) {
+	add := func(name string, labels, forbid []string, handler capability.Handler) {
 		family := capability.Family{Entries: []capability.Entry{{
 			Key:     capability.Key{Syscall: name},
 			Labels:  labels,
 			Forbid:  forbid,
-			Handler: nopHandler{},
+			Handler: handler,
 		}}}
 		if err := table.Add(family); err != nil {
 			panic(err)
 		}
 	}
-	add("net.http", []string{"untrusted_web"}, nil)
-	add("k8s.delete", nil, []string{"untrusted_web"})
-	add(scratch.Capability, nil, nil)
+	echo := capability.HandlerFunc(func(_ context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+		return sys.Result(json.RawMessage(`{"from":"` + call.Name + `"}`)), nil
+	})
+	add("net.http", []string{"untrusted_web"}, nil, echo)
+	add("k8s.delete", nil, []string{"untrusted_web"}, echo)
+	add(scratch.Capability, nil, nil, capability.HandlerFunc(func(ctx context.Context, call sys.Syscall) (sys.SyscallResult, error) {
+		return memory.Dispatch(ctx, "", call, sys.Authorization{})
+	}))
 	return table
-}
-
-// nopHandler stands in where the table is used only for its policy — the test
-// chain does its own routing.
-type nopHandler struct{}
-
-func (nopHandler) DispatchCall(context.Context, sys.Syscall) (sys.SyscallResult, error) {
-	return sys.Result(nil), nil
 }
 
 // Memory poisoning surfaces instead of laundering: a value written by a run
 // that observed untrusted data resurfaces in a *later process* as untrusted,
-// and the flow policy blocks it from reaching a protected capability there.
+// and a protected capability there waits for a human's approval.
 func TestMemoryPoisoningSurfacesAcrossProcesses(t *testing.T) {
 	store := scratch.NewMapStore()
-	handler := scratchOver(t, store)
-	table := memTable()
+	table := memTable(scratchOver(t, store))
 	run := func() sys.Dispatcher[string] {
 		flow := monitor.NewFlow(monitor.NewTaints[string](), table)
-		return flow.Guard(flow.Stamp(routedChain{handler}))
+		return flow.Track(flow.Stamp(capability.NewDispatcher[string](table)))
 	}
 	dispatchRun := func(t *testing.T, monitor sys.Dispatcher[string], pid, name, args string) sys.SyscallResult {
 		t.Helper()
@@ -276,8 +260,8 @@ func TestMemoryPoisoningSurfacesAcrossProcesses(t *testing.T) {
 	if !found {
 		t.Fatalf("stored provenance laundered: labels = %v", got.Labels())
 	}
-	if result := dispatchRun(t, reader, "run-r", "k8s.delete", ""); result.Errno() != sys.ErrnoDenied {
-		t.Fatalf("poisoned reader reached the protected capability: %#v", result)
+	if result := dispatchRun(t, reader, "run-r", "k8s.delete", ""); result.Status() != sys.StatusYield {
+		t.Fatalf("poisoned reader reached the protected capability without approval: %#v", result)
 	}
 }
 
@@ -354,11 +338,11 @@ func TestStoreSavesUnderAnUnchangingKey(t *testing.T) {
 		return saved.Key
 	}
 
-	key := save(capability.WithTaint(context.Background(), []string{"untrusted_web"}), `{"body": "page", "status": 200}`)
+	key := save(capability.WithTaint(context.Background(), capability.Taint{"untrusted_web": {"core.internet"}}), `{"body": "page", "status": 200}`)
 	if !strings.HasPrefix(key, "io/") || len(key) != len("io/")+16 {
 		t.Fatalf("key = %q, want io/ and 16 hex digits", key)
 	}
-	if again := save(capability.WithTaint(context.Background(), []string{"onyx_data"}), `{"body":"page","status":200}`); again != key {
+	if again := save(capability.WithTaint(context.Background(), capability.Taint{"onyx_data": {"core.httpTemplate"}}), `{"body":"page","status":200}`); again != key {
 		t.Fatalf("same content saved under %q and %q", key, again)
 	}
 	if other := save(context.Background(), `{"body":"other page","status":200}`); other == key {

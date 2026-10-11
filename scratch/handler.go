@@ -148,7 +148,7 @@ func (h handler) put(ctx context.Context, call sys.Syscall) (sys.SyscallResult, 
 	// The written value derives from anything the process has observed (the guest
 	// is opaque), so it is stored with the process's taint, handed down by the
 	// flow monitor.
-	if err := h.Store.Put(ctx, request.Key, request.Value, capability.Taint(ctx)); err != nil {
+	if err := h.Store.Put(ctx, request.Key, request.Value, capability.TaintFrom(ctx).Labels()); err != nil {
 		return storeFailure(ctx, err)
 	}
 	return marshalResult(PutResponse{Key: request.Key})
@@ -172,7 +172,7 @@ func (h handler) store(ctx context.Context, call sys.Syscall) (sys.SyscallResult
 	if err != nil {
 		return storeFailure(ctx, err)
 	}
-	if err := h.Store.Put(ctx, key, value.Bytes(), registry.UnionLabels(saved, capability.Taint(ctx))); err != nil {
+	if err := h.Store.Put(ctx, key, value.Bytes(), registry.UnionLabels(saved, capability.TaintFrom(ctx).Labels())); err != nil {
 		return storeFailure(ctx, err)
 	}
 	return marshalResult(StoreResponse{Key: key})
