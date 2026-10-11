@@ -104,8 +104,10 @@ reads no environment variables.
   enum}`.
 - **command:** `capabilities[]{operation, description, path, dir, args, env,
   params, timeout_ms, max_output_bytes, require_approval, labels, taints}`. A
-  `params` value is a list (a closed set) or a string (a pattern that the
-  driver anchors). An `env` value is a string or `{"secret":"NAME"}`.
+  `params` value is a list (a closed set), a string (a pattern that the
+  driver anchors), or `{"pattern": ..., "exclude": ...}` (a pattern minus the
+  values that `exclude` matches, for example any resource but `secrets`). An
+  `env` value is a string or `{"secret":"NAME"}`.
 - **scratch:** `capabilities[]{operation, require_approval, labels, taints}`. The
   host binds the store to the session. A grant cannot name another session.
 - **openaillm:** `capabilities[]{operation, require_approval, labels, taints}`,

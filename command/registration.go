@@ -45,39 +45,62 @@ type CommandRule struct {
 	registry.FlowPolicy
 }
 
-// CommandParam declares one slot: a closed set of values, or a pattern. Prefer
-// the set wherever the choices can be enumerated — a context, an environment, a
-// cluster. It states the policy exactly, it cannot over-match, and it reaches
-// the guest as a JSON Schema enum, so the kernel Validator refuses a bad value
-// before the driver runs and the model can see which values exist.
+// CommandParam declares one slot in one of three forms:
+//
+//	["a", "b"]                            a closed set of values
+//	"[a-z]+"                              a pattern
+//	{"pattern": "[a-z]+", "exclude": "x"} a pattern, minus the values exclude matches
+//
+// Prefer the set wherever the choices can be enumerated — a context, an
+// environment, a cluster. It states the policy exactly, it cannot over-match,
+// and it reaches the guest as a JSON Schema enum, so the kernel Validator
+// refuses a bad value before the driver runs and the model can see which values
+// exist. Use exclude when the choices are open but a few are not allowed: any
+// Kubernetes resource but secrets.
 type CommandParam struct {
 	oneOf   []string
 	pattern string
+	exclude string
 }
 
+const paramShape = `a parameter must be a list of values, a pattern string, or {"pattern": ..., "exclude": ...}`
+
 func (p *CommandParam) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
-		return fmt.Errorf(`a parameter must be a list of values or a pattern string`)
-	}
-	if data[0] == '[' {
+	switch data[0] {
+	case '[':
 		var values []string
 		if err := json.Unmarshal(data, &values); err != nil {
 			return fmt.Errorf("parameter value list: %w", err)
 		}
 		*p = CommandParam{oneOf: values}
 		return nil
+	case '{':
+		var spec struct {
+			Pattern string `json:"pattern"`
+			Exclude string `json:"exclude"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&spec); err != nil {
+			return fmt.Errorf("%s: %w", paramShape, err)
+		}
+		*p = CommandParam{pattern: spec.Pattern, exclude: spec.Exclude}
+		return nil
 	}
 	var expr string
 	if err := json.Unmarshal(data, &expr); err != nil {
-		return fmt.Errorf(`a parameter must be a list of values or a pattern string: %w`, err)
+		return fmt.Errorf("%s: %w", paramShape, err)
 	}
 	*p = CommandParam{pattern: expr}
 	return nil
 }
 
 func (p CommandParam) MarshalJSON() ([]byte, error) {
-	if len(p.oneOf) > 0 {
+	switch {
+	case len(p.oneOf) > 0:
 		return json.Marshal(p.oneOf)
+	case p.exclude != "":
+		return json.Marshal(map[string]string{"pattern": p.pattern, "exclude": p.exclude})
 	}
 	return json.Marshal(p.pattern)
 }
@@ -238,7 +261,17 @@ func (p CommandParam) compile(name string) (Param, error) {
 	if compiled.MatchString("") {
 		return Param{}, fmt.Errorf("parameter %q pattern %s admits the empty string; enumerate \"\" if an empty argument is intended", name, p.pattern)
 	}
-	return Param{Pattern: compiled, Source: p.pattern}, nil
+	param := Param{Pattern: compiled, Source: p.pattern}
+	if p.exclude != "" {
+		// Anchored like the pattern: "secrets" refuses the value secrets, not
+		// every value that contains it.
+		excluded, err := regexp.Compile(`\A(?:` + p.exclude + `)\z`)
+		if err != nil {
+			return Param{}, fmt.Errorf("parameter %q exclude: %w", name, err)
+		}
+		param.Exclude, param.ExcludeSource = excluded, p.exclude
+	}
+	return param, nil
 }
 
 // parseCommandConfig validates and canonicalizes a core.command grant's config.
@@ -340,7 +373,9 @@ func normalizeCommandRule(rule CommandRule) (CommandRule, error) {
 func commandParamsSchema(c Command) json.RawMessage {
 	names := c.ParamNames()
 	if len(names) == 0 {
-		return nil
+		// A command without slots takes no values, but an empty params object
+		// is a natural way to say so.
+		return json.RawMessage(`{"type":"object","properties":{"params":{"type":"object","maxProperties":0}},"additionalProperties":false}`)
 	}
 	properties := make(map[string]json.RawMessage, len(names))
 	for _, name := range names {
@@ -358,8 +393,12 @@ func paramSchema(param Param) json.RawMessage {
 		values, _ := json.Marshal(param.OneOf)
 		return json.RawMessage(fmt.Sprintf(`{"enum":%s}`, values))
 	}
-	pattern, _ := json.Marshal(`\A(?:` + param.Source + `)\z`)
-	return json.RawMessage(fmt.Sprintf(`{"type":"string","pattern":%s}`, pattern))
+	schema := map[string]any{"type": "string", "pattern": `\A(?:` + param.Source + `)\z`}
+	if param.Exclude != nil {
+		schema["not"] = map[string]any{"pattern": `\A(?:` + param.ExcludeSource + `)\z`}
+	}
+	raw, _ := json.Marshal(schema)
+	return raw
 }
 
 // commandDescription composes the published tool doc: what may be run, and for
@@ -379,6 +418,9 @@ func commandDescription(commands []Command) string {
 				continue
 			}
 			fmt.Fprintf(&b, "\n    %s: matching %s", name, param.Source)
+			if param.Exclude != nil {
+				fmt.Fprintf(&b, ", except %s", param.ExcludeSource)
+			}
 		}
 		if c.RequireApproval {
 			b.WriteString("\n    (requires human approval)")

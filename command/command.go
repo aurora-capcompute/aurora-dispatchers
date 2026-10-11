@@ -94,6 +94,10 @@ type Param struct {
 	Pattern *regexp.Regexp
 	// Source is the pattern as the author wrote it, for the published schema.
 	Source string
+	// Exclude, beside a pattern, refuses values the pattern admits. It is
+	// anchored like the pattern. ExcludeSource is the author's text.
+	Exclude       *regexp.Regexp
+	ExcludeSource string
 }
 
 // validate checks one guest-supplied value against the slot.
@@ -129,6 +133,9 @@ func (p Param) validate(name, value string) error {
 	}
 	if p.Pattern != nil && !p.Pattern.MatchString(value) {
 		return fmt.Errorf("parameter %q does not match %s", name, p.Source)
+	}
+	if p.Exclude != nil && p.Exclude.MatchString(value) {
+		return fmt.Errorf("parameter %q may not match %s", name, p.ExcludeSource)
 	}
 	return nil
 }
